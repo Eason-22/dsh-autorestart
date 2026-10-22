@@ -1,0 +1,33 @@
+# dsh-autorestart bundle layer.
+# Every key below is a documented default; override any of them in the profile's
+# cordis.patch.yml with an `- id: dsh-autorestart` entry that repeats the full config.
+- insert:
+    - id: dsh-autorestart
+      name: dsh-autorestart
+      config:
+        enabled: true
+        # Empty = <DSH_HOME>/storages/dsh-autorestart/state.json
+        stateFile: ''
+        resumeOnBoot: true
+        recoveryDelayMs: 6000
+        maxSessions: 4
+        maxResumeAttempts: 2
+        deferPollMs: 3000
+        deferSoftMs: 300000
+        deferHardMs: 900000
+        deferPolicy: auto
+        # hard deadline only forces a restart over a running conversation when this is
+        # enabled; by default it keeps waiting for the other conversations to finish
+        forceRestartWhenBusy: false
+        # app = relaunch the DeepSeek Harness desktop app; command = run restartCommand
+        restartMode: app
+        restartCommand: ''
+        relaunchDelaySeconds: 2
+        # quiet window (ms) after the last conversation activity before a restart may fire
+        settleMs: 2000
+        # dsh web: reload the page when the host boot token changes
+        autoReloadPage: true
+        # hard-block shell commands that would kill/relaunch DSH by hand
+        blockManualRestart: true
+        healthPath: /__dsh_autorestart/health
+        continuationText: ''

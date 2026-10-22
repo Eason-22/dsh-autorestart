@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Autorestart — 重启续接",
+    "description": "让 Agent 的工作跨 DSH 重启不中断：持久检查点、启动时重新武装目标或注入续接消息，以及 Agent 可自行请求的“空闲即重启”。"
+  }
+}

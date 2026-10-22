@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Autorestart — restart continuation",
+    "description": "Keeps agent work alive across a DeepSeek Harness restart: a durable checkpoint, goal re-arm or a continuation message on boot, and an idle-aware graceful restart the agent can request itself."
+  }
+}

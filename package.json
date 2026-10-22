@@ -1,0 +1,54 @@
+{
+  "name": "dsh-autorestart",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Cross-restart continuation for DeepSeek Harness: request an idle-aware graceful restart and automatically resume interrupted agent sessions once the host is back.",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "restart",
+    "continuation",
+    "session-resume",
+    "graceful-restart"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Eason-22/dsh-autorestart.git"
+  },
+  "homepage": "https://github.com/Eason-22/dsh-autorestart#readme",
+  "bugs": {
+    "url": "https://github.com/Eason-22/dsh-autorestart/issues"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib/**/*.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.1-rc.2": "compatible"
+      }
+    }
+  }
+}

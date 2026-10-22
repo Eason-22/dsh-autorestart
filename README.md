@@ -10,6 +10,14 @@
 - 界面上能看到状态：输入框工具行左侧的"待重启 · 被 N 个会话占用"小胶囊、左侧栏会话标题旁的圆点；快重启时圆点呼吸，点胶囊看详情；
 - 可配置：静默窗口（默认 2 秒）、杀进程前等待（默认 2 秒）、忙碌时是否允许强制重启等。
 
+场景对照：
+
+| 场景 | 没有它 | 有它 |
+| --- | --- | --- |
+| Agent 正在跑长任务，DSH 被重启/崩溃 | 这一轮丢失，必须人工催"继续" | 新进程启动后自动 resume 该会话并注入续接提示，继续干活 |
+| Agent 有一个持久 goal（`create_goal`）跨重启 | goal 的 activation 是进程内的，重启后变回 `disarmed`，自动续跑停止 | 启动时重新 `goals.resume()`，goal round driver 立刻开始下一轮 |
+| Agent 想装/升级插件但"重启必打断" | 只能等或赌 | 调 `continuum_restart`：等所有 agent idle（当前这一轮跑完）再重启，回来自己接着做 |
+
 ## 适合谁 / 不适合谁
 
 适合：经常因为装插件、升级、应用崩溃而丢掉正在进行的长任务，希望重启后自动接续的人。
@@ -28,14 +36,6 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 > 不依赖 systemd，使用 WMI/schtasks 脱离将要被销毁的 Electron 进程树来重启应用。
 
 ---
-
-## 它解决什么
-
-| 场景 | 没有它 | 有它 |
-| --- | --- | --- |
-| Agent 正在跑长任务，DSH 被重启/崩溃 | 这一轮丢失，必须人工催"继续" | 新进程启动后自动 resume 该会话并注入续接提示，继续干活 |
-| Agent 有一个持久 goal（`create_goal`）跨重启 | goal 的 activation 是进程内的，重启后变回 `disarmed`，自动续跑停止 | 启动时重新 `goals.resume()`，goal round driver 立刻开始下一轮 |
-| Agent 想装/升级插件但"重启必打断" | 只能等或赌 | 调 `continuum_restart`：等所有 agent idle（当前这一轮跑完）再重启，回来自己接着做 |
 
 ## 工作方式
 
@@ -336,7 +336,7 @@ or by requesting the health path with ?gate=1.
 
 ```powershell
 # 1. 打包
-npm pack                 # -> dsh-autorestart-0.2.0.tgz
+npm pack                 # -> dsh-autorestart-0.2.1.tgz
 # 2. 发布到 registry
 npm publish
 # 3. 从市场安装

@@ -256,6 +256,7 @@ test('requestRestart bumps generation, defers, and marks bySessionId pending', (
     requesters: [
       { sessionId: 's1', requestedAt: T + 50, reason: 'user asked for restart', resume: true },
     ],
+    parkGoals: true,
   });
   assert.equal(state.sessions.s1.running, false);
   assert.equal(state.sessions.s1.pendingResume, true);
@@ -307,6 +308,8 @@ test('setGoal, setPhase, clearSession and entryFor behave', () => {
     'goal',
     'interrupted',
     'interruptedAt',
+    'lastRecoveryAction',
+    'lastRecoveryDetail',
     'lastResumeAt',
     'lastResumeError',
     'pendingResume',

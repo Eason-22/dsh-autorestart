@@ -16,7 +16,7 @@ import test from 'node:test'
 
 import { apply, detectManualRestart, normalizeConfig, resolveStateFile } from '../index.js'
 import { DEFAULTS } from '../index.js'
-import { writeState, createEmptyState, entryFor, markPendingResume, markRunning, requestRestart, setGoal } from '../lib/checkpoint.js'
+import { writeState, createEmptyState, entryFor, markPendingResume, markRunning, requestRestart, setDisarmedGoal, setGoal, setParkedGoal } from '../lib/checkpoint.js'
 
 /** Create a temporary state-file path per test. */
 function tempStateFile(label) {
@@ -334,12 +334,19 @@ test('completion of a second boot does not re-run recovery in the same process',
   assert.equal(reloaded.bootPid, pid)
 })
 
-test('three lifecycle tools register with registry-acceptable definitions', () => {
+test('six lifecycle tools register with registry-acceptable definitions', () => {
   const { file } = tempStateFile('tools')
   const fake = createFakeContext()
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
   const names = fake.tools.map((tool) => tool.name).sort()
-  assert.deepEqual(names, ['continuum_cancel_restart', 'continuum_restart', 'continuum_status'])
+  assert.deepEqual(names, [
+    'continuum_cancel_restart',
+    'continuum_handoff',
+    'continuum_park_goal',
+    'continuum_recover_now',
+    'continuum_restart',
+    'continuum_status',
+  ])
   for (const tool of fake.tools) {
     assert.equal(typeof tool.description, 'string')
     assert.ok(tool.description.length > 20, `${tool.name} needs a real description`)
@@ -461,9 +468,11 @@ test('the served index gets a boot-token heartbeat for dsh web pages', () => {
     },
   })
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
-  assert.equal(routes.length, 1)
+  assert.equal(routes.length, 4)
   assert.equal(routes[0].kind, 'exact')
   assert.equal(routes[0].path, '/__dsh_autorestart/health')
+  assert.equal(routes[1].kind, 'exact')
+  assert.equal(routes[1].path, '/__dsh_autorestart/park')
   assert.equal(taps.length, 1)
   const html = taps[0]('<html><head></head><body>app</body></html>')
   assert.match(html, /data-dsh-autorestart-heartbeat/)
@@ -493,7 +502,7 @@ test('autoReloadPage: false suppresses the heartbeat but keeps the health route'
     },
   })
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, autoReloadPage: false })
-  assert.equal(routes.length, 1)
+  assert.equal(routes.length, 4)
   assert.equal(taps.length, 0)
 })
 
@@ -658,7 +667,7 @@ test('the ?gate=1 probe refuses a restart while a conversation has queued inbox 
   agent.inbox = { nextTurn: [{ id: 'm1' }], nextStep: [] };
   const { fake, routes } = contextWithRoutes({ runningAgents: [agent] });
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
-  assert.equal(routes.length, 1, 'the health route must be registered');
+  assert.equal(routes.length, 4, 'the health route must be registered');
   const res = fakeResponse();
   routes[0].handler({ url: '/__dsh_autorestart/health?gate=1', socket: { remoteAddress: '127.0.0.1' } }, res);
   assert.equal(res.statusCode, 200);
@@ -698,15 +707,15 @@ test('the ?gate=1 probe allows the restart once every conversation is idle and q
 test('the ?state=1 probe reports the pending-restart state a UI banner needs', () => {
   const { file } = tempStateFile('state-pending');
   seedPreviousBoot(file, (state) => {
-    // Two sessions asked for the (coalesced) restart …
+    // Two sessions asked for the (coalesced) restart ...
     requestRestart(state, { reason: 'first', bySessionId: 'sess-state-a', now: Date.now() });
     requestRestart(state, { reason: 'second', bySessionId: 'sess-state-b', now: Date.now() });
-    // … and a third session is only waiting to be resumed.
+    // ... and a third session is only waiting to be resumed.
     markPendingResume(state, { sessionId: 'sess-state-c', reason: 'interrupted', now: Date.now() });
   });
   const { fake, routes } = contextWithRoutes();
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
-  assert.equal(routes.length, 1, 'the health route must be registered');
+  assert.equal(routes.length, 4, 'the health route must be registered');
   const res = fakeResponse();
   routes[0].handler({ url: '/__dsh_autorestart/health?state=1', socket: { remoteAddress: '127.0.0.1' } }, res);
   assert.equal(res.statusCode, 200);
@@ -747,4 +756,641 @@ test('continuum_status reports the restart gate verdict', () => {
   assert.equal(schema.gateAllow.type, 'boolean');
   assert.equal(schema.quietForMs.type, 'number');
   assert.equal(schema.blockedBy.type, 'array');
+});
+
+/**
+ * A fake goals service: one live goal per session, with the DISARM/resume
+ * transitions of the real host. `disarm` removes the process-local continuation
+ * authority without touching the durable phase or revision; `pause` is still
+ * recorded so every test can prove the plugin never pauses a goal any more.
+ */
+function fakeGoalsService(goalsBySession, calls = { pause: [], resume: [], disarm: [] }) {
+  const view = (agent) => goalsBySession[String(agent && agent.id)];
+  return {
+    get: (agent) => view(agent),
+    disarm: (agent) => {
+      if (calls.disarm) calls.disarm.push({ sessionId: String(agent && agent.id) });
+      const goal = view(agent);
+      if (!goal) throw new Error('no goal for this session');
+      if (goal.disarmError) throw new Error(goal.disarmError);
+      // Disarming leaves the durable phase AND the revision untouched.
+      goal.activation = 'disarmed';
+      return goal;
+    },
+    pause: (agent, ref) => {
+      calls.pause.push({ sessionId: String(agent && agent.id), ref });
+      const goal = view(agent);
+      if (!goal) throw new Error('no goal for this session');
+      goal.phase = 'paused';
+      goal.activation = 'disarmed';
+      goal.revision += 1;
+      return goal;
+    },
+    resume: (agent, ref) => {
+      calls.resume.push({ sessionId: String(agent && agent.id), ref });
+      const goal = view(agent);
+      if (!goal) throw new Error('no goal for this session');
+      if (goal.resumeError) throw new Error(goal.resumeError);
+      goal.phase = 'active';
+      goal.activation = 'armed';
+      goal.revision += 1;
+      return goal;
+    },
+  };
+}
+
+/** A POST request stand-in for the park route. */
+function postRequest(body, remoteAddress = '127.0.0.1') {
+  const payload = JSON.stringify(body);
+  const handlers = {};
+  return {
+    method: 'POST',
+    url: '/__dsh_autorestart/park',
+    socket: { remoteAddress },
+    on(event, handler) {
+      handlers[event] = handler;
+      if (event === 'data') {
+        setTimeout(() => {
+          handler(payload);
+          if (handlers.end) handlers.end();
+        }, 0);
+      }
+      return this;
+    },
+  };
+}
+
+test('the disarm step disarms an armed goal and never pauses a goal or cancels a turn', () => {
+  const { file } = tempStateFile('disarm-block');
+  const agent = fakeAgent('sess-goal');
+  agent.status = 'running';
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 3, phase: 'active', activation: 'armed', roundsStarted: 1, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake } = contextWithRoutes({ runningAgents: [agent] });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  // Cancelling a turn would lose the running round: the plugin must never do it.
+  const cancelled = [];
+  fake.ctx.agents.cancel = (...args) => cancelled.push(args);
+  fake.ctx.agents.interrupt = (...args) => cancelled.push(args);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+
+  const status = fake.tools.find((tool) => tool.name === 'continuum_status');
+  const before = status.execute({});
+  assert.equal(before.blockedBy.length, 1);
+  assert.equal(before.blockedBy[0].reason, 'goal-active', 'an armed goal is reported as the blocker');
+
+  const restart = fake.tools.find((tool) => tool.name === 'continuum_restart');
+  restart.execute({ reason: 'test' }, { agent });
+  const poll = fake.intervals[fake.intervals.length - 1];
+  assert.ok(poll, 'the defer poller must start');
+  poll.fn();
+
+  assert.equal(calls.disarm.length, 1, 'the armed goal is disarmed exactly once');
+  assert.equal(calls.pause.length, 0, 'a goal is never paused');
+  assert.equal(cancelled.length, 0, 'the running turn is never cancelled');
+  assert.equal(goals['sess-goal'].activation, 'disarmed');
+  assert.equal(goals['sess-goal'].phase, 'active', 'disarming keeps the durable goal active');
+  assert.equal(goals['sess-goal'].revision, 3, 'disarming does not bump the revision');
+
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.disarmedGoals['sess-goal'].goalId, 'goal-1');
+  assert.equal(state.disarmedGoals['sess-goal'].resumedAt, null);
+  assert.equal(state.parkedGoals, undefined, 'no legacy parked record is written');
+});
+
+test('a restart that turned parkGoals off disarms no goal', () => {
+  const { file } = tempStateFile('disarm-off');
+  const agent = fakeAgent('sess-goal');
+  agent.status = 'running';
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 3, phase: 'active', activation: 'armed', roundsStarted: 1, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake } = contextWithRoutes({ runningAgents: [agent] });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+
+  const restart = fake.tools.find((tool) => tool.name === 'continuum_restart');
+  const result = restart.execute({ reason: 'test', parkGoals: false }, { agent });
+  assert.equal(result.accepted, true);
+  fake.intervals[fake.intervals.length - 1].fn();
+  assert.equal(calls.disarm.length, 0, 'no goal is disarmed when parkGoals is false');
+  assert.equal(goals['sess-goal'].activation, 'armed');
+});
+
+test('a goal whose round budget is spent is reported instead of disarmed', () => {
+  const { file } = tempStateFile('disarm-exhausted');
+  const agent = fakeAgent('sess-goal');
+  agent.status = 'running';
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 3, phase: 'active', activation: 'armed', roundsStarted: 10, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake } = contextWithRoutes({ runningAgents: [agent] });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+
+  const restart = fake.tools.find((tool) => tool.name === 'continuum_restart');
+  restart.execute({ reason: 'test' }, { agent });
+  fake.intervals[fake.intervals.length - 1].fn();
+  assert.equal(calls.disarm.length, 0, 'an exhausted goal is never disarmed');
+  const status = fake.tools.find((tool) => tool.name === 'continuum_status');
+  const after = status.execute({});
+  assert.equal(after.blockedBy[0].reason, 'goal-exhausted');
+});
+
+test('a goal the user paused is not disarmed by the restart gate', () => {
+  const { file } = tempStateFile('disarm-user-paused');
+  const agent = fakeAgent('sess-goal');
+  agent.status = 'running';
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 3, phase: 'paused', activation: 'disarmed', roundsStarted: 1, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake } = contextWithRoutes({ runningAgents: [agent] });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+
+  const restart = fake.tools.find((tool) => tool.name === 'continuum_restart');
+  restart.execute({ reason: 'test' }, { agent });
+  fake.intervals[fake.intervals.length - 1].fn();
+  assert.equal(calls.disarm.length, 0, 'a goal somebody else paused stays untouched');
+  const status = fake.tools.find((tool) => tool.name === 'continuum_status');
+  assert.equal(status.execute({}).blockedBy[0].reason, 'goal-paused');
+});
+
+test('after a boot a goal this plugin disarmed is resumed', async () => {
+  const { file } = tempStateFile('disarm-resume');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-goal', reason: 'host restart' });
+    markRunning(state, { sessionId: 'sess-goal', reason: 'turn' });
+    setDisarmedGoal(state, 'sess-goal', { goalId: 'goal-1', disarmedAt: Date.now() - 1000 });
+  });
+  const agent = fakeAgent('sess-goal');
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 4, phase: 'active', activation: 'disarmed', roundsStarted: 2, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const fake = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => ({ agent }) } },
+  });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  assert.equal(calls.resume.length, 1, 'the disarmed goal is re-armed exactly once');
+  assert.equal(calls.pause.length, 0, 'recovery never pauses a goal');
+  assert.equal(goals['sess-goal'].activation, 'armed');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(state.disarmedGoals['sess-goal'].resumedAt > 0, 'the disarmed record is cleared by the resume');
+  assert.equal(state.sessions['sess-goal'].lastRecoveryAction, 'resume-disarmed-goal');
+  assert.equal(typeof state.sessions['sess-goal'].lastRecoveryDetail, 'string');
+});
+
+test('a goal the previous pause-based build parked is resumed after the boot', async () => {
+  const { file } = tempStateFile('legacy-parked-resume');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-goal', reason: 'host restart' });
+    markRunning(state, { sessionId: 'sess-goal', reason: 'turn' });
+    setParkedGoal(state, 'sess-goal', { goalId: 'goal-1', parkedAt: Date.now() - 1000 });
+  });
+  const agent = fakeAgent('sess-goal');
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 4, phase: 'paused', activation: 'disarmed', roundsStarted: 1, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const fake = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => ({ agent }) } },
+  });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  assert.equal(calls.resume.length, 1, 'the goal the previous build paused is resumed');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(state.parkedGoals['sess-goal'].resumedAt > 0, 'the legacy record is cleared by the resume');
+  assert.equal(state.sessions['sess-goal'].lastRecoveryAction, 'resume-paused-goal');
+});
+
+test('a goal the user paused is NOT resumed after a boot', async () => {
+  const { file } = tempStateFile('user-paused-not-resumed');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-goal', reason: 'host restart' });
+  });
+  const agent = fakeAgent('sess-goal');
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 4, phase: 'paused', activation: 'disarmed', roundsStarted: 1, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const fake = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => ({ agent }) } },
+  });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  assert.equal(calls.resume.length, 0, 'a goal the plugin did not pause stays paused');
+  assert.equal(agent.followups.length, 1, 'the session still gets the continuation message');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.sessions['sess-goal'].lastRecoveryAction, 'prompt-continuation');
+});
+
+test('a failed resume of a disarmed goal falls back to the continuation message', async () => {
+  const { file } = tempStateFile('disarm-resume-fail');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-goal', reason: 'host restart' });
+    markRunning(state, { sessionId: 'sess-goal', reason: 'turn' });
+    setDisarmedGoal(state, 'sess-goal', { goalId: 'goal-1', disarmedAt: Date.now() - 1000 });
+  });
+  const agent = fakeAgent('sess-goal');
+  const goals = {
+    'sess-goal': {
+      id: 'goal-1',
+      revision: 5,
+      phase: 'active',
+      activation: 'disarmed',
+      roundsStarted: 2,
+      maxGoalRounds: 10,
+      resumeError: 'stale revision',
+    },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const fake = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => ({ agent }) } },
+  });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  assert.equal(agent.followups.length, 1, 'the fallback continuation message is queued');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.disarmedGoals['sess-goal'].resumedAt, null, 'the disarmed record is kept for a later boot');
+  assert.match(state.sessions['sess-goal'].lastResumeError, /stale revision/);
+  assert.match(state.sessions['sess-goal'].lastRecoveryDetail, /stale revision/);
+});
+
+test('every early recovery return records an action and a detail', async () => {
+  // (1) The session has no live agent (the controller reports it as gone).
+  const gone = tempStateFile('early-agent-not-live');
+  seedPreviousBoot(gone.file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-early', reason: 'host restart' });
+  });
+  const notLive = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => ({ error: 'session is gone' }) } },
+  });
+  apply(notLive.ctx, { stateFile: gone.file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(notLive);
+  let state = JSON.parse(fs.readFileSync(gone.file, 'utf8'));
+  assert.equal(state.sessions['sess-early'].lastRecoveryAction, 'agent-not-live');
+  assert.match(state.sessions['sess-early'].lastRecoveryDetail, /gone/);
+
+  // (2) No session controller at all.
+  const noController = tempStateFile('early-no-controller');
+  seedPreviousBoot(noController.file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-early', reason: 'host restart' });
+  });
+  const bare = createFakeContext();
+  apply(bare.ctx, { stateFile: noController.file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(bare);
+  state = JSON.parse(fs.readFileSync(noController.file, 'utf8'));
+  assert.equal(state.sessions['sess-early'].lastRecoveryAction, 'session-controller-unavailable');
+  assert.equal(typeof state.sessions['sess-early'].lastRecoveryDetail, 'string');
+
+  // (3) The goal lookup throws: the session still gets the continuation message.
+  const lookup = tempStateFile('early-goal-lookup');
+  seedPreviousBoot(lookup.file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-early', reason: 'host restart' });
+  });
+  const agent = fakeAgent('sess-early');
+  const brokenGoals = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => ({ agent }) } },
+  });
+  brokenGoals.ctx.goals = {
+    get: () => {
+      throw new Error('goals service exploded');
+    },
+    resume: () => {
+      throw new Error('goals.resume must not be called');
+    },
+  };
+  apply(brokenGoals.ctx, { stateFile: lookup.file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(brokenGoals);
+  assert.equal(agent.followups.length, 1, 'a failed goal lookup still makes progress');
+  state = JSON.parse(fs.readFileSync(lookup.file, 'utf8'));
+  assert.equal(state.sessions['sess-early'].lastRecoveryAction, 'goal-lookup-failed');
+  assert.match(state.sessions['sess-early'].lastRecoveryDetail, /exploded/);
+
+  // (4) The continuation message itself is rejected.
+  const prompt = tempStateFile('early-prompt-failed');
+  seedPreviousBoot(prompt.file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-early', reason: 'host restart' });
+  });
+  const closed = fakeAgent('sess-early');
+  closed.followup = () => {
+    throw new Error('inbox closed');
+  };
+  const noPrompt = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => ({ agent: closed }) } },
+  });
+  apply(noPrompt.ctx, { stateFile: prompt.file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(noPrompt);
+  state = JSON.parse(fs.readFileSync(prompt.file, 'utf8'));
+  assert.equal(state.sessions['sess-early'].lastRecoveryAction, 'prompt-failed');
+  assert.match(state.sessions['sess-early'].lastRecoveryDetail, /inbox closed/);
+});
+
+test('continuum_recover_now retries a stuck recovery', async () => {
+  const { file } = tempStateFile('recover-now');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-goal', reason: 'host restart' });
+    markRunning(state, { sessionId: 'sess-goal', reason: 'turn' });
+    setDisarmedGoal(state, 'sess-goal', { goalId: 'goal-1', disarmedAt: Date.now() - 1000 });
+  });
+  const agent = fakeAgent('sess-goal');
+  let live = false;
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 4, phase: 'active', activation: 'disarmed', roundsStarted: 1, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const fake = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => (live ? { agent } : { error: 'not loaded yet' }) } },
+  });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+  let state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.sessions['sess-goal'].lastRecoveryAction, 'agent-not-live');
+  assert.equal(state.sessions['sess-goal'].pendingResume, true, 'the session stays recoverable');
+
+  live = true;
+  const tool = fake.tools.find((entry) => entry.name === 'continuum_recover_now');
+  assert.ok(tool, 'continuum_recover_now must be registered');
+  const out = await tool.execute({});
+  assert.equal(out.ok, true);
+  assert.equal(out.results.length, 1, 'the pending session is retried');
+  assert.equal(out.results[0].action, 'resume-disarmed-goal');
+  assert.equal(goals['sess-goal'].activation, 'armed');
+  state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.sessions['sess-goal'].lastRecoveryAction, 'resume-disarmed-goal');
+});
+
+test('continuum_recover_now reports a session that is not pending', async () => {
+  const { file } = tempStateFile('recover-now-idle');
+  const fake = createFakeContext();
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  const tool = fake.tools.find((entry) => entry.name === 'continuum_recover_now');
+  const out = await tool.execute({ sessionId: 'sess-missing' });
+  assert.equal(out.ok, true);
+  assert.equal(out.results[0].sessionId, 'sess-missing');
+  assert.equal(out.results[0].detail, 'no-pending-recovery');
+});
+
+test('the /recover route retries the recovery for a pending session', async () => {
+  const { file } = tempStateFile('recover-route');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-goal', reason: 'host restart' });
+    setDisarmedGoal(state, 'sess-goal', { goalId: 'goal-1', disarmedAt: Date.now() - 1000 });
+  });
+  const agent = fakeAgent('sess-goal');
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 4, phase: 'active', activation: 'disarmed', roundsStarted: 1, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake, routes } = contextWithRoutes({
+    services: { sessionController: { resolveAgent: async () => ({ agent }) } },
+  });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  // Consume the boot recovery first, so the route is the only retry path left.
+  const pendingBoot = fake.timeouts.shift();
+  assert.ok(pendingBoot);
+  const route = routes.find((entry) => entry.path === '/__dsh_autorestart/recover');
+  assert.ok(route, 'the /recover route must be registered');
+  const res = fakeResponse();
+  route.handler(postRequest({ sessionId: 'sess-goal' }), res);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(res.statusCode, 200);
+  const payload = JSON.parse(res.body);
+  assert.equal(payload.ok, true);
+  assert.equal(payload.results[0].action, 'resume-disarmed-goal');
+  assert.equal(goals['sess-goal'].activation, 'armed');
+
+  const wrongMethod = fakeResponse();
+  route.handler({ method: 'GET', url: '/__dsh_autorestart/recover', socket: { remoteAddress: '127.0.0.1' } }, wrongMethod);
+  assert.equal(wrongMethod.statusCode, 405);
+  const remote = fakeResponse();
+  route.handler(postRequest({ sessionId: 'sess-goal' }, '203.0.113.7'), remote);
+  assert.equal(remote.statusCode, 403);
+});
+
+test('a failing disarm never breaks the restart gate', () => {
+  const { file } = tempStateFile('disarm-fail');
+  const agent = fakeAgent('sess-goal');
+  agent.status = 'running';
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 3, phase: 'active', activation: 'armed', roundsStarted: 1, maxGoalRounds: 10, disarmError: 'goal is busy' },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake } = contextWithRoutes({ runningAgents: [agent] });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+
+  const restart = fake.tools.find((tool) => tool.name === 'continuum_restart');
+  restart.execute({ reason: 'test' }, { agent });
+  assert.doesNotThrow(() => fake.intervals[fake.intervals.length - 1].fn());
+  const status = fake.tools.find((tool) => tool.name === 'continuum_status');
+  const result = status.execute({});
+  assert.equal(result.blockedBy.length, 1, 'the session still blocks, but the gate keeps working');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.disarmedGoals, undefined, 'a failed disarm is not recorded');
+});
+
+test('continuum_park_goal disarms the goal of the calling session', () => {
+  const { file } = tempStateFile('disarm-tool');
+  const agent = fakeAgent('sess-tool');
+  const goals = {
+    'sess-tool': { id: 'goal-7', revision: 2, phase: 'active', activation: 'armed', roundsStarted: 0, maxGoalRounds: 9 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake } = contextWithRoutes({ runningAgents: [agent] });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+
+  const tool = fake.tools.find((entry) => entry.name === 'continuum_park_goal');
+  const result = tool.execute({}, { agent });
+  assert.equal(result.ok, true);
+  assert.equal(result.disarmed, true);
+  assert.equal(result.goalId, 'goal-7');
+  assert.equal(calls.disarm.length, 1);
+  assert.equal(calls.pause.length, 0);
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.disarmedGoals['sess-tool'].goalId, 'goal-7');
+});
+
+test('continuum_park_goal reports a goal whose round budget is spent', () => {
+  const { file } = tempStateFile('disarm-tool-exhausted');
+  const agent = fakeAgent('sess-tool');
+  const goals = {
+    'sess-tool': { id: 'goal-7', revision: 2, phase: 'active', activation: 'armed', roundsStarted: 9, maxGoalRounds: 9 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake } = contextWithRoutes({ runningAgents: [agent] });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+
+  const tool = fake.tools.find((entry) => entry.name === 'continuum_park_goal');
+  const result = tool.execute({ sessionId: 'sess-tool' }, { agent });
+  assert.equal(result.disarmed, false);
+  assert.equal(result.reason, 'goal-exhausted');
+  assert.equal(calls.disarm.length, 0);
+});
+
+test('the tools are owned by the plugin lifecycle: disposing it unregisters them', () => {
+  const { file } = tempStateFile('tool-disposer');
+  const fake = createFakeContext();
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+
+  const names = fake.tools.map((tool) => tool.name);
+  for (const name of [
+    'continuum_restart',
+    'continuum_status',
+    'continuum_park_goal',
+    'continuum_recover_now',
+    'continuum_cancel_restart',
+  ]) {
+    assert.ok(names.includes(name), `${name} must be registered`);
+  }
+
+  // The host owns the disposer of every registration: the tools are registered
+  // through ctx.effect (exactly like the HTTP routes), so they are released
+  // together with the routes when the plugin is re-applied.
+  assert.ok(
+    fake.effects.length >= fake.tools.length,
+    'every tool registration is owned by an effect, so its disposer reaches the host',
+  );
+
+  // Disposing the plugin (the host stops the fiber) releases the tools.
+  for (const dispose of fake.effects) {
+    if (typeof dispose === 'function') dispose();
+  }
+  assert.equal(fake.tools.length, 0, 'disposing the plugin unregisters the tools');
+});
+
+test('a goal that was armed again is disarmed again even when a stale record exists', () => {
+  // REGRESSION: the plugin disarmed the goal before the last restart and the
+  // goal was armed again afterwards (a resume), but the stale record was never
+  // stamped. The old rule vetoed the disarm because of that record, so the
+  // restart waited for the goal forever.
+  const { file } = tempStateFile('stale-record-disarm');
+  seedPreviousBoot(file, (state) => {
+    setDisarmedGoal(state, 'sess-goal', { goalId: 'goal-1', disarmedAt: Date.now() - 1000 });
+  });
+  const agent = fakeAgent('sess-goal');
+  agent.status = 'running';
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 4, phase: 'active', activation: 'armed', roundsStarted: 2, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake } = contextWithRoutes({ runningAgents: [agent] });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+
+  const restart = fake.tools.find((tool) => tool.name === 'continuum_restart');
+  restart.execute({ reason: 'test' }, { agent });
+  fake.intervals[fake.intervals.length - 1].fn();
+
+  assert.equal(calls.disarm.length, 1, 'the armed goal is disarmed; the stale record never vetoes it');
+  assert.equal(goals['sess-goal'].activation, 'disarmed');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.disarmedGoals['sess-goal'].resumedAt, null, 'the new disarm overwrites the record');
+});
+
+test('a goal that was resumed is disarmed again when it blocks the next restart', async () => {
+  const { file } = tempStateFile('second-disarm');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-goal', reason: 'host restart' });
+    markRunning(state, { sessionId: 'sess-goal', reason: 'turn' });
+    setDisarmedGoal(state, 'sess-goal', { goalId: 'goal-1', disarmedAt: Date.now() - 1000 });
+  });
+  const agent = fakeAgent('sess-goal');
+  agent.status = 'running';
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 4, phase: 'active', activation: 'disarmed', roundsStarted: 2, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const { fake } = contextWithRoutes({ runningAgents: [agent] });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  // The boot re-armed the goal, so it is armed again and blocks the next restart.
+  assert.equal(calls.resume.length, 1, 'the goal is armed again after the boot');
+  assert.equal(goals['sess-goal'].activation, 'armed');
+
+  const restart = fake.tools.find((tool) => tool.name === 'continuum_restart');
+  restart.execute({ reason: 'test' }, { agent });
+  fake.intervals[fake.intervals.length - 1].fn();
+
+  assert.equal(calls.disarm.length, 1, 'the resumed goal is disarmed again (the record never vetoes it)');
+  assert.equal(goals['sess-goal'].activation, 'disarmed');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.disarmedGoals['sess-goal'].resumedAt, null, 'the new disarm overwrites the record');
+  assert.equal(state.disarmedGoals['sess-goal'].goalId, 'goal-1');
+});
+
+test('a resumed goal is stamped in the record, so the status shows it as resumed', async () => {
+  const { file } = tempStateFile('resume-stamp');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-goal', reason: 'host restart' });
+    markRunning(state, { sessionId: 'sess-goal', reason: 'turn' });
+    setDisarmedGoal(state, 'sess-goal', { goalId: 'goal-1', disarmedAt: Date.now() - 1000 });
+  });
+  const agent = fakeAgent('sess-goal');
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 4, phase: 'active', activation: 'disarmed', roundsStarted: 2, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const fake = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => ({ agent }) } },
+  });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(state.disarmedGoals['sess-goal'].resumedAt > 0, 'the resume is stamped in the record');
+  const status = fake.tools.find((tool) => tool.name === 'continuum_status');
+  const reported = status.execute({}).parkedGoals.find((entry) => entry.sessionId === 'sess-goal');
+  assert.equal(reported.kind, 'disarmed');
+  assert.equal(reported.resumed, true, 'the status shows the goal as resumed');
+});
+
+test('the manual retry stamps the record of the goal it re-armed', async () => {
+  const { file } = tempStateFile('recover-now-stamp');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-goal', reason: 'host restart' });
+    markRunning(state, { sessionId: 'sess-goal', reason: 'turn' });
+    setDisarmedGoal(state, 'sess-goal', { goalId: 'goal-1', disarmedAt: Date.now() - 1000 });
+  });
+  const agent = fakeAgent('sess-goal');
+  let live = false;
+  const goals = {
+    'sess-goal': { id: 'goal-1', revision: 4, phase: 'active', activation: 'disarmed', roundsStarted: 1, maxGoalRounds: 10 },
+  };
+  const calls = { pause: [], resume: [], disarm: [] };
+  const fake = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => (live ? { agent } : { error: 'not loaded yet' }) } },
+  });
+  fake.ctx.goals = fakeGoalsService(goals, calls);
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  live = true;
+  const tool = fake.tools.find((entry) => entry.name === 'continuum_recover_now');
+  const out = await tool.execute({});
+  assert.equal(out.results[0].action, 'resume-disarmed-goal');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(state.disarmedGoals['sess-goal'].resumedAt > 0, 'the manual retry stamps the resume too');
 });

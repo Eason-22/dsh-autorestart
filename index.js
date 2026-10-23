@@ -25,18 +25,38 @@ import path from 'node:path'
 import {
   beginBoot,
   cancelRestart,
+  disarmedRecord,
+  entryFor,
+  handoffRecord,
   markIdle,
   markPendingResume,
   markRunning,
+  parkedRecord,
   pruneSessions,
   readState,
   recoverableSessions,
   requestRestart,
+  setContextOverflow,
+  setDisarmedGoal,
   setGoal,
+  setHandoff,
+  setRecoveryOutcome,
   setPhase,
+  stampResumedGoal,
   writeState,
 } from './lib/checkpoint.js'
-import { bootPlan, continuationPrompt, describeState, restartDecision, restartGate } from './lib/lifecycle.js'
+import {
+  bootPlan,
+  composeHandoff,
+  contextOverflow,
+  continuationPrompt,
+  describeState,
+  GOAL_BLOCK_REASONS,
+  HANDOFF_DEFAULT_MAX_CHARS,
+  restartDecision,
+  restartGate,
+  selectGoalDisarms,
+} from './lib/lifecycle.js'
 import {
   buildCustomCommand,
   detectEnvironment,
@@ -234,6 +254,193 @@ function resolveHealthPath(config) {
     : '/__dsh_autorestart/health'
 }
 
+/**
+ * Resolve the park-route path: a sibling of the health route, under the same
+ * prefix (the health path without its last segment).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveParkPath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/park`
+}
+
+/**
+ * Resolve the recovery-route path: a sibling of the health route, under the same
+ * prefix (`POST /recover` retries the boot recovery for the pending sessions).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveRecoverPath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/recover`
+}
+
+/**
+ * Resolve the handoff-route path: a sibling of the health route, under the same
+ * prefix (`POST /handoff` hands an over-limit session off to a fresh session).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveHandoffPath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/handoff`
+}
+
+/**
+ * The blocking sessions with the reason each one blocks: a session that is
+ * held by an armed goal reports `goal-active` (that goal can be disarmed), a
+ * goal whose round budget is spent reports `goal-exhausted`, and the original
+ * busy reason is kept as `busyReason`.
+ *
+ * Never throws: a goal lookup must never break a status report.
+ *
+ * @param {object} runtime
+ * @param {any} blockedBy
+ * @returns {any[]}
+ */
+function goalAwareBlockingDetails(runtime, blockedBy) {
+  const list = Array.isArray(blockedBy) ? blockedBy : []
+  const reasons = new Map()
+  try {
+    const { disarms, reported } = selectGoalDisarms(list, {
+      getGoal: (sessionId) => runtime.goalFor(sessionId),
+      disarmedGoals: runtime.disarmedGoalRecords(),
+      parkedGoals: runtime.parkedGoalRecords(),
+    })
+    for (const item of disarms) reasons.set(item.sessionId, GOAL_BLOCK_REASONS.ACTIVE)
+    for (const item of reported) reasons.set(item.sessionId, item.reason)
+  } catch {
+    // A goal lookup must never break the status report.
+  }
+  return list.map((entry) => {
+    if (!entry || typeof entry !== 'object') return entry
+    const reason = reasons.get(entry.sessionId)
+    if (!reason) return entry
+    return { ...entry, busyReason: entry.reason, reason }
+  })
+}
+
+/**
+ * The goal records this plugin keeps, in both shapes: the current disarmed-goal
+ * records (`goalId` / `disarmedAt` / `resumedAt`, written by
+ * `ctx.goals.disarm`) and the LEGACY parked-goal records written by the
+ * previous pause-based build (`goalId` / `parkedAt` / `resumedAt`).
+ *
+ * The status field is still called `parkedGoals` so an older client keeps
+ * working; `kind` tells the two shapes apart.
+ *
+ * @param {object} runtime
+ * @returns {{sessionId: string, kind: 'disarmed'|'parked', goalId: string|null, disarmedAt: number|null, parkedAt: number|null, resumedAt: number|null, resumed: boolean}[]}
+ */
+function parkedGoalList(runtime) {
+  const out = []
+  const collect = (records, kind, atKey) => {
+    for (const [sessionId, record] of Object.entries(records || {})) {
+      if (!record || typeof record !== 'object') continue
+      out.push({
+        sessionId,
+        kind,
+        goalId: record.goalId != null ? String(record.goalId) : null,
+        disarmedAt: kind === 'disarmed' && Number.isFinite(record.disarmedAt) ? record.disarmedAt : null,
+        parkedAt: kind === 'parked' && Number.isFinite(record[atKey]) ? record[atKey] : null,
+        resumedAt: record.resumedAt != null ? record.resumedAt : null,
+        resumed: record.resumedAt != null,
+      })
+    }
+  }
+  collect(runtime.disarmedGoalRecords(), 'disarmed', 'disarmedAt')
+  collect(runtime.parkedGoalRecords(), 'parked', 'parkedAt')
+  return out
+}
+
+/**
+ * The self-reported outcome of the last recovery attempt, per session, plus the
+ * sessions that can still be recovered. Used by `continuum_status` and by the
+ * `?state=1` route so a stuck recovery is visible without reading the log.
+ *
+ * @param {object} state
+ * @returns {{sessionId: string, action: string|null, detail: string|null, pending: boolean, attempts: number, error: string|null}[]}
+ */
+function recoveryList(state) {
+  const out = []
+  try {
+    const sessions = state && typeof state === 'object' && state.sessions && typeof state.sessions === 'object'
+      ? state.sessions
+      : {}
+    for (const [sessionId, entry] of Object.entries(sessions)) {
+      if (!entry || typeof entry !== 'object') continue
+      if (entry.lastRecoveryAction == null && entry.pendingResume !== true) continue
+      out.push({
+        sessionId: typeof entry.sessionId === 'string' && entry.sessionId ? entry.sessionId : sessionId,
+        action: entry.lastRecoveryAction != null ? String(entry.lastRecoveryAction) : null,
+        detail: entry.lastRecoveryDetail != null ? String(entry.lastRecoveryDetail) : null,
+        pending: entry.pendingResume === true,
+        attempts: Number.isFinite(entry.resumeAttempts) ? entry.resumeAttempts : 0,
+        error: entry.lastResumeError != null ? String(entry.lastResumeError) : null,
+      })
+    }
+  } catch {}
+  return out
+}
+
+/**
+ * The per-session handoff / context-overflow diagnostics of the checkpoint.
+ *
+ * Both records are the durable "this session outgrew the model window" markers:
+ * a handed-off session was replaced by a fresh one, an over-limit session is
+ * refused by the automatic resume path. `recoverableSessions` skips both, so the
+ * status has to report them from the raw entries or they would be invisible.
+ *
+ * @param {object} state
+ * @param {{ limit?: number }} [options]
+ * @returns {{sessionId: string, handedOffTo: string|null, handoffAt: number|null, carriedChars: number|null, handedOff: boolean, overContextLimit: boolean, contextOverflow: object|null, lastRecoveryAction: string|null, lastRecoveryDetail: string|null}[]}
+ */
+function diagnosticSessions(state, { limit = 50 } = {}) {
+  const out = []
+  try {
+    const sessions = state && typeof state === 'object' && state.sessions && typeof state.sessions === 'object'
+      ? state.sessions
+      : {}
+    for (const [sessionId, entry] of Object.entries(sessions)) {
+      if (!entry || typeof entry !== 'object') continue
+      const handoff = entry.handoff && typeof entry.handoff === 'object' ? entry.handoff : null
+      const overflow = entry.contextOverflow && typeof entry.contextOverflow === 'object'
+        && entry.contextOverflow.over === true
+        ? entry.contextOverflow
+        : null
+      if (handoff === null && overflow === null) continue
+      out.push({
+        sessionId: typeof entry.sessionId === 'string' && entry.sessionId ? entry.sessionId : sessionId,
+        handedOff: handoff !== null,
+        handedOffTo: handoff && typeof handoff.handedOffTo === 'string' ? handoff.handedOffTo : null,
+        handoffAt: handoff && Number.isFinite(handoff.handoffAt) ? handoff.handoffAt : null,
+        carriedChars: handoff && Number.isFinite(handoff.carriedChars) ? handoff.carriedChars : null,
+        overContextLimit: overflow !== null,
+        contextOverflow: overflow === null ? null : {
+          inputTokens: Number.isFinite(overflow.inputTokens) ? overflow.inputTokens : null,
+          contextWindow: Number.isFinite(overflow.contextWindow) ? overflow.contextWindow : null,
+          detail: typeof overflow.detail === 'string' ? overflow.detail : null,
+          detectedAt: Number.isFinite(overflow.detectedAt) ? overflow.detectedAt : null,
+        },
+        lastRecoveryAction: entry.lastRecoveryAction != null ? String(entry.lastRecoveryAction) : null,
+        lastRecoveryDetail: entry.lastRecoveryDetail != null ? String(entry.lastRecoveryDetail) : null,
+      })
+      if (out.length >= limit) break
+    }
+  } catch {}
+  return out
+}
+
 /** Resolve the durable checkpoint path. */
 function resolveStateFile(config) {
   if (typeof config.stateFile === 'string' && config.stateFile.trim() !== '') {
@@ -309,6 +516,11 @@ function createRuntime(ctx, config) {
   let recoverTimer
   let disposed = false
   let lastPersistError
+  /**
+   * The tool registrations that failed. A failed registration is recorded and
+   * logged, never thrown: the plugin still loads and the other tools still work.
+   */
+  const toolErrors = []
 
   const persist = () => {
     try {
@@ -385,6 +597,331 @@ function createRuntime(ctx, config) {
       } catch {}
     }
     return out
+  }
+
+  /**
+   * The disarmed-goal records of the checkpoint: one entry per session whose
+   * goal this plugin disarmed and has not re-armed yet.
+   */
+  const disarmedGoalRecords = () => (
+    state.disarmedGoals && typeof state.disarmedGoals === 'object' ? state.disarmedGoals : {}
+  )
+
+  /**
+   * The LEGACY (pause-based) parked-goal records of the checkpoint. They are
+   * still read so a goal the previous build paused can be resumed once.
+   */
+  const parkedGoalRecords = () => (
+    state.parkedGoals && typeof state.parkedGoals === 'object' ? state.parkedGoals : {}
+  )
+
+  /** The live agent of a session, or undefined when it is not attached. */
+  const liveAgent = (sessionId) => {
+    if (!sessionId) return undefined
+    try {
+      if (ctx.agents && typeof ctx.agents.get === 'function') {
+        const agent = ctx.agents.get(sessionId)
+        if (agent) return agent
+      }
+    } catch {}
+    return undefined
+  }
+
+  /** The live goal of a session, or undefined when it has none. */
+  const goalFor = (sessionId, agent) => {
+    const target = agent || liveAgent(sessionId)
+    if (!target) return undefined
+    try {
+      return ctx.goals.get(target)
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Disarm the goal of one session so a pending restart can proceed.
+   *
+   * `ctx.goals.disarm(agent)` removes the process-local continuation authority
+   * WITHOUT touching the durable goal: the goal stays `active`, the round that
+   * is running right now still finishes normally (no turn is cancelled and
+   * nothing is lost), but the goal round driver will not start another round.
+   * That is what lets the session go idle so the restart can proceed; after the
+   * boot the goal is re-armed through `ctx.goals.resume(...)`.
+   *
+   * Never throws: a failed disarm is reported instead of propagated, so it can
+   * never break the restart gate.
+   */
+  const disarmGoal = (sessionId, agent) => {
+    const target = agent || liveAgent(sessionId)
+    if (!target) {
+      return { sessionId, disarmed: false, reason: GOAL_BLOCK_REASONS.NO_AGENT, error: 'session-not-live' }
+    }
+    const goal = goalFor(sessionId, target)
+    if (!goal || typeof goal !== 'object') return { sessionId, disarmed: false, reason: 'no-goal' }
+    const goalId = goal.id == null ? null : String(goal.id)
+    const { disarms, reported } = selectGoalDisarms([{ sessionId }], {
+      getGoal: () => goal,
+      disarmedGoals: disarmedGoalRecords(),
+      parkedGoals: parkedGoalRecords(),
+    })
+    if (disarms.length === 0) {
+      const reason = reported.length > 0 ? reported[0].reason : 'goal-not-disarmable'
+      return { sessionId, disarmed: false, goalId, reason }
+    }
+    const goals = ctx.goals
+    if (!goals || typeof goals.disarm !== 'function') {
+      return { sessionId, disarmed: false, goalId, reason: 'disarm-unavailable', error: 'goals.disarm is not available' }
+    }
+    let outcome
+    try {
+      outcome = goals.disarm(target)
+    } catch (error) {
+      return { sessionId, disarmed: false, goalId, reason: 'disarm-failed', error: describeError(error) }
+    }
+    const onDisarmed = () => {
+      setDisarmedGoal(state, sessionId, { goalId, disarmedAt: Date.now() })
+      persist()
+      log.info(`disarmed goal ${goalId} of session ${sessionId}; the running round still finishes and the goal is re-armed after the restart`)
+    }
+    if (outcome && typeof outcome.then === 'function') {
+      outcome.then(onDisarmed, (error) => {
+        log.warn(`could not disarm goal ${goalId} of session ${sessionId}:`, describeError(error))
+      })
+      return { sessionId, disarmed: true, goalId, reason: GOAL_BLOCK_REASONS.ACTIVE, pending: true }
+    }
+    onDisarmed()
+    return { sessionId, disarmed: true, goalId, reason: GOAL_BLOCK_REASONS.ACTIVE }
+  }
+
+  /**
+   * The live SESSION of a session id: the readable conversation surface
+   * (`deriveMessages` / `requestHeader` / `requestContext` / `snapshotEvents`).
+   * Falls back to the live agent's session when the sessions service is absent.
+   */
+  const liveSession = (sessionId) => {
+    if (!sessionId) return undefined
+    try {
+      const sessions = ctx.get('sessions')
+      if (sessions && typeof sessions.get === 'function') {
+        const session = sessions.get(String(sessionId))
+        if (session) return session
+      }
+    } catch {}
+    const agent = liveAgent(sessionId)
+    return agent && agent.session ? agent.session : undefined
+  }
+
+  /** Read the readable surface of one live session. Never throws. */
+  const readSession = (sessionId) => {
+    const session = liveSession(sessionId)
+    if (!session) return { session: undefined, messages: undefined, header: undefined, requestContext: undefined, events: undefined }
+    const read = (fn) => {
+      try {
+        return typeof session[fn] === 'function' ? session[fn]() : undefined
+      } catch {
+        return undefined
+      }
+    }
+    return {
+      session,
+      messages: read('deriveMessages'),
+      header: read('requestHeader'),
+      requestContext: read('requestContext'),
+      events: read('snapshotEvents'),
+    }
+  }
+
+  /**
+   * The context-overflow verdict of a session, from its LIVE surface only.
+   *
+   * Evidence: the newest assistant message `usage.inputTokens` versus the
+   * session's `contextWindow`, or a recent turn / event that failed with a
+   * context-window error. Unknown numbers never mean overflow, so an unknown
+   * session keeps the normal resume path. Never throws.
+   */
+  const overflowFor = (sessionId) => {
+    const unknown = { over: false, inputTokens: null, contextWindow: null, detail: null }
+    try {
+      const read = readSession(sessionId)
+      if (!read.session) return unknown
+      const info = read.requestContext
+      const contextWindow = info && typeof info === 'object' && Number.isFinite(info.contextWindow) ? info.contextWindow : null
+      return contextOverflow({ messages: read.messages, contextWindow, events: read.events })
+    } catch {
+      return unknown
+    }
+  }
+
+  /**
+   * Hand an over-limit session off to a fresh, usable session.
+   *
+   * A session whose conversation outgrew the model window can neither continue
+   * nor be compacted: every request fails with "context window exceeds limit",
+   * and the compaction request needs the same oversized context. The handoff
+   * carries what still fits — the goal objective, the checkpoint reasons and a
+   * bounded tail of the conversation — into a NEW live agent/session, then marks
+   * the old session and disarms its goal so it stops issuing doomed requests.
+   *
+   * Nothing is created when the source cannot be read.
+   *
+   * @param {{ sessionId?: string, maxChars?: number, callerAgent?: object }} [options]
+   * @returns {Promise<object>} `{ ok, sessionId, carriedChars, instruction }`
+   */
+  const handoff = async ({ sessionId, maxChars, callerAgent } = {}) => {
+    const requested = typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : null
+    const sourceId = requested !== null ? requested : (callerAgent && callerAgent.id ? String(callerAgent.id) : null)
+    if (sourceId === null) {
+      return { ok: false, error: 'no-session', instruction: 'No source session: pass sessionId, or call this tool from the session that should be handed off.' }
+    }
+    const read = readSession(sourceId)
+    if (!read.session) {
+      return {
+        ok: false,
+        error: 'source-session-not-live',
+        sourceSessionId: sourceId,
+        instruction: `Session ${sourceId} is not live in this process, so its conversation cannot be read and no handoff was created.`,
+      }
+    }
+    if (read.messages === undefined) {
+      return {
+        ok: false,
+        error: 'source-unreadable',
+        sourceSessionId: sourceId,
+        instruction: `Session ${sourceId} did not expose its messages, so no handoff was created.`,
+      }
+    }
+    const header = read.header
+    const cwd = header && typeof header.cwd === 'string' && path.isAbsolute(header.cwd) ? header.cwd : null
+    if (cwd === null) {
+      return {
+        ok: false,
+        error: 'source-cwd-unknown',
+        sourceSessionId: sourceId,
+        instruction: `Session ${sourceId} has no absolute working directory in its header, so a new session could not be created for the handoff.`,
+      }
+    }
+
+    const goal = goalFor(sourceId)
+    const objective = goal && typeof goal === 'object'
+      ? [goal.objective, goal.title, goal.description].find((value) => typeof value === 'string' && value.trim() !== '') ?? null
+      : null
+    const entry = state.sessions && state.sessions[sourceId] ? state.sessions[sourceId] : null
+    const goalLabel = entry && entry.goal && entry.goal.goalId != null
+      ? String(entry.goal.goalId)
+      : (goal && goal.id != null ? String(goal.id) : null)
+    const budget = Number.isFinite(maxChars) && maxChars > 0 ? Math.trunc(maxChars) : HANDOFF_DEFAULT_MAX_CHARS
+    const composed = composeHandoff({
+      sessionId: sourceId,
+      objective,
+      goalLabel,
+      reasons: entry && Array.isArray(entry.reasons) ? entry.reasons : [],
+      messages: read.messages,
+      maxChars: budget,
+    })
+
+    const newSessionId = 'session-' + crypto.randomUUID()
+    let created
+    try {
+      created = await ctx.agents.create({
+        sessionId: newSessionId,
+        meta: { cwd, parentSession: sourceId, createdAt: Date.now() },
+      })
+    } catch (error) {
+      const detail = describeError(error)
+      log.warn(`could not create the handoff session for ${sourceId}:`, detail)
+      return {
+        ok: false,
+        error: 'create-failed',
+        sourceSessionId: sourceId,
+        detail,
+        instruction: `The new session could not be created (${detail}); session ${sourceId} is unchanged.`,
+      }
+    }
+    let newAgent = created && typeof created === 'object' ? (created.agent ?? created.handle ?? created) : undefined
+    if (!newAgent || typeof newAgent.followup !== 'function' || newAgent.id === undefined) newAgent = liveAgent(newSessionId)
+    if (!newAgent || typeof newAgent.followup !== 'function') {
+      return {
+        ok: false,
+        error: 'handoff-agent-unavailable',
+        sourceSessionId: sourceId,
+        sessionId: newSessionId,
+        instruction: `The new session ${newSessionId} exposes no agent to deliver the handoff text to; session ${sourceId} is unchanged.`,
+      }
+    }
+    const continueId = newAgent.id === undefined || newAgent.id === null ? newSessionId : String(newAgent.id)
+    try {
+      newAgent.followup(createContinuationMessage(composed.text, {
+        summary: 'handoff of a session that exceeded the model context window',
+      }))
+    } catch (error) {
+      const detail = describeError(error)
+      log.warn(`the handoff text was rejected for ${continueId}:`, detail)
+      return {
+        ok: false,
+        error: 'deliver-failed',
+        sourceSessionId: sourceId,
+        sessionId: continueId,
+        detail,
+        instruction: `The handoff text could not be delivered to ${continueId} (${detail}); session ${sourceId} is unchanged.`,
+      }
+    }
+
+    const at = Date.now()
+    setHandoff(state, sourceId, { handedOffTo: continueId, handoffAt: at, carriedChars: composed.carriedChars })
+    setRecoveryOutcome(state, sourceId, { action: 'handed-off', detail: `handed off to ${continueId}`, now: at })
+    persist()
+
+    // (e) the over-limit session must stop issuing doomed requests.
+    let disarmedGoal = false
+    try {
+      const result = disarmGoal(sourceId, requested === null ? callerAgent : undefined)
+      disarmedGoal = result.disarmed === true
+    } catch (error) {
+      log.warn(`could not disarm the goal of the handed-off session ${sourceId}:`, describeError(error))
+    }
+    log.info(`handed session ${sourceId} off to ${continueId} (${composed.carriedChars} characters carried)`)
+    return {
+      ok: true,
+      sourceSessionId: sourceId,
+      sessionId: continueId,
+      carriedChars: composed.carriedChars,
+      carriedTailChars: composed.tailChars,
+      disarmedGoal,
+      instruction: `Continue the work in the new session ${continueId}. The old session ${sourceId} is kept and marked as handed off: its goal is disarmed and it is never auto-resumed again.`,
+    }
+  }
+
+  /**
+   * Disarm the goals of the sessions that block the pending restart.
+   *
+   * A goal-driven session keeps its own agent busy (the goal round driver
+   * starts the next round within milliseconds), so the restart gate would never
+   * open. Disarming removes that authority: the CURRENT round finishes
+   * normally, no new round starts, the session goes idle and the next poll sees
+   * a quiet host. Goals are never paused and no turn is ever cancelled.
+   */
+  const disarmBlockingGoals = (busy) => {
+    const restart = state.restart
+    if (!restart) return { disarmed: [], reported: [] }
+    if (restart.parkGoals === false) return { disarmed: [], reported: [], skipped: 'park-goals-disabled' }
+    const list = Array.isArray(busy) ? busy : []
+    if (list.length === 0) return { disarmed: [], reported: [] }
+    const { disarms, reported } = selectGoalDisarms(list, {
+      getGoal: (sessionId) => goalFor(sessionId),
+      disarmedGoals: disarmedGoalRecords(),
+      parkedGoals: parkedGoalRecords(),
+    })
+    const disarmed = []
+    for (const item of disarms) {
+      try {
+        const result = disarmGoal(item.sessionId)
+        if (result.disarmed) disarmed.push(result)
+        else log.warn(`could not disarm the goal of session ${item.sessionId}: ${result.reason}${result.error ? ` (${result.error})` : ''}`)
+      } catch (error) {
+        log.warn(`disarming the goal of session ${item.sessionId} failed:`, describeError(error))
+      }
+    }
+    return { disarmed, reported }
   }
 
   const anyAgentRunning = () => busyAgents().length > 0
@@ -578,6 +1115,13 @@ function createRuntime(ctx, config) {
     // This re-check also protects the ungated fallback (>20 gate aborts) and the
     // forceRestartWhenBusy path: even when the detached helper cannot re-check the
     // gate itself, a busy conversation is never killed here.
+    // Last chance to park a goal-driven session: without it the detached
+    // helper would refuse to kill the process and the restart would wait.
+    try {
+      disarmBlockingGoals(busyAgents())
+    } catch (error) {
+      log.warn('could not disarm the goals of the blocking sessions:', String(error))
+    }
     const verdict = gate()
     if (!verdict.allow) {
       log.info('restart deferred: a conversation is still active or the host is settling', {
@@ -639,6 +1183,15 @@ function createRuntime(ctx, config) {
     }
     const now = Date.now()
     const busy = busyAgents()
+    // A goal-driven session blocks the restart forever: park its goal BEFORE the
+    // gate decides that it is blocked, so the next poll sees an idle session.
+    if (busy.length > 0) {
+      try {
+        disarmBlockingGoals(busy)
+      } catch (error) {
+        log.warn('could not disarm the goals of the blocking sessions:', String(error))
+      }
+    }
     const decision = restartDecision(state, {
       anyAgentRunning: busy.length > 0,
       busyAgents: busy,
@@ -693,6 +1246,7 @@ function createRuntime(ctx, config) {
     stateFile,
     log,
     persist,
+    toolErrors,
     startPolling,
     stopPolling,
     tick,
@@ -707,7 +1261,49 @@ function createRuntime(ctx, config) {
     busyAgents,
     gate,
     sessionTitle,
+    disarmGoal,
+    disarmBlockingGoals,
+    disarmedGoalRecords,
+    parkedGoalRecords,
+    goalFor,
+    handoffRecord: (sessionId) => handoffRecord(state, sessionId),
+    overflowFor,
+    handoff,
     boot,
+    /**
+     * Re-run the boot recovery for the still-pending sessions, right now.
+     *
+     * This is the retry path behind `continuum_recover_now` and the POST
+     * `/recover` route: a session whose agent was not live yet, or whose
+     * `goals.resume` failed, can be retried without waiting for the next boot.
+     * Every attempt reports its own action/detail, exactly like the boot pass.
+     *
+     * @param {string} [sessionId] one session, or every pending session
+     * @returns {Promise<object[]>} one outcome per attempted session
+     */
+    async recoverNow(sessionId) {
+      const target = typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : null
+      const pending = recoverableSessions(state, {}).filter((entry) => (
+        target === null ? true : String(entry.sessionId) === target
+      ))
+      if (pending.length === 0 && target !== null) {
+        return [{ sessionId: target, action: 'nothing', detail: 'no-pending-recovery' }]
+      }
+      const results = []
+      for (const entry of pending) {
+        try {
+          results.push(await recoverSession(ctx, runtime, entry, config))
+        } catch (error) {
+          const detail = describeError(error)
+          setRecoveryOutcome(state, entry.sessionId, { action: 'prompt-failed', detail })
+          results.push({ sessionId: entry.sessionId, action: 'prompt-failed', detail })
+        }
+      }
+      try {
+        runtime.persist()
+      } catch {}
+      return results
+    },
   }
   return runtime
 }
@@ -721,9 +1317,10 @@ function createRuntime(ctx, config) {
  * message: it is NOT human authority.
  *
  * @param {string} text
+ * @param {{ summary?: string }} [options] one-line label of what this notice is
  * @returns {object} a frozen user message
  */
-function createContinuationMessage(text) {
+function createContinuationMessage(text, { summary } = {}) {
   return Object.freeze({
     id: crypto.randomUUID(),
     role: 'user',
@@ -731,7 +1328,9 @@ function createContinuationMessage(text) {
     source: Object.freeze({
       kind: 'continuum',
       form: 'notice',
-      summary: 'automatic continuation after a DeepSeek Harness restart',
+      summary: typeof summary === 'string' && summary.trim() !== ''
+        ? summary.trim()
+        : 'automatic continuation after a DeepSeek Harness restart',
     }),
   })
 }
@@ -760,6 +1359,24 @@ function describeError(value) {
 }
 
 /**
+ * Record the self-reported outcome of one recovery attempt for a session.
+ *
+ * Every return path of `recoverSession` calls this: a recovery that did nothing
+ * must say WHY it did nothing, otherwise a stuck session is invisible in
+ * `continuum_status` and in the `?state=1` route.
+ *
+ * @param {object} state
+ * @param {string} sessionId
+ * @param {string} action short action label (`resume-disarmed-goal`, …)
+ * @param {string|null} [detail] short human-readable reason
+ */
+function noteRecovery(state, sessionId, action, detail = null) {
+  try {
+    setRecoveryOutcome(state, sessionId, { action, detail: detail == null ? null : String(detail) })
+  } catch {}
+}
+
+/**
  * Decide what a session needs after a restart and do exactly that.
  * At-most-once per boot: the resume attempt is persisted before any side effect.
  */
@@ -775,9 +1392,61 @@ async function recoverSession(ctx, runtime, entry, config) {
     entry.pendingResume = false
     entry.interrupted = false
     entry.lastResumeError = entry.lastResumeError || 'resume attempts exhausted'
+    noteRecovery(state, sessionId, 'nothing', 'resume-attempts-exhausted')
     runtime.persist()
     log.info(`giving up on session ${sessionId}: resume attempts exhausted`, { lastResumeError: entry.lastResumeError })
-    return { sessionId, action: 'skip', error: entry.lastResumeError }
+    return { sessionId, action: 'nothing', detail: 'resume-attempts-exhausted', error: entry.lastResumeError }
+  }
+
+  // CONTEXT-OVERFLOW GUARD. A session whose conversation outgrew the model window
+  // can neither continue nor be compacted (the compaction request needs the same
+  // oversized context): every request to it fails with "context window exceeds
+  // limit". Re-arming its goal or queueing a continuation message into it can
+  // therefore only fail, so the guard runs BEFORE the goal re-arm and before the
+  // disarm decision. Evidence: a verdict an earlier pass already recorded, or the
+  // LIVE session (the newest assistant message's `usage.inputTokens` versus the
+  // session's `contextWindow`, or a recent context-window failure). Unknown
+  // numbers never block the normal path.
+  const recordedOverflow = entry.contextOverflow && entry.contextOverflow.over === true
+    ? entry.contextOverflow
+    : null
+  let overflow = null
+  if (recordedOverflow !== null) {
+    overflow = {
+      over: true,
+      inputTokens: Number.isFinite(recordedOverflow.inputTokens) ? recordedOverflow.inputTokens : null,
+      contextWindow: Number.isFinite(recordedOverflow.contextWindow) ? recordedOverflow.contextWindow : null,
+      detail: typeof recordedOverflow.detail === 'string' && recordedOverflow.detail !== ''
+        ? recordedOverflow.detail
+        : 'the session is over the model context window (recorded by an earlier recovery)',
+    }
+  } else {
+    try {
+      overflow = runtime.overflowFor(sessionId)
+    } catch {
+      overflow = null
+    }
+  }
+  if (overflow && overflow.over === true) {
+    const detail = typeof overflow.detail === 'string' && overflow.detail !== ''
+      ? overflow.detail
+      : 'the session is over the model context window'
+    setContextOverflow(state, sessionId, {
+      over: true,
+      inputTokens: overflow.inputTokens,
+      contextWindow: overflow.contextWindow,
+      detail,
+      detectedAt: Date.now(),
+    })
+    // Out of the automatic resume path for good: the goal is NOT re-armed, no
+    // continuation message is queued, and `recoverableSessions` skips an
+    // over-limit entry from now on. The recovery attempt is still reported.
+    entry.pendingResume = false
+    entry.interrupted = false
+    noteRecovery(state, sessionId, 'context-overflow', detail)
+    runtime.persist()
+    log.warn(`session ${sessionId} is over the model context window and is NOT re-armed: hand it off with continuum_handoff`, { detail })
+    return { sessionId, action: 'context-overflow', detail, overContextLimit: true }
   }
 
   // Persist the attempt BEFORE any side effect, so a crash cannot double-resume and
@@ -797,7 +1466,9 @@ async function recoverSession(ctx, runtime, entry, config) {
     const controller = ctx.get('sessionController')
     if (!controller || typeof controller.resolveAgent !== 'function') {
       log.warn('sessionController is unavailable; cannot resume', sessionId)
-      return { sessionId, action: 'unavailable' }
+      noteRecovery(state, sessionId, 'session-controller-unavailable', 'sessionController.resolveAgent is unavailable')
+      runtime.persist()
+      return { sessionId, action: 'session-controller-unavailable', detail: 'sessionController.resolveAgent is unavailable' }
     }
     // A freshly reloaded profile can expose the live agent a moment after the
     // state file was written, so a THROWN error is retried inside the same boot
@@ -827,51 +1498,112 @@ async function recoverSession(ctx, runtime, entry, config) {
       }
     }
     if (lastError) {
-      // Keep pendingResume: the session stays recoverable on a later boot, but the
-      // failure is now visible in continuum_status instead of vanishing.
+      // Keep pendingResume: the session stays recoverable on a later boot (or a
+      // later continuum_recover_now retry), but the failure is visible instead of
+      // vanishing.
       entry.lastResumeError = lastError
+      noteRecovery(state, sessionId, 'agent-not-live', lastError)
       runtime.persist()
       log.warn(`could not resume ${sessionId}:`, lastError)
-      return { sessionId, action: 'failed', error: lastError }
+      return { sessionId, action: 'agent-not-live', detail: lastError, error: lastError }
     }
     agent = result && result.agent
   }
   if (!agent) {
     entry.lastResumeError = 'resolveAgent returned no agent'
+    noteRecovery(state, sessionId, 'agent-not-live', entry.lastResumeError)
     runtime.persist()
-    return { sessionId, action: 'failed', error: entry.lastResumeError }
+    return { sessionId, action: 'agent-not-live', detail: entry.lastResumeError, error: entry.lastResumeError }
   }
 
   let goal
+  let goalLookupError = null
   try {
     goal = ctx.goals.get(agent)
   } catch (error) {
-    log.warn(`goals.get failed for ${sessionId}:`, String(error))
+    goalLookupError = describeError(error)
+    log.warn(`goals.get failed for ${sessionId}:`, goalLookupError)
+  }
+  if (!goal || typeof goal !== 'object') {
+    goal = undefined
+    if (goalLookupError === null) goalLookupError = 'goals.get returned no goal'
   }
 
+  const disarmed = disarmedRecord(state, sessionId)
+  const legacyParked = parkedRecord(state, sessionId)
+  let resumeError = null
+  let resumeAction = null
+
+  // (1) The goal THIS plugin disarmed before the restart: it is still durably
+  // `active` and only its activation is `disarmed`, so re-arming it with its
+  // current revision lets the goal round driver continue the work.
+  if (goal && disarmed && goal.phase === 'active' && goal.activation === 'disarmed' && disarmed.goalId === goal.id) {
+    resumeAction = 'resume-disarmed-goal'
+  }
+
+  // (2) The goal the PREVIOUS (pause-based) build PAUSED: we paused it, so we may
+  // resume it. A goal the USER paused has no record and must stay paused.
+  if (resumeAction === null && goal && legacyParked && goal.phase === 'paused' && legacyParked.goalId === goal.id) {
+    resumeAction = 'resume-paused-goal'
+  }
+
+  // (3) The already proven boot path: an active goal whose continuation authority
+  // is gone is re-armed (the host may have disarmed it on shutdown).
   if (
-    goal
+    resumeAction === null
+    && goal
     && goal.phase === 'active'
     && goal.activation === 'disarmed'
     && goal.roundsStarted < goal.maxGoalRounds
   ) {
+    resumeAction = 'rearm-goal'
+  }
+
+  if (resumeAction !== null) {
     try {
       ctx.goals.resume(agent, { id: goal.id, revision: goal.revision })
+      // The goal is armed again: stamp the record(s) of this session with the
+      // resume timestamp, so the status shows the goal as resumed (the record is
+      // reporting only — it never decides whether a goal may be disarmed).
+      stampResumedGoal(state, sessionId, { resumedAt: Date.now() })
       entry.pendingResume = false
       entry.running = false
       entry.interrupted = false
       entry.lastResumeError = null
       entry.goal = { goalId: goal.id, goalRevision: goal.revision + 1, phase: 'active' }
+      noteRecovery(state, sessionId, resumeAction, `goal ${goal.id} is armed again`)
       runtime.persist()
-      log.info(`re-armed goal ${goal.id} for session ${sessionId}; the goal round driver continues the work`)
-      return { sessionId, action: 'rearm-goal', goalId: goal.id }
+      log.info(`${resumeAction}: goal ${goal.id} of session ${sessionId} is armed again; the goal round driver continues the work`)
+      return { sessionId, action: resumeAction, goalId: goal.id, detail: `goal ${goal.id} is armed again` }
     } catch (error) {
-      log.warn(`goals.resume failed for ${sessionId}:`, String(error))
+      // Stale revision or an exhausted round budget: fall back to the
+      // continuation message and KEEP the record, so a later boot (or a manual
+      // continuum_recover_now retry) can try to resume the goal again.
+      resumeError = describeError(error)
+      entry.lastResumeError = resumeError
+      log.warn(`could not resume goal ${goal.id} of ${sessionId} (${resumeAction}):`, resumeError)
     }
   }
 
   if (!entry.pendingResume && !entry.interrupted) {
-    return { sessionId, action: 'nothing' }
+    if (resumeError) {
+      entry.lastResumeError = resumeError
+      noteRecovery(state, sessionId, resumeAction || 'nothing', `resume failed: ${resumeError}`)
+      runtime.persist()
+      return { sessionId, action: resumeAction || 'nothing', detail: `resume failed: ${resumeError}`, error: resumeError }
+    }
+    noteRecovery(state, sessionId, resumeAction || 'nothing', resumeAction ? 'goal handled, session not pending' : 'session-not-pending')
+    runtime.persist()
+    return { sessionId, action: resumeAction || 'nothing', detail: 'session-not-pending' }
+  }
+
+  // A failed goal lookup is not a reason to skip the session: the continuation
+  // message still makes progress, and the reason is recorded for the operator.
+  let pendingAction = 'prompt-continuation'
+  let pendingDetail = resumeError ? `goal resume failed: ${resumeError}` : 'continuation message queued'
+  if (goal === undefined) {
+    pendingAction = 'goal-lookup-failed'
+    pendingDetail = `${goalLookupError || 'goals.get returned no goal'}; continuation message queued`
   }
 
   // Inject exactly one continuation message through the live agent's inbox. The
@@ -879,7 +1611,9 @@ async function recoverSession(ctx, runtime, entry, config) {
   // signature is `prompt(request, signal)` and it hardcodes a human `user` source.
   if (typeof agent.followup !== 'function') {
     log.warn('the resumed agent exposes no followup(); cannot inject the continuation prompt')
-    return { sessionId, action: 'unavailable' }
+    noteRecovery(state, sessionId, 'prompt-failed', 'the agent exposes no followup()')
+    runtime.persist()
+    return { sessionId, action: 'prompt-failed', detail: 'the agent exposes no followup()' }
   }
   const text = continuationPrompt(entry, {
     reason: (Array.isArray(entry.reasons) && entry.reasons[entry.reasons.length - 1]) || 'host restart',
@@ -888,16 +1622,20 @@ async function recoverSession(ctx, runtime, entry, config) {
   try {
     agent.followup(createContinuationMessage(text))
   } catch (error) {
-    log.warn(`continuation message rejected for ${sessionId}:`, String(error))
-    return { sessionId, action: 'prompt-failed' }
+    const detail = describeError(error)
+    log.warn(`continuation message rejected for ${sessionId}:`, detail)
+    noteRecovery(state, sessionId, 'prompt-failed', detail)
+    runtime.persist()
+    return { sessionId, action: 'prompt-failed', detail }
   }
   entry.pendingResume = false
   entry.running = false
   entry.interrupted = false
-  entry.lastResumeError = null
+  entry.lastResumeError = resumeError
+  noteRecovery(state, sessionId, pendingAction, pendingDetail)
   runtime.persist()
   log.info(`queued a continuation message for session ${sessionId}`)
-  return { sessionId, action: 'prompt-continuation' }
+  return { sessionId, action: pendingAction, detail: pendingDetail }
 }
 
 /** The boot recovery pass. Runs once per host boot, bounded and idempotent. */
@@ -997,15 +1735,45 @@ function persistSafely(runtime) {
 function registerTools(ctx, runtime, config) {
   const log = runtime.log
 
+  /**
+   * Register one tool.
+   *
+   * The disposer returned by `ctx.tools.register` is handed to `ctx.effect`, so
+   * the HOST owns it: when the plugin row is disabled (or the plugin is
+   * hot-reloaded) the fiber disposes the effect and the tool is unregistered
+   * together with the HTTP routes. Registering it bare would leave the tools of
+   * the OLD instance registered (and the new instance's registration would fail
+   * as a duplicate), so the host could serve the tools of an instance whose
+   * routes are already gone.
+   *
+   * A failed registration is recorded in `runtime.toolErrors` and logged; it is
+   * never thrown, so one broken tool can never stop the plugin from loading.
+   */
   const tool = (definition) => {
+    const name = definition && definition.name ? String(definition.name) : null
     try {
-      ctx.tools.register(definition)
+      ctx.effect(
+        () => ctx.tools.register(definition),
+        `dsh-autorestart: tool ${name ?? 'unknown'}`,
+      )
     } catch (error) {
-      log.warn(`could not register tool ${definition?.name}:`, String(error))
+      runtime.toolErrors.push({ tool: name, error: describeError(error) })
+      log.warn(`could not register tool ${name}:`, String(error))
     }
   }
 
   const textOutput = (schema, render) => ({ schema, render })
+
+  /**
+   * The blocking sessions with the reason each one blocks: a session that is
+   * held by an armed goal reports `goal-active`, a goal whose round budget is
+   * used up reports `goal-exhausted`, and the original busy reason is kept as
+   * `busyReason`.
+   */
+  const blockingDetails = (blockedBy) => goalAwareBlockingDetails(runtime, blockedBy)
+
+  /** The goals this plugin parked, with the outcome of the resume. */
+  const parkedGoalDetails = () => parkedGoalList(runtime)
 
   tool({
     name: 'continuum_restart',
@@ -1016,7 +1784,12 @@ function registerTools(ctx, runtime, config) {
       + 'forceRestartWhenBusy is enabled, otherwise the restart keeps waiting for the other conversations. '
       + 'Other conversations are never killed mid-turn: the detached helper re-checks this idle gate '
       + 'over loopback immediately before it kills the process. After the restart this '
-      + 'plugin resumes this session and continues the work automatically. Write your final message '
+      + 'plugin resumes this session and continues the work automatically. A goal-driven session is '
+      + 'DISARMED before the restart (pass parkGoals:false to turn that off): disarming only removes the '
+      + 'process-local continuation authority, so the round that is running right now still finishes normally '
+      + '(no turn is cancelled and nothing is lost), no new round starts, and after the restart the goal is '
+      + 're-armed and continues. A goal whose round budget is spent cannot be continued and is reported '
+      + 'instead. Write your final message '
       + 'in this turn, then stop calling tools — the restart fires as soon as the turn goes idle. '
       + 'Use it only when a restart is genuinely required (for example to load an installed plugin update).',
     parameters: {
@@ -1026,6 +1799,7 @@ function registerTools(ctx, runtime, config) {
         reason: { type: 'string', description: 'Why the restart is needed; recorded in the checkpoint and shown in the log.' },
         resume: { type: 'boolean', description: 'Resume this session after the restart (default true).' },
         defer_seconds: { type: 'number', description: 'Optional extra seconds to wait before the first idle check.' },
+        parkGoals: { type: 'boolean', description: 'Disarm the goal of a goal-driven session before the restart (default true). Disarming keeps the durable goal active and lets the current round finish; after the restart the goal is re-armed and continues. With false no goal is disarmed, so a goal-driven session may keep the restart waiting.' },
       },
     },
     output: textOutput(
@@ -1049,10 +1823,12 @@ function registerTools(ctx, runtime, config) {
       const agent = exec && exec.agent
       const sessionId = agent && agent.id ? String(agent.id) : undefined
       const resume = args.resume !== false
+      const parkGoals = args.parkGoals !== false
       requestRestart(state, {
         reason: typeof args.reason === 'string' && args.reason.trim() !== '' ? args.reason.trim() : 'agent requested restart',
         bySessionId: sessionId,
         resume,
+        parkGoals,
         now,
       })
       if (sessionId && resume) {
@@ -1068,13 +1844,15 @@ function registerTools(ctx, runtime, config) {
       }
       runtime.persist()
       runtime.startPolling()
-      log.info('restart requested', { generation: state.generation, sessionId, resume })
+      log.info('restart requested', { generation: state.generation, sessionId, resume, parkGoals })
       return {
         accepted: true,
         generation: state.generation,
         phase: state.phase,
         willResume: resume && Boolean(sessionId),
-        note: 'The restart runs at the next safe point (all agents idle). Keep this reply short; the session resumes afterwards.',
+        note: parkGoals
+          ? 'The restart runs at the next safe point (all agents idle). Keep this reply short; the session resumes afterwards.'
+          : 'The restart runs at the next safe point (all agents idle), but no goal is parked: a goal-driven session keeps its own agent busy and may therefore keep the restart waiting.',
       }
     },
   })
@@ -1083,8 +1861,12 @@ function registerTools(ctx, runtime, config) {
     name: 'continuum_status',
     description:
       'Report the dsh-autorestart lifecycle: whether a restart is pending, which sessions were '
-      + 'checkpointed as interrupted or continuation-pending, the resolved state-file path, and the '
-      + 'detected restart environment. Read-only.',
+      + 'checkpointed as interrupted or continuation-pending, why each blocking session blocks '
+      + '("goal-active" = an armed goal keeps it busy, "goal-exhausted" = its goal can no longer be '
+      + 'resumed), the goals this plugin disarmed, the last recovery action/detail per session, '
+      + 'whether a session was handed off to a fresh session (target session id and time) or is over '
+      + 'the model context window (such a session is never auto-resumed), the '
+      + 'resolved state-file path, and the detected restart environment. Read-only.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1107,6 +1889,9 @@ function registerTools(ctx, runtime, config) {
           gateAllow: { type: 'boolean' },
           quietForMs: { type: 'number' },
           blockedBy: { type: 'array', items: { type: 'object' } },
+          parkedGoals: { type: 'array', items: { type: 'object' } },
+          recovery: { type: 'array', items: { type: 'object' } },
+          handoffs: { type: 'array', items: { type: 'object' } },
           environment: { type: 'object' },
           sessions: { type: 'array', items: { type: 'object' } },
         },
@@ -1126,7 +1911,10 @@ function registerTools(ctx, runtime, config) {
         pendingRestart: state.restart !== null,
         gateAllow: verdict.allow,
         quietForMs: Math.round(verdict.quietForMs),
-        blockedBy: verdict.blockedBy,
+        blockedBy: blockingDetails(verdict.blockedBy),
+        parkedGoals: parkedGoalDetails(),
+        recovery: recoveryList(state),
+        handoffs: diagnosticSessions(state),
         environment: {
           platform: runtime.env.platform,
           isDesktopApp: runtime.env.isDesktopApp,
@@ -1137,14 +1925,162 @@ function registerTools(ctx, runtime, config) {
         },
         ...(includeSessions
           ? {
-              sessions: recoverableSessions(state, { limit: 50 }).map((entry) => ({
-                ...entry,
-                // Diagnostics: the last resolveAgent failure for this session (null when healthy).
-                lastResumeError: entry.lastResumeError ?? null,
-              })),
+              sessions: [
+                ...recoverableSessions(state, { limit: 50 }).map((entry) => ({
+                  ...entry,
+                  // Diagnostics: the last resolveAgent failure for this session (null when healthy).
+                  lastResumeError: entry.lastResumeError ?? null,
+                  handedOff: false,
+                  overContextLimit: false,
+                })),
+                // A handed-off or over-limit session is out of the automatic resume
+                // path, so it is listed here instead of vanishing from the report.
+                ...diagnosticSessions(state, { limit: 50 }),
+              ],
             }
           : {}),
       }
+    },
+  })
+
+  tool({
+    name: 'continuum_park_goal',
+    description:
+      'Disarm the durable goal of a session so a pending restart can proceed: a goal-driven '
+      + 'session keeps its own agent busy forever (the goal round driver starts the next round '
+      + 'immediately), so the restart would wait forever behind it. Disarming only removes the '
+      + 'process-local continuation authority: the goal stays active, the round that is running '
+      + 'right now still finishes normally (no turn is cancelled and nothing is lost), and no new '
+      + 'round starts. After the next restart the goal is re-armed automatically and continues. '
+      + 'Without a sessionId the goal of the calling session is disarmed. A goal whose round budget '
+      + 'is spent can never be continued, so it is reported instead of disarmed.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        sessionId: { type: 'string', description: 'The session whose goal should be disarmed (default: the calling session).' },
+      },
+    },
+    output: textOutput(
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['ok', 'disarmed'],
+        properties: {
+          ok: { type: 'boolean' },
+          disarmed: { type: 'boolean' },
+          sessionId: { type: 'string' },
+          goalId: { type: 'string' },
+          reason: { type: 'string' },
+          error: { type: 'string' },
+        },
+      },
+      (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    ),
+    execute(args = {}, exec) {
+      const agent = exec && exec.agent
+      const callerId = agent && agent.id ? String(agent.id) : undefined
+      const requested = typeof args.sessionId === 'string' ? args.sessionId.trim() : ''
+      const sessionId = requested !== '' ? requested : callerId
+      if (!sessionId) {
+        return { ok: false, disarmed: false, reason: 'no-session' }
+      }
+      const result = runtime.disarmGoal(sessionId, sessionId === callerId ? agent : undefined)
+      const payload = {
+        ok: true,
+        disarmed: result.disarmed === true,
+        sessionId,
+        reason: result.reason,
+      }
+      if (result.goalId !== undefined && result.goalId !== null) payload.goalId = String(result.goalId)
+      if (result.error) payload.error = String(result.error)
+      return payload
+    },
+  })
+
+  tool({
+    name: 'continuum_recover_now',
+    description:
+      'Retry the post-restart recovery RIGHT NOW instead of waiting for the next restart. Use it when '
+      + 'a session is still stuck after a restart: its goal has not been re-armed yet, or its agent was '
+      + 'not live when the boot recovery ran. Optional sessionId retries one session; without one every '
+      + 'pending session is retried. Returns, per session, the action that was taken (for example '
+      + '"resume-disarmed-goal", "resume-paused-goal", "rearm-goal", "prompt-continuation", '
+      + '"agent-not-live", "goal-lookup-failed", "nothing") and a short detail.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        sessionId: { type: 'string', description: 'Retry only this session (default: every pending session).' },
+      },
+    },
+    output: textOutput(
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['ok', 'results'],
+        properties: {
+          ok: { type: 'boolean' },
+          results: { type: 'array', items: { type: 'object' } },
+        },
+      },
+      (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    ),
+    async execute(args = {}) {
+      const requested = typeof args.sessionId === 'string' ? args.sessionId.trim() : ''
+      const results = await runtime.recoverNow(requested !== '' ? requested : undefined)
+      return { ok: true, results }
+    },
+  })
+
+  tool({
+    name: 'continuum_handoff',
+    description:
+      'Hand a session whose conversation exceeded the model context window off to a FRESH session. '
+      + 'Such a session is dead: every request to it fails with "context window exceeds limit", and '
+      + 'compacting it needs the same oversized context. The handoff carries the goal objective, the '
+      + 'recorded checkpoint reasons and a bounded tail of the conversation (default 20000 characters, '
+      + '`maxChars`) into a new live session in the same working directory, marks the old session as '
+      + 'handed off (so it is never auto-resumed again) and disarms its goal. The old session and its '
+      + 'conversation are kept, untouched. Without `sessionId` the calling session is handed off. It '
+      + 'reports the new session id, how many characters were carried, and what the human should do.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        sessionId: { type: 'string', description: 'The over-limit session to hand off (default: the calling session).' },
+        maxChars: { type: 'number', description: 'Character budget of the carried conversation tail (default 20000).' },
+      },
+    },
+    output: textOutput(
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['ok'],
+        properties: {
+          ok: { type: 'boolean' },
+          sessionId: { type: 'string' },
+          sourceSessionId: { type: 'string' },
+          carriedChars: { type: 'number' },
+          carriedTailChars: { type: 'number' },
+          disarmedGoal: { type: 'boolean' },
+          error: { type: 'string' },
+          detail: { type: 'string' },
+          instruction: { type: 'string' },
+        },
+      },
+      (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    ),
+    async execute(args = {}, exec) {
+      const agent = exec && exec.agent
+      const requested = typeof args.sessionId === 'string' ? args.sessionId.trim() : ''
+      return runtime.handoff({
+        sessionId: requested !== '' ? requested : undefined,
+        maxChars: typeof args.maxChars === 'number' && Number.isFinite(args.maxChars) && args.maxChars > 0
+          ? args.maxChars
+          : undefined,
+        callerAgent: agent,
+      })
     },
   })
 
@@ -1219,9 +2155,11 @@ function injectPageHeartbeat(html, bootId, routePath) {
 const AUTORESTART_PROMPT = [
   '## Restart policy (dsh-autorestart)',
   '- When DeepSeek Harness itself must restart (for example to load an installed or updated plugin bundle), do NOT kill or relaunch the app yourself with pwsh/taskkill/Stop-Process/npm scripts. A hard guard blocks such commands anyway (denials mention `blockManualRestart`).',
-  '- Call the `continuum_restart` tool instead (optional arguments: `reason`, `resume`, `defer_seconds`). It waits until every conversation is idle (no running turn, no queued inbox work) AND the host has been quiet for `settleMs` (default 2000 ms); the detached helper re-checks that gate immediately before killing, so other conversations are never killed mid-turn. It then relaunches the app, and after boot this plugin resumes the session and continues the work automatically.',
+  '- Call the `continuum_restart` tool instead (optional arguments: `reason`, `resume`, `defer_seconds`, `parkGoals`). It waits until every conversation is idle (no running turn, no queued inbox work) AND the host has been quiet for `settleMs` (default 2000 ms); the detached helper re-checks that gate immediately before killing, so other conversations are never killed mid-turn. It then relaunches the app, and after boot this plugin resumes the session and continues the work automatically.',
+  '- A goal-driven session is DISARMED automatically before the restart (its current round still finishes, nothing is lost), because such a session would otherwise keep the restart waiting forever: disarming only removes the process-local continuation authority, so no new round starts and the session goes idle. After the restart the goal is re-armed and continues. A goal whose round budget is spent cannot be continued and is reported instead. You can disarm your own goal on demand with `continuum_park_goal`, and retry a stuck recovery with `continuum_recover_now`.',
   '- Persist anything the next turn needs before restarting (workspace files, `todo_write`, goal state); do not rely on in-memory state.',
   '- Inspect the lifecycle with `continuum_status`; cancel a pending restart with `continuum_cancel_restart`.',
+  '- A session whose context exceeds the model window can be handed off to a fresh session with `continuum_handoff` (it carries the goal objective, the recorded reasons and a bounded tail of the conversation); this plugin refuses to auto-resume such a session, so hand it off instead of retrying it.',
   '- For multi-turn objectives prefer a durable goal (`create_goal`): after a restart the plugin re-arms it and the goal round driver keeps producing rounds. No goal is required for restart continuation — without one the plugin injects a single continuation message that continues the work in a fresh turn.',
 ].join('\n')
 
@@ -1354,13 +2292,18 @@ function registerManualRestartGuard(ctx, runtime, config) {
     return
   }
   try {
-    tools.guard((exec) => {
-      const hit = detectManualRestart(exec, { webPort: runtime.webPort ?? 0 })
-      if (hit === null) return undefined
-      runtime.manualRestartBlocks += 1
-      runtime.log.warn(`blocked a manual DSH restart attempt (${hit}) through tool "${exec.name}"; steering the agent to continuum_restart`)
-      return MANUAL_RESTART_DENIAL
-    })
+    // The disposer is owned by the fiber (like the tools and the routes), so a
+    // re-applied plugin never leaves a guard of an old instance behind.
+    ctx.effect(
+      () => tools.guard((exec) => {
+        const hit = detectManualRestart(exec, { webPort: runtime.webPort ?? 0 })
+        if (hit === null) return undefined
+        runtime.manualRestartBlocks += 1
+        runtime.log.warn(`blocked a manual DSH restart attempt (${hit}) through tool "${exec.name}"; steering the agent to continuum_restart`)
+        return MANUAL_RESTART_DENIAL
+      }),
+      'dsh-autorestart: manual-restart guard',
+    )
   } catch (error) {
     runtime.log.warn('could not register the manual-restart guard:', String(error))
   }
@@ -1401,6 +2344,273 @@ function admittedByConnection(ctx, req) {
     return rejection === undefined || rejection === null
   } catch {
     return false
+  }
+}
+
+/**
+ * Read a small JSON request body. Never throws: an unreadable or malformed
+ * body simply becomes an empty object.
+ *
+ * @param {any} req
+ * @param {number} [maxBytes]
+ * @returns {Promise<object>}
+ */
+function readJsonBody(req, maxBytes = 64 * 1024) {
+  return new Promise((resolve) => {
+    if (!req || typeof req.on !== 'function') {
+      resolve({})
+      return
+    }
+    let size = 0
+    let settled = false
+    const chunks = []
+    const finish = (text) => {
+      if (settled) return
+      settled = true
+      try {
+        const raw = String(text || '').trim()
+        if (raw === '') {
+          resolve({})
+          return
+        }
+        const parsed = JSON.parse(raw)
+        resolve(parsed && typeof parsed === 'object' ? parsed : {})
+      } catch {
+        resolve({})
+      }
+    }
+    req.on('data', (chunk) => {
+      size += typeof chunk === 'string' ? chunk.length : (chunk && chunk.length ? chunk.length : 0)
+      if (size > maxBytes) {
+        finish('')
+        return
+      }
+      chunks.push(typeof chunk === 'string' ? chunk : String(chunk))
+    })
+    req.on('end', () => finish(chunks.join('')))
+    req.on('error', () => finish(''))
+  })
+}
+
+/**
+ * The ids of the sessions that currently block a pending restart.
+ *
+ * @param {object} runtime
+ * @returns {string[]}
+ */
+function blockingSessionIds(runtime) {
+  const ids = []
+  try {
+    const verdict = runtime.gate()
+    const blockedBy = Array.isArray(verdict.blockedBy) ? verdict.blockedBy : []
+    for (const entry of blockedBy) {
+      if (!entry || typeof entry !== 'object') continue
+      const id = entry.sessionId == null ? '' : String(entry.sessionId)
+      if (id && !ids.includes(id)) ids.push(id)
+    }
+  } catch {}
+  return ids
+}
+
+/**
+ * Build the POST route that disarms the goal of a session.
+ *
+ * It uses the same authentication rule as the health route (loopback OR a
+ * request the connection service admits) and answers JSON only.
+ */
+function buildParkRoute(ctx, runtime, config) {
+  const routePath = resolveParkPath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      if (!req || req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then((payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+        const restart = body.restart === true
+        // Without a session id every session that blocks a pending restart is
+        // parked, so the restart can proceed.
+        const targets = sessionId !== '' ? [sessionId] : blockingSessionIds(runtime)
+        const disarmed = []
+        const reported = []
+        for (const target of targets) {
+          try {
+            const result = runtime.disarmGoal(target)
+            if (result.disarmed) disarmed.push(result)
+            else reported.push(result)
+          } catch (error) {
+            reported.push({ sessionId: target, disarmed: false, reason: 'disarm-failed', error: describeError(error) })
+          }
+        }
+        if (restart && sessionId !== '') {
+          // The session becomes a requester of the pending restart: the restart
+          // proceeds and the session continues afterwards.
+          requestRestart(runtime.state, {
+            reason: 'disarm route requested a restart',
+            bySessionId: sessionId,
+            resume: true,
+            now: Date.now(),
+          })
+          runtime.persist()
+          runtime.startPolling()
+        }
+        res.statusCode = 200
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({
+          ok: true,
+          disarmed,
+          reported,
+          pendingRestart: runtime.state.restart !== null,
+          restartRequested: restart === true && sessionId !== '',
+        }))
+      }).catch((error) => {
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ ok: false, error: describeError(error) }))
+      })
+    },
+  }
+}
+
+/**
+ * Build the POST `/recover` route: retry the post-restart recovery for the
+ * still-pending sessions right now.
+ *
+ * It is the sibling of the `/park` route next to the health route and uses the
+ * same authentication rule (loopback OR a request the connection service
+ * admits). Body: `{ "sessionId"?: string }`; without one every pending session
+ * is retried. The answer reports, per session, the recovery action and detail.
+ */
+function buildRecoverRoute(ctx, runtime, config) {
+  const routePath = resolveRecoverPath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      if (!req || req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then(async (payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+        const results = await runtime.recoverNow(sessionId !== '' ? sessionId : undefined)
+        res.statusCode = 200
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({ ok: true, results }))
+      }).catch((error) => {
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ ok: false, error: describeError(error) }))
+      })
+    },
+  }
+}
+
+/**
+ * Build the POST `/handoff` route: hand an over-limit session off to a fresh
+ * session (the same operation as the `continuum_handoff` tool).
+ *
+ * It sits next to the health route and uses the same authentication rule
+ * (loopback OR a request the connection service admits). Body:
+ * `{ "sessionId"?: string, "maxChars"?: number }`; without a session id the
+ * request is refused, because a route call has no calling session to default to.
+ * The answer reports the new session id and the number of carried characters.
+ */
+function buildHandoffRoute(ctx, runtime, config) {
+  const routePath = resolveHandoffPath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      if (!req || req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then(async (payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+        if (sessionId === '') {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'no-session',
+            instruction: 'Pass { "sessionId": "<id>" }: this route has no calling session to default to.',
+          }))
+          return
+        }
+        const result = await runtime.handoff({
+          sessionId,
+          maxChars: typeof body.maxChars === 'number' && Number.isFinite(body.maxChars) && body.maxChars > 0
+            ? body.maxChars
+            : undefined,
+        })
+        res.statusCode = result && result.ok === true ? 200 : 400
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({
+          ok: result && result.ok === true,
+          sessionId: result ? result.sessionId : undefined,
+          sourceSessionId: result ? result.sourceSessionId : sessionId,
+          carriedChars: result ? result.carriedChars : undefined,
+          error: result ? result.error : 'handoff-failed',
+          instruction: result ? result.instruction : undefined,
+        }))
+      }).catch((error) => {
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ ok: false, error: describeError(error) }))
+      })
+    },
   }
 }
 
@@ -1490,8 +2700,10 @@ function registerHealthRoute(ctx, runtime, config) {
           const verdict = runtime.gate()
           // Best effort: label the blocking sessions with their titles when the
           // session controller knows them. The title is optional, so an entry
-          // without one is sent exactly as the gate produced it.
-          const blockedBy = (Array.isArray(verdict.blockedBy) ? verdict.blockedBy : []).map((entry) => {
+          // without one is sent exactly as the gate produced it. The goal
+          // reason (`goal-active` / `goal-exhausted`) is attached as well, so
+          // the client can tell a goal-driven blocker from a busy session.
+          const blockedBy = goalAwareBlockingDetails(runtime, verdict.blockedBy).map((entry) => {
             if (!entry || typeof entry !== 'object') return entry
             const title = runtime.sessionTitle(entry.sessionId)
             return title ? { ...entry, title } : entry
@@ -1507,6 +2719,13 @@ function registerHealthRoute(ctx, runtime, config) {
             quietForMs: typeof verdict.quietForMs === 'number' ? verdict.quietForMs : 0,
             settleMs: config.settleMs,
             updatedAt: live.updatedAt,
+            // The park route, so the client never has to guess the prefix, and
+            // the goals this plugin already disarmed (they are re-armed after
+            // the restart).
+            parkUrl: resolveParkPath(config),
+            recoverUrl: resolveRecoverPath(config),
+            parkedGoals: parkedGoalList(runtime),
+            recovery: recoveryList(live),
           })
         } catch {
           // The banner must never break the health route: fall back to "no restart".
@@ -1517,6 +2736,10 @@ function registerHealthRoute(ctx, runtime, config) {
             blockedBy: [],
             allowRestart: false,
             quietForMs: 0,
+            parkUrl: resolveParkPath(config),
+            recoverUrl: resolveRecoverPath(config),
+            parkedGoals: [],
+            recovery: [],
           })
         }
         res.statusCode = 200
@@ -1568,6 +2791,9 @@ function registerHealthRoute(ctx, runtime, config) {
       return false
     }
     if (!webServer || typeof webServer.register !== 'function') return false
+    const parkRoute = buildParkRoute(ctx, runtime, config)
+    const recoverRoute = buildRecoverRoute(ctx, runtime, config)
+    const handoffRoute = buildHandoffRoute(ctx, runtime, config)
     try {
       const origin = typeof webServer.getOrigin === 'function' ? String(webServer.getOrigin()) : ''
       const portMatch = /:(\d+)\/?$/.exec(origin)
@@ -1578,6 +2804,21 @@ function registerHealthRoute(ctx, runtime, config) {
     } catch (error) {
       // A duplicate registration means another load of this plugin already owns it.
       runtime.log.warn('could not register the health route:', String(error))
+    }
+    try {
+      target.effect(() => webServer.register(parkRoute), 'dsh-autorestart: park route')
+    } catch (error) {
+      runtime.log.warn('could not register the park route:', String(error))
+    }
+    try {
+      target.effect(() => webServer.register(recoverRoute), 'dsh-autorestart: recover route')
+    } catch (error) {
+      runtime.log.warn('could not register the recover route:', String(error))
+    }
+    try {
+      target.effect(() => webServer.register(handoffRoute), 'dsh-autorestart: handoff route')
+    } catch (error) {
+      runtime.log.warn('could not register the handoff route:', String(error))
     }
     if (config.autoReloadPage !== false && typeof webServer.tapIndex === 'function') {
       try {

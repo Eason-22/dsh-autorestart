@@ -28,6 +28,20 @@
  *      block it (by title when the Host provided one) and how long this
  *      session has been waiting.
  *
+ * Goal-aware states on top of that:
+ *
+ *   - a blocker whose reason is `goal-active` is a session whose armed goal
+ *     keeps driving rounds by itself, so it holds the restart on its own.
+ *     The pill shows that state and offers a button which parks that goal
+ *     and asks for the restart immediately (`POST <parkUrl>` with
+ *     `{ sessionId, restart: true }`);
+ *   - a blocker whose reason is `goal-exhausted` cannot be parked at all
+ *     (the round budget of its goal is used up), so the pill explains that
+ *     and offers no button for it;
+ *   - the Host also reports the goals it already parked (`parkedGoals`): the
+ *     pill says how many were parked and that they continue automatically
+ *     after the restart, and the details panel lists them.
+ *
  * Everything here is side-effect free until `apply(ctx)` runs: no timers, no
  * fetches, no DOM access at module scope.
  */
@@ -40,6 +54,12 @@ window.__ModuleLoader__.load({
 
     const NS = 'dshAutorestart'
     const HEALTH_URL = '/__dsh_autorestart/health?state=1'
+    // The route prefix is derived from the health URL, so the park route is
+    // never spelled out twice: the health path without its last segment.
+    // The Host sends the authoritative `parkUrl` in the state payload; this
+    // is only the fallback for an older Host.
+    const ROUTE_PREFIX = HEALTH_URL.split('?')[0].replace(/\/[^/]*$/, '')
+    const DEFAULT_PARK_URL = ROUTE_PREFIX + '/park'
     const POLL_MS = 2000
     // The brand accent (blue-purple). The pending-restart marker is a brand
     // signal, not a warning: no warning/yellow token is used here.
@@ -65,13 +85,27 @@ window.__ModuleLoader__.load({
       busyPrefix: ' · 被 ',
       busySuffix: ' 个会话占用',
       idle: ' · 空闲后自动重启',
+      goalActive: ' · 被某个会话自动续跑的 goal 占着',
+      goalExhausted: ' · 某个会话的 goal 轮次额度已用完，无法续跑',
+      parkedGoals: ' · 已停泊 {n} 个 goal，重启后自动继续',
+      parkButton: '停泊并重启',
+      parkButtonAria: '停泊该会话的 goal，并立即请求重启',
+      parkBusy: '停泊中…',
+      parkError: '停泊失败：{message}',
       tooltip: '等待其他会话空闲后自动重启；重启后会自动继续本会话进度',
+      tooltipWithError: '等待其他会话空闲后自动重启；重启后会自动继续本会话进度。{message}',
       dotAria: '待重启',
       panelHeading: '待重启',
       panelStateBusy: '等待其他会话空闲后重启',
       panelStateIdle: '等待空闲窗口后重启',
+      panelStateGoalActive: '等待其他会话停泊它自动续跑的 goal',
+      panelStateGoalExhausted: '等待其他会话的 goal（轮次额度已用完）',
       panelBlockedTitle: '占用会话：{title}',
       panelBlockedGeneric: '有一个会话正在运行',
+      panelGoalActiveLine: '占用会话「{title}」：goal 正在自动续跑（goal-active）',
+      panelGoalExhaustedLine: '占用会话「{title}」：goal 轮次额度已用完，无法继续（goal-exhausted）',
+      panelParkedTitle: '已停泊的 goal（重启后自动继续）：',
+      panelParkedGoal: '会话 {session} · {goal}',
       panelWaiting: '已等待 {duration}',
       panelResume: '重启后本会话会自动继续进度',
       durationSeconds: '{n} 秒',
@@ -84,14 +118,29 @@ window.__ModuleLoader__.load({
       busyPrefix: ' · blocked by ',
       busySuffix: ' session(s)',
       idle: ' · restarts once idle',
+      goalActive: ' · held by a self-continuing goal',
+      goalExhausted: ' · a goal ran out of rounds',
+      parkedGoals: ' · {n} goal(s) parked, they continue after the restart',
+      parkButton: 'Park & restart',
+      parkButtonAria: 'Park that session goal and request the restart now',
+      parkBusy: 'Parking…',
+      parkError: 'Park failed: {message}',
       tooltip:
         'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart.',
+      tooltipWithError:
+        'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart. {message}',
       dotAria: 'Pending restart',
       panelHeading: 'Pending restart',
       panelStateBusy: 'Waiting for the other sessions to become idle',
       panelStateIdle: 'Waiting for the idle window',
+      panelStateGoalActive: 'Waiting for the other sessions to park their self-continuing goal',
+      panelStateGoalExhausted: 'Waiting for the other sessions\' goal (its round budget is used up)',
       panelBlockedTitle: 'Blocking session: {title}',
       panelBlockedGeneric: 'One session is running',
+      panelGoalActiveLine: 'Blocking session "{title}": the goal keeps driving rounds by itself (goal-active)',
+      panelGoalExhaustedLine: 'Blocking session "{title}": the goal ran out of rounds and cannot continue (goal-exhausted)',
+      panelParkedTitle: 'Parked goals (they continue after the restart):',
+      panelParkedGoal: 'session {session} · {goal}',
       panelWaiting: 'Waiting for {duration}',
       panelResume: 'This session resumes its progress automatically after the restart.',
       durationSeconds: '{n}s',
@@ -274,6 +323,24 @@ window.__ModuleLoader__.load({
       return fill(t('durationHours'), { n: hours, m: minutes % 60 })
     }
 
+    /**
+     * The park route to POST to: the one the Host sent with the state payload,
+     * or the one derived from the health path when the Host is older.
+     */
+    function parkUrlFor(info) {
+      const sent = info && typeof info.parkUrl === 'string' ? info.parkUrl.trim() : ''
+      if (sent.startsWith('/')) return sent
+      return DEFAULT_PARK_URL
+    }
+
+    /** A short, human readable description of a failed request. */
+    function describeError(error) {
+      if (!error) return 'unknown error'
+      if (typeof error === 'string') return error
+      if (typeof error.message === 'string' && error.message !== '') return error.message
+      return String(error)
+    }
+
     // The pill sits in the composer tool row, so it must fit the toolbar
     // height (~22px) and never push that row around: `flex: 'none'` plus a
     // fixed height, and the text is clipped with an ellipsis instead of
@@ -380,6 +447,42 @@ window.__ModuleLoader__.load({
       opacity: 0.75,
     }
 
+    // The park button lives inside the pill and reuses the pill's own button
+    // look (same tokens, same border, same radius), only smaller so the pill
+    // stays a one-line chip. It is inline (no absolute/fixed positioning, no
+    // negative margins) and never becomes a second element in the slot.
+    const PARK_BUTTON_STYLE = {
+      ...PILL_STYLE,
+      height: 18,
+      padding: '0 6px',
+      fontSize: 11,
+      lineHeight: '16px',
+      gap: 4,
+    }
+
+    // The park button while its request is in flight.
+    const PARK_BUTTON_BUSY_STYLE = {
+      ...PARK_BUTTON_STYLE,
+      cursor: 'default',
+      opacity: 0.6,
+    }
+
+    // The short "N goals parked" line inside the pill.
+    const PARKED_LINE_STYLE = {
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      opacity: 0.75,
+    }
+
+    // The inline error line of the details panel.
+    const PANEL_ERROR_STYLE = {
+      margin: '2px 0',
+      fontWeight: 600,
+      color: 'var(--dsw-alias-danger, #d14343)',
+    }
+
     /**
      * One compact pill in the composer tool row, visible only while THIS
      * session is waiting for a pending restart. Clicking it (or pressing
@@ -390,8 +493,13 @@ window.__ModuleLoader__.load({
       const hasSession = sessionId !== null && sessionId !== ''
       const info = useSharedInfo(hasSession)
       const [open, setOpen] = useState(false)
+      // The session id of the goal that is currently being parked, or null.
+      const [parking, setParking] = useState(null)
+      // The message of the last failed park request (the Host's own message).
+      const [parkError, setParkError] = useState('')
       const [, setTick] = useState(0)
       const wrapperRef = useRef(null)
+      const t = translate ?? ((name) => name)
 
       const pending = Boolean(info && info.pendingRestart === true)
       // The restart is imminent: the Host's idle gate is open, so the restart
@@ -400,7 +508,11 @@ window.__ModuleLoader__.load({
 
       // The panel never outlives the pending state.
       useEffect(() => {
-        if (!pending) setOpen(false)
+        if (!pending) {
+          setOpen(false)
+          setParkError('')
+          setParking(null)
+        }
       }, [pending])
 
       // Clicking outside the panel or pressing Escape closes it. Both
@@ -440,11 +552,22 @@ window.__ModuleLoader__.load({
 
       const blockedBy = Array.isArray(info.blockedBy) ? info.blockedBy : []
       const others = blockedBy.filter((entry) => entry && String(entry.sessionId) !== key)
-      const otherBusy = others.length
+      // A goal-driven blocker: an armed goal that keeps driving rounds by
+      // itself (`goal-active`, parkable) or a goal whose round budget is used
+      // up (`goal-exhausted`, not parkable at all).
+      const goalActive = others.filter((entry) => String(entry.reason) === 'goal-active')
+      const goalExhausted = others.filter((entry) => String(entry.reason) === 'goal-exhausted')
+      const otherBusy = others.length - goalActive.length - goalExhausted.length
+      // The goals the Host already parked: they continue after the restart.
+      const parkedGoals = Array.isArray(info.parkedGoals) ? info.parkedGoals : []
 
-      const t = translate ?? ((name) => name)
-      const status =
-        otherBusy > 0 ? `${t('busyPrefix')}${otherBusy}${t('busySuffix')}` : t('idle')
+      const status = goalActive.length > 0
+        ? t('goalActive')
+        : goalExhausted.length > 0
+          ? t('goalExhausted')
+          : otherBusy > 0
+            ? `${t('busyPrefix')}${otherBusy}${t('busySuffix')}`
+            : t('idle')
 
       if (pulsing) ensurePulseStyle()
 
@@ -458,6 +581,57 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * Park the goal of one blocking session and ask for the restart now.
+       *
+       * The Host parks that goal (so the session stops driving rounds) and
+       * makes this session a requester of the pending restart. The shared
+       * poll picks the new state up on its next tick.
+       *
+       * Never throws: a refused request (403) or a conflict (409) shows the
+       * Host's own message as an inline error line instead.
+       */
+      const parkAndRestart = async (targetSessionId) => {
+        if (parking) return
+        setParking(targetSessionId)
+        setParkError('')
+        try {
+          const response = await fetch(parkUrlFor(info), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: targetSessionId, restart: true }),
+          })
+          let body = null
+          try {
+            body = await response.json()
+          } catch {
+            body = null
+          }
+          if (!response.ok) {
+            const message = body && typeof body === 'object'
+              ? (body.error || body.message || '')
+              : ''
+            setParkError(fill(t('parkError'), { message: message || String(response.status) }))
+            setOpen(true)
+            return
+          }
+          if (body && Array.isArray(body.reported)) {
+            const reported = body.reported.find(
+              (entry) => entry && String(entry.sessionId) === String(targetSessionId),
+            )
+            if (reported) {
+              setParkError(fill(t('parkError'), { message: String(reported.reason || 'not-parked') }))
+              setOpen(true)
+            }
+          }
+        } catch (error) {
+          setParkError(fill(t('parkError'), { message: describeError(error) }))
+          setOpen(true)
+        } finally {
+          setParking(null)
+        }
+      }
+
       const pendingSince = stateStore.pendingSince
       const waitingMs = pendingSince === null || pendingSince === undefined
         ? 0
@@ -468,17 +642,60 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { key: 'state', style: PANEL_LINE_STYLE },
-          otherBusy > 0 ? t('panelStateBusy') : t('panelStateIdle'),
+          goalActive.length > 0
+            ? t('panelStateGoalActive')
+            : goalExhausted.length > 0
+              ? t('panelStateGoalExhausted')
+              : otherBusy > 0
+                ? t('panelStateBusy')
+                : t('panelStateIdle'),
         ),
       ]
+      if (parkError) {
+        panelLines.push(h('div', { key: 'error', style: PANEL_ERROR_STYLE }, parkError))
+      }
       others.forEach((entry, index) => {
         const title = entry && typeof entry.title === 'string' ? entry.title.trim() : ''
+        const reason = entry && typeof entry.reason === 'string' ? entry.reason : ''
+        const name = title || String(entry && entry.sessionId)
+        if (reason === 'goal-active') {
+          panelLines.push(h(
+            'div',
+            { key: 'blocked-' + index, style: PANEL_LINE_STYLE },
+            fill(t('panelGoalActiveLine'), { title: name }),
+          ))
+          return
+        }
+        if (reason === 'goal-exhausted') {
+          panelLines.push(h(
+            'div',
+            { key: 'blocked-' + index, style: PANEL_LINE_STYLE },
+            fill(t('panelGoalExhaustedLine'), { title: name }),
+          ))
+          return
+        }
         panelLines.push(h(
           'div',
           { key: 'blocked-' + index, style: PANEL_LINE_STYLE },
           title ? fill(t('panelBlockedTitle'), { title }) : t('panelBlockedGeneric'),
         ))
       })
+      if (parkedGoals.length > 0) {
+        panelLines.push(h(
+          'div',
+          { key: 'parked-title', style: PANEL_MUTED_STYLE },
+          t('panelParkedTitle'),
+        ))
+        parkedGoals.forEach((entry, index) => {
+          const parkedSession = entry && entry.sessionId != null ? String(entry.sessionId) : ''
+          const parkedGoal = entry && entry.goalId != null ? String(entry.goalId) : '-'
+          panelLines.push(h(
+            'div',
+            { key: 'parked-' + index, style: PANEL_LINE_STYLE },
+            fill(t('panelParkedGoal'), { session: parkedSession, goal: parkedGoal }),
+          ))
+        })
+      }
       panelLines.push(h(
         'div',
         { key: 'waiting', style: PANEL_LINE_STYLE },
@@ -502,7 +719,9 @@ window.__ModuleLoader__.load({
           'div',
           {
             style: PILL_STYLE,
-            title: t('tooltip'),
+            title: parkError
+              ? fill(t('tooltipWithError'), { message: parkError })
+              : t('tooltip'),
             role: 'button',
             tabIndex: 0,
             'aria-haspopup': 'dialog',
@@ -512,6 +731,46 @@ window.__ModuleLoader__.load({
           },
           h('span', { style: dotStyle(DOT_STYLE, pulsing), 'aria-hidden': 'true' }),
           h('span', { style: TEXT_STYLE }, h('b', null, t('label')), status),
+          // One park button per goal-driven blocker that can be parked. It
+          // lives inside the pill, so the slot still has a single root.
+          goalActive.map((entry, index) => {
+            const target = String(entry.sessionId)
+            const busy = parking === target
+            const onParkClick = (event) => {
+              // The button must not toggle the details panel of the pill.
+              if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+              void parkAndRestart(target)
+            }
+            const onParkKeyDown = (event) => {
+              if (!event) return
+              const pressed = event.key
+              if (pressed === 'Enter' || pressed === ' ' || pressed === 'Spacebar') {
+                // Same here: the pill's own Enter / Space handler must not run.
+                if (typeof event.stopPropagation === 'function') event.stopPropagation()
+              }
+            }
+            return h(
+              'button',
+              {
+                key: 'park-' + index,
+                type: 'button',
+                style: busy ? PARK_BUTTON_BUSY_STYLE : PARK_BUTTON_STYLE,
+                title: t('parkButtonAria'),
+                'aria-label': t('parkButtonAria'),
+                disabled: parking !== null,
+                onClick: onParkClick,
+                onKeyDown: onParkKeyDown,
+              },
+              busy ? t('parkBusy') : t('parkButton'),
+            )
+          }),
+          parkedGoals.length > 0
+            ? h(
+              'span',
+              { style: PARKED_LINE_STYLE },
+              fill(t('parkedGoals'), { n: parkedGoals.length }),
+            )
+            : null,
         ),
         open
           ? h(

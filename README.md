@@ -7,7 +7,7 @@ Restart DeepSeek Harness without losing the work that is currently running.
 [![dsh-plugin](https://img.shields.io/github/topics/dsh-plugin?style=flat-square)](https://github.com/topics/dsh-plugin)
 [![language](https://img.shields.io/badge/language-JavaScript-yellow?style=flat-square)](https://github.com/Eason-22/dsh-autorestart)
 
-Chinese version: [README.zh.md](README.zh.md)
+Chinese version: [README.zh.md](docs/README.zh.md)
 
 ## What it does
 

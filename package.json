@@ -37,7 +37,7 @@
     "assets/*.png",
     "screenshots.json",
     "README.md",
-    "README.zh.md"
+    "docs/*.md"
   ],
   "dsh": {
     "bundle": {

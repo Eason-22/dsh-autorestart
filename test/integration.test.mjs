@@ -1394,3 +1394,120 @@ test('the manual retry stamps the record of the goal it re-armed', async () => {
   const state = JSON.parse(fs.readFileSync(file, 'utf8'));
   assert.ok(state.disarmedGoals['sess-goal'].resumedAt > 0, 'the manual retry stamps the resume too');
 });
+
+// ---------------------------------------------------------------------------
+// The session controller is the only way to resume a session that is NOT live in
+// this process. A real incident: it was read through the optional `ctx.get` and
+// returned undefined, so every cold session reported "session-controller-unavailable"
+// and was silently never resumed.
+// ---------------------------------------------------------------------------
+
+test('a controller that only exposes prompt resumes the session and admits the message', async () => {
+  const { file } = tempStateFile('controller-prompt');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-cold', reason: 'host restart' });
+    markRunning(state, { sessionId: 'sess-cold', reason: 'turn' });
+  });
+  const prompts = [];
+  const fake = createFakeContext({
+    services: {
+      sessionController: {
+        prompt: async (request) => {
+          prompts.push(request);
+          return { accepted: true };
+        },
+      },
+    },
+  });
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  assert.equal(prompts.length, 1, 'prompt() is called exactly once');
+  assert.equal(prompts[0].sessionId, 'sess-cold');
+  assert.equal(prompts[0].mode, 'queue');
+  assert.equal(typeof prompts[0].requestId, 'string', 'each call carries a fresh request id');
+  assert.ok(prompts[0].content[0].text.includes('continuum_resume'), 'the continuation text is admitted');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.sessions['sess-cold'].lastRecoveryAction, 'resume-via-prompt');
+  assert.equal(state.sessions['sess-cold'].pendingResume, false, 'the session is done once the message is accepted');
+});
+
+test('a controller with neither resolveAgent nor prompt reports what is missing', async () => {
+  const { file } = tempStateFile('controller-empty');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-cold', reason: 'host restart' });
+  });
+  const fake = createFakeContext({ services: { sessionController: {} } });
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.sessions['sess-cold'].lastRecoveryAction, 'session-controller-unavailable');
+  assert.ok(
+    state.sessions['sess-cold'].lastRecoveryDetail.includes('neither resolveAgent nor prompt'),
+    'the detail names the missing methods, not just "unavailable"',
+  );
+  assert.equal(state.sessions['sess-cold'].pendingResume, true, 'the session stays recoverable');
+});
+
+test('the declared dependency wins over the optional lookup', async () => {
+  const { file } = tempStateFile('controller-inject');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-cold', reason: 'host restart' });
+  });
+  const agent = fakeAgent('sess-cold');
+  const prompts = [];
+  const fake = createFakeContext({
+    services: {
+      // The optional lookup would take the prompt-only path.
+      sessionController: { prompt: async (request) => { prompts.push(request); return { accepted: true }; } },
+    },
+  });
+  // The declared dependency resolves an agent instead.
+  fake.ctx.sessionController = { resolveAgent: async () => ({ agent }) };
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  await runBootRecovery(fake);
+
+  assert.equal(prompts.length, 0, 'the optional path is not used when the dependency is present');
+  assert.equal(agent.followups.length, 1, 'the continuation message goes to the resolved agent');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.sessions['sess-cold'].lastRecoveryAction, 'goal-lookup-failed');
+  assert.ok(state.sessions['sess-cold'].lastRecoveryDetail.includes('continuation message queued'));
+});
+
+test('force re-opens a session whose stale over-limit mark would otherwise skip it', async () => {
+  const { file } = tempStateFile('force-recover');
+  seedPreviousBoot(file, (state) => {
+    markPendingResume(state, { sessionId: 'sess-stale', reason: 'host restart' });
+    markRunning(state, { sessionId: 'sess-stale', reason: 'turn' });
+    // A false-positive record from the old detector: pendingResume already cleared.
+    state.sessions['sess-stale'].pendingResume = false;
+    state.sessions['sess-stale'].interrupted = false;
+    state.sessions['sess-stale'].resumeAttempts = 2;
+    state.sessions['sess-stale'].contextOverflow = {
+      over: true,
+      inputTokens: null,
+      contextWindow: null,
+      detail: 'a tool output mentioned the phrase',
+      detectedAt: Date.now() - 1000,
+    };
+  });
+  const agent = fakeAgent('sess-stale');
+  const fake = createFakeContext({
+    services: { sessionController: { resolveAgent: async () => ({ agent }) } },
+  });
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
+  const tool = fake.tools.find((entry) => entry.name === 'continuum_recover_now');
+  assert.ok(tool, 'continuum_recover_now must accept force');
+
+  const before = await tool.execute({ sessionId: 'sess-stale' });
+  assert.equal(before.results[0].detail, 'no-pending-recovery', 'without force the stale record still blocks it');
+
+  const after = await tool.execute({ sessionId: 'sess-stale', force: true });
+  assert.equal(after.results.length, 1);
+  assert.notEqual(after.results[0].detail, 'no-pending-recovery', 'force re-opens the session');
+  const state = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(state.sessions['sess-stale'].contextOverflow ?? null, null, 'the stale record is cleared');
+  assert.equal(state.sessions['sess-stale'].resumeAttempts, 1, 'the attempt counter was reset before the retry');
+  assert.equal(agent.followups.length, 1, 'the session got its continuation message');
+});

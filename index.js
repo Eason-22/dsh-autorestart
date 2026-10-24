@@ -2110,6 +2110,10 @@ function registerTools(ctx, runtime, config) {
       additionalProperties: false,
       properties: {
         sessionId: { type: 'string', description: 'Retry only this session (default: every pending session).' },
+        force: {
+          type: 'boolean',
+          description: 'Re-open this explicit session before retrying: clears a stale over-limit / handoff mark and resets the attempt counter.',
+        },
       },
     },
     output: textOutput(
@@ -2126,7 +2130,7 @@ function registerTools(ctx, runtime, config) {
     ),
     async execute(args = {}) {
       const requested = typeof args.sessionId === 'string' ? args.sessionId.trim() : ''
-      const results = await runtime.recoverNow(requested !== '' ? requested : undefined)
+      const results = await runtime.recoverNow(requested !== '' ? requested : undefined, { force: args.force === true })
       return { ok: true, results }
     },
   })

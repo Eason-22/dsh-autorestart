@@ -23,7 +23,7 @@ import {
   markPendingResume,
   writeState,
 } from '../lib/checkpoint.js'
-import { HANDOFF_DEFAULT_MAX_CHARS, composeHandoff } from '../lib/lifecycle.js'
+import { HANDOFF_DEFAULT_MAX_CHARS, composeHandoff, contextOverflow } from '../lib/lifecycle.js'
 
 /** Create a temporary state-file path per test. */
 function tempStateFile(label) {
@@ -521,3 +521,77 @@ test('the handoff route requires the same authentication as the health route', a
   assert.notEqual(responded.statusCode, 403, 'an admitted browser request is not refused')
   assert.equal(responded.statusCode, 200)
 })
+
+// ---------------------------------------------------------------------------
+// The context-overflow verdict must never be flipped by PROSE.
+//
+// A real incident: a tool result that merely quoted the phrase "context window
+// exceeds limit" made the detector mark a healthy session over-limit, which took
+// it out of the automatic resume path and then deleted its checkpoint entry.
+// ---------------------------------------------------------------------------
+
+test('a tool output that merely mentions the phrase does not mark the session over-limit', () => {
+  const verdict = contextOverflow({
+    messages: [
+      { role: 'user', content: [{ type: 'text', text: 'why did that turn fail?' }] },
+      {
+        role: 'tool',
+        content: 'grep output: 400 invalid params: context window exceeds limit (2013) — that is the error we saw earlier',
+      },
+    ],
+    contextWindow: null,
+    events: [],
+  });
+  assert.equal(verdict.over, false, 'prose in an ordinary message is not evidence');
+});
+
+test('token numbers are authoritative even when a message text mentions the phrase', () => {
+  const verdict = contextOverflow({
+    messages: [
+      { role: 'assistant', usage: { inputTokens: 40_000 }, content: 'notes: context window exceeded last week' },
+      { role: 'tool', content: 'context window exceeds limit (2013)' },
+    ],
+    contextWindow: 128_000,
+    events: [],
+  });
+  assert.equal(verdict.over, false, 'the last request fit inside the window');
+  assert.equal(verdict.inputTokens, 40_000);
+});
+
+test('a structured turn/end error IS evidence, and numbers still win when known', () => {
+  const failed = contextOverflow({
+    messages: [],
+    contextWindow: null,
+    events: [
+      { type: 'turn/start', data: {} },
+      {
+        type: 'turn/end',
+        data: { reason: { kind: 'error', error: { message: '400 invalid_request_error: invalid params, context window exceeds limit (2013)' } } },
+      },
+    ],
+  });
+  assert.equal(failed.over, true, 'a structured turn failure is real evidence');
+
+  const numbersWin = contextOverflow({
+    messages: [{ role: 'assistant', usage: { inputTokens: 10_000 } }],
+    contextWindow: 128_000,
+    events: [
+      {
+        type: 'turn/end',
+        data: { reason: { kind: 'error', error: { message: 'context window exceeds limit' } } },
+      },
+    ],
+  });
+  assert.equal(numbersWin.over, false, 'known numbers decide, an older failure does not');
+});
+
+test('an over-limit numeric verdict is still reported', () => {
+  const verdict = contextOverflow({
+    messages: [{ role: 'assistant', usage: { inputTokens: 200_000 } }],
+    contextWindow: 128_000,
+    events: [],
+  });
+  assert.equal(verdict.over, true);
+  assert.equal(verdict.inputTokens, 200_000);
+  assert.equal(verdict.contextWindow, 128_000);
+});

@@ -93,6 +93,7 @@ window.__ModuleLoader__.load({
       parkBusy: '停泊中…',
       parkError: '停泊失败：{message}',
       tooltip: '等待其他会话空闲后自动重启；重启后会自动继续本会话进度',
+      tooltipBusy: '等待其他会话空闲后自动重启（计数含“排队但还没开始”的任务）；重启后本会话会自动继续进度',
       tooltipWithError: '等待其他会话空闲后自动重启；重启后会自动继续本会话进度。{message}',
       dotAria: '待重启',
       panelHeading: '待重启',
@@ -127,6 +128,8 @@ window.__ModuleLoader__.load({
       parkError: 'Park failed: {message}',
       tooltip:
         'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart.',
+      tooltipBusy:
+        'Waits for the other sessions to become idle, then restarts automatically (the count includes work that is queued but not started yet); this session resumes its progress after the restart.',
       tooltipWithError:
         'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart. {message}',
       dotAria: 'Pending restart',
@@ -492,13 +495,11 @@ window.__ModuleLoader__.load({
       const sessionId = props && props.sessionId !== undefined ? props.sessionId : null
       const hasSession = sessionId !== null && sessionId !== ''
       const info = useSharedInfo(hasSession)
-      const [open, setOpen] = useState(false)
       // The session id of the goal that is currently being parked, or null.
       const [parking, setParking] = useState(null)
       // The message of the last failed park request (the Host's own message).
+      // It is shown in the pill's tooltip: the pill has no details panel.
       const [parkError, setParkError] = useState('')
-      const [, setTick] = useState(0)
-      const wrapperRef = useRef(null)
       const t = translate ?? ((name) => name)
 
       const pending = Boolean(info && info.pendingRestart === true)
@@ -506,42 +507,13 @@ window.__ModuleLoader__.load({
       // happens as soon as this poll cycle ends.
       const pulsing = pending && Boolean(info.allowRestart === true) && !prefersReducedMotion()
 
-      // The panel never outlives the pending state.
+      // A park error never outlives the pending state.
       useEffect(() => {
         if (!pending) {
-          setOpen(false)
           setParkError('')
           setParking(null)
         }
       }, [pending])
-
-      // Clicking outside the panel or pressing Escape closes it. Both
-      // listeners are removed when the panel closes and on unmount.
-      useEffect(() => {
-        if (!open) return undefined
-        const onPointerDown = (event) => {
-          const node = wrapperRef.current
-          if (node && event && event.target && typeof node.contains === 'function'
-            && node.contains(event.target)) return
-          setOpen(false)
-        }
-        const onKeyDown = (event) => {
-          if (event && event.key === 'Escape') setOpen(false)
-        }
-        document.addEventListener('mousedown', onPointerDown, true)
-        document.addEventListener('keydown', onKeyDown, true)
-        return () => {
-          document.removeEventListener('mousedown', onPointerDown, true)
-          document.removeEventListener('keydown', onKeyDown, true)
-        }
-      }, [open])
-
-      // A one-second tick keeps the "waiting for" duration in the panel fresh.
-      useEffect(() => {
-        if (!open) return undefined
-        const timer = setInterval(() => setTick((value) => value + 1), 1000)
-        return () => clearInterval(timer)
-      }, [open])
 
       if (!info || info.pendingRestart !== true) return null
 
@@ -551,15 +523,22 @@ window.__ModuleLoader__.load({
       if (!waiting) return null
 
       const blockedBy = Array.isArray(info.blockedBy) ? info.blockedBy : []
-      const others = blockedBy.filter((entry) => entry && String(entry.sessionId) !== key)
+      // One entry per SESSION: a conversation that is running *and* still has
+      // queued work is one conversation, so the pill never counts it twice.
+      const seenSessions = new Set()
+      const others = blockedBy.filter((entry) => {
+        if (!entry) return false
+        const id = String(entry.sessionId)
+        if (id === key || seenSessions.has(id)) return false
+        seenSessions.add(id)
+        return true
+      })
       // A goal-driven blocker: an armed goal that keeps driving rounds by
       // itself (`goal-active`, parkable) or a goal whose round budget is used
       // up (`goal-exhausted`, not parkable at all).
       const goalActive = others.filter((entry) => String(entry.reason) === 'goal-active')
       const goalExhausted = others.filter((entry) => String(entry.reason) === 'goal-exhausted')
       const otherBusy = others.length - goalActive.length - goalExhausted.length
-      // The goals the Host already parked: they continue after the restart.
-      const parkedGoals = Array.isArray(info.parkedGoals) ? info.parkedGoals : []
 
       const status = goalActive.length > 0
         ? t('goalActive')
@@ -570,16 +549,6 @@ window.__ModuleLoader__.load({
             : t('idle')
 
       if (pulsing) ensurePulseStyle()
-
-      const toggle = () => setOpen((value) => !value)
-      const onKeyDown = (event) => {
-        if (!event) return
-        const pressed = event.key
-        if (pressed === 'Enter' || pressed === ' ' || pressed === 'Spacebar') {
-          event.preventDefault()
-          toggle()
-        }
-      }
 
       /**
        * Park the goal of one blocking session and ask for the restart now.
@@ -612,7 +581,6 @@ window.__ModuleLoader__.load({
               ? (body.error || body.message || '')
               : ''
             setParkError(fill(t('parkError'), { message: message || String(response.status) }))
-            setOpen(true)
             return
           }
           if (body && Array.isArray(body.reported)) {
@@ -621,96 +589,18 @@ window.__ModuleLoader__.load({
             )
             if (reported) {
               setParkError(fill(t('parkError'), { message: String(reported.reason || 'not-parked') }))
-              setOpen(true)
             }
           }
         } catch (error) {
           setParkError(fill(t('parkError'), { message: describeError(error) }))
-          setOpen(true)
         } finally {
           setParking(null)
         }
       }
 
-      const pendingSince = stateStore.pendingSince
-      const waitingMs = pendingSince === null || pendingSince === undefined
-        ? 0
-        : Math.max(0, Date.now() - pendingSince)
-
-      const panelLines = [
-        h('div', { key: 'heading', style: PANEL_HEADING_STYLE }, t('panelHeading')),
-        h(
-          'div',
-          { key: 'state', style: PANEL_LINE_STYLE },
-          goalActive.length > 0
-            ? t('panelStateGoalActive')
-            : goalExhausted.length > 0
-              ? t('panelStateGoalExhausted')
-              : otherBusy > 0
-                ? t('panelStateBusy')
-                : t('panelStateIdle'),
-        ),
-      ]
-      if (parkError) {
-        panelLines.push(h('div', { key: 'error', style: PANEL_ERROR_STYLE }, parkError))
-      }
-      others.forEach((entry, index) => {
-        const title = entry && typeof entry.title === 'string' ? entry.title.trim() : ''
-        const reason = entry && typeof entry.reason === 'string' ? entry.reason : ''
-        const name = title || String(entry && entry.sessionId)
-        if (reason === 'goal-active') {
-          panelLines.push(h(
-            'div',
-            { key: 'blocked-' + index, style: PANEL_LINE_STYLE },
-            fill(t('panelGoalActiveLine'), { title: name }),
-          ))
-          return
-        }
-        if (reason === 'goal-exhausted') {
-          panelLines.push(h(
-            'div',
-            { key: 'blocked-' + index, style: PANEL_LINE_STYLE },
-            fill(t('panelGoalExhaustedLine'), { title: name }),
-          ))
-          return
-        }
-        panelLines.push(h(
-          'div',
-          { key: 'blocked-' + index, style: PANEL_LINE_STYLE },
-          title ? fill(t('panelBlockedTitle'), { title }) : t('panelBlockedGeneric'),
-        ))
-      })
-      if (parkedGoals.length > 0) {
-        panelLines.push(h(
-          'div',
-          { key: 'parked-title', style: PANEL_MUTED_STYLE },
-          t('panelParkedTitle'),
-        ))
-        parkedGoals.forEach((entry, index) => {
-          const parkedSession = entry && entry.sessionId != null ? String(entry.sessionId) : ''
-          const parkedGoal = entry && entry.goalId != null ? String(entry.goalId) : '-'
-          panelLines.push(h(
-            'div',
-            { key: 'parked-' + index, style: PANEL_LINE_STYLE },
-            fill(t('panelParkedGoal'), { session: parkedSession, goal: parkedGoal }),
-          ))
-        })
-      }
-      panelLines.push(h(
-        'div',
-        { key: 'waiting', style: PANEL_LINE_STYLE },
-        fill(t('panelWaiting'), { duration: formatWaiting(waitingMs, t) }),
-      ))
-      panelLines.push(h(
-        'div',
-        { key: 'resume', style: PANEL_MUTED_STYLE },
-        t('panelResume'),
-      ))
-
       return h(
         'div',
         {
-          ref: wrapperRef,
           style: WRAPPER_STYLE,
           role: 'status',
           'aria-live': 'polite',
@@ -721,13 +611,7 @@ window.__ModuleLoader__.load({
             style: PILL_STYLE,
             title: parkError
               ? fill(t('tooltipWithError'), { message: parkError })
-              : t('tooltip'),
-            role: 'button',
-            tabIndex: 0,
-            'aria-haspopup': 'dialog',
-            'aria-expanded': open ? 'true' : 'false',
-            onClick: toggle,
-            onKeyDown,
+              : (otherBusy > 0 ? t('tooltipBusy') : t('tooltip')),
           },
           h('span', { style: dotStyle(DOT_STYLE, pulsing), 'aria-hidden': 'true' }),
           h('span', { style: TEXT_STYLE }, h('b', null, t('label')), status),
@@ -737,7 +621,6 @@ window.__ModuleLoader__.load({
             const target = String(entry.sessionId)
             const busy = parking === target
             const onParkClick = (event) => {
-              // The button must not toggle the details panel of the pill.
               if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
               void parkAndRestart(target)
             }
@@ -745,7 +628,6 @@ window.__ModuleLoader__.load({
               if (!event) return
               const pressed = event.key
               if (pressed === 'Enter' || pressed === ' ' || pressed === 'Spacebar') {
-                // Same here: the pill's own Enter / Space handler must not run.
                 if (typeof event.stopPropagation === 'function') event.stopPropagation()
               }
             }
@@ -764,25 +646,7 @@ window.__ModuleLoader__.load({
               busy ? t('parkBusy') : t('parkButton'),
             )
           }),
-          parkedGoals.length > 0
-            ? h(
-              'span',
-              { style: PARKED_LINE_STYLE },
-              fill(t('parkedGoals'), { n: parkedGoals.length }),
-            )
-            : null,
         ),
-        open
-          ? h(
-            'div',
-            {
-              style: PANEL_STYLE,
-              role: 'dialog',
-              'aria-label': t('panelHeading'),
-            },
-            panelLines,
-          )
-          : null,
       )
     }
 

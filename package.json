@@ -1,6 +1,6 @@
 {
   "name": "dsh-autorestart",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "DeepSeek Harness plugin: restart without losing work. Waits until every conversation is idle, restarts the host, then automatically resumes the interrupted sessions. AI-generated, not human-reviewed: use with caution.",
   "license": "MIT",

@@ -350,13 +350,21 @@ test('recoverableSessions returns running/pending entries newest first, capped',
       ...entryFor(createEmptyState(T), 'done'),
       pendingResume: true,
       updatedAt: T + 50,
-      goal: { goalId: 'g', goalRevision: 1, phase: 'done', updatedAt: T },
+      done: true,
+    },
+    // A COMPLETE goal no longer means "session done": an interrupted turn still
+    // deserves its continuation message.
+    completedGoal: {
+      ...entryFor(createEmptyState(T), 'completedGoal'),
+      pendingResume: true,
+      updatedAt: T + 60,
+      goal: { goalId: 'g', goalRevision: 1, phase: 'complete', updatedAt: T },
     },
   };
 
   const all = recoverableSessions(state, {});
-  assert.deepEqual(all.map((entry) => entry.sessionId), ['newer', 'old']);
-  assert.deepEqual(recoverableSessions(state, { limit: 1 }).map((entry) => entry.sessionId), ['newer']);
+  assert.deepEqual(all.map((entry) => entry.sessionId), ['completedGoal', 'newer', 'old']);
+  assert.deepEqual(recoverableSessions(state, { limit: 1 }).map((entry) => entry.sessionId), ['completedGoal']);
   assert.deepEqual(recoverableSessions(state, { limit: 0 }), []);
 });
 

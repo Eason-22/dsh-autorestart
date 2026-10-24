@@ -150,11 +150,13 @@ function delay(ms) {
 }
 
 /**
- * Hard dependencies. `sessionController` is read optionally (`ctx.get`) so the plugin
- * also loads in compositions without the web session controller; it simply cannot
- * resume agents there.
+ * Hard dependencies. `sessionController` is declared as a dependency because a
+ * session that is NOT live in this process can only be resumed through it
+ * (`resolveAgent`) or, as a fallback, through `prompt` (which resumes the cold
+ * session and admits the message in one step). It is still looked up
+ * defensively so a composition that provides it late still resumes.
  */
-export const inject = ['agents', 'goals', 'tools', 'timer', 'systemPrompt']
+export const inject = ['agents', 'goals', 'tools', 'timer', 'systemPrompt', 'sessionController']
 
 /**
  * Validated loader row config. Exported so the Plugin Manager / config editor can show
@@ -1268,6 +1270,7 @@ function createRuntime(ctx, config) {
     goalFor,
     handoffRecord: (sessionId) => handoffRecord(state, sessionId),
     overflowFor,
+    readSession,
     handoff,
     boot,
     /**
@@ -1279,10 +1282,30 @@ function createRuntime(ctx, config) {
      * Every attempt reports its own action/detail, exactly like the boot pass.
      *
      * @param {string} [sessionId] one session, or every pending session
+     * @param {{ force?: boolean }} [options] `force` re-opens one explicit session
+     *   (clearing a stale over-limit record and the attempt counter) before retrying
      * @returns {Promise<object[]>} one outcome per attempted session
      */
-    async recoverNow(sessionId) {
+    async recoverNow(sessionId, { force = false } = {}) {
       const target = typeof sessionId === 'string' && sessionId.trim() !== '' ? sessionId.trim() : null
+      if (force === true && target !== null) {
+        const entry = state.sessions && state.sessions[target] ? state.sessions[target] : null
+        if (entry) {
+          // An explicit retry re-checks the live evidence, so a stale record must
+          // not keep the session out of recovery, and the attempt counter resets.
+          entry.pendingResume = true
+          entry.interrupted = true
+          entry.pendingSince = Date.now()
+          entry.resumeAttempts = 0
+          entry.lastResumeError = null
+          setContextOverflow(state, target, { over: false })
+          // Clear the durable "never resume again" marker directly: calling the
+          // handoff writer here would CREATE one (and clear pendingResume again).
+          entry.handoff = null
+          runtime.persist()
+          log.info(`forced recovery for ${target}: cleared stale over-limit/handoff marks and the attempt counter`)
+        }
+      }
       const pending = recoverableSessions(state, {}).filter((entry) => (
         target === null ? true : String(entry.sessionId) === target
       ))
@@ -1410,8 +1433,30 @@ async function recoverSession(ctx, runtime, entry, config) {
   const recordedOverflow = entry.contextOverflow && entry.contextOverflow.over === true
     ? entry.contextOverflow
     : null
+  // The LIVE session is authoritative. A record is only a fallback for a session
+  // this process cannot read at all; a record whose evidence no longer holds (for
+  // example a false positive from an older detector) is cleared instead of
+  // keeping the session out of recovery forever.
+  let liveReadable = false
+  try {
+    const read = runtime.readSession(sessionId)
+    liveReadable = Boolean(read && read.session)
+  } catch {
+    liveReadable = false
+  }
   let overflow = null
-  if (recordedOverflow !== null) {
+  if (liveReadable) {
+    try {
+      overflow = runtime.overflowFor(sessionId)
+    } catch {
+      overflow = null
+    }
+    if ((!overflow || overflow.over !== true) && recordedOverflow !== null) {
+      setContextOverflow(state, sessionId, { over: false })
+      runtime.persist()
+      log.info(`cleared a stale over-limit record for ${sessionId}: the live session is not over the window`)
+    }
+  } else if (recordedOverflow !== null) {
     overflow = {
       over: true,
       inputTokens: Number.isFinite(recordedOverflow.inputTokens) ? recordedOverflow.inputTokens : null,
@@ -1419,12 +1464,6 @@ async function recoverSession(ctx, runtime, entry, config) {
       detail: typeof recordedOverflow.detail === 'string' && recordedOverflow.detail !== ''
         ? recordedOverflow.detail
         : 'the session is over the model context window (recorded by an earlier recovery)',
-    }
-  } else {
-    try {
-      overflow = runtime.overflowFor(sessionId)
-    } catch {
-      overflow = null
     }
   }
   if (overflow && overflow.over === true) {
@@ -1463,12 +1502,67 @@ async function recoverSession(ctx, runtime, entry, config) {
   }
 
   if (agent === undefined) {
-    const controller = ctx.get('sessionController')
-    if (!controller || typeof controller.resolveAgent !== 'function') {
-      log.warn('sessionController is unavailable; cannot resume', sessionId)
-      noteRecovery(state, sessionId, 'session-controller-unavailable', 'sessionController.resolveAgent is unavailable')
+    // Resolve the controller defensively: the declared dependency first, then the
+    // optional lookup (a late-provided service still resumes this way).
+    let controller = null
+    let controllerPath = 'none'
+    try {
+      if (ctx.sessionController && typeof ctx.sessionController === 'object') {
+        controller = ctx.sessionController
+        controllerPath = 'inject'
+      }
+    } catch {}
+    if (controller === null) {
+      try {
+        const viaGet = ctx.get('sessionController')
+        if (viaGet && typeof viaGet === 'object') {
+          controller = viaGet
+          controllerPath = 'get'
+        }
+      } catch {}
+    }
+    const canResolve = Boolean(controller) && typeof controller.resolveAgent === 'function'
+    const canPrompt = Boolean(controller) && typeof controller.prompt === 'function'
+
+    // Fallback: the controller prompt RESUMES a cold session and admits the
+    // message in one step, so it can replace resolveAgent + followup entirely.
+    if (!canResolve) {
+      if (canPrompt) {
+        const text = continuationPrompt(entry, {
+          reason: (Array.isArray(entry.reasons) && entry.reasons[entry.reasons.length - 1]) || 'host restart',
+          override: config.continuationText,
+        })
+        try {
+          await controller.prompt({
+            requestId: crypto.randomUUID(),
+            sessionId,
+            mode: 'queue',
+            content: [{ type: 'text', text }],
+          })
+          entry.pendingResume = false
+          entry.running = false
+          entry.interrupted = false
+          entry.lastResumeError = null
+          noteRecovery(state, sessionId, 'resume-via-prompt', `sessionController.prompt (${controllerPath})`)
+          runtime.persist()
+          log.info(`resumed ${sessionId} through sessionController.prompt (${controllerPath})`)
+          return { sessionId, action: 'resume-via-prompt', detail: `sessionController.prompt (${controllerPath})`, controllerPath }
+        } catch (error) {
+          const detail = describeError(error)
+          entry.lastResumeError = detail
+          noteRecovery(state, sessionId, 'prompt-failed', detail)
+          runtime.persist()
+          log.warn(`sessionController.prompt failed for ${sessionId}:`, detail)
+          return { sessionId, action: 'prompt-failed', detail, error: detail, controllerPath }
+        }
+      }
+      const detail = controller === null
+        ? 'the session controller is not reachable (neither the declared inject nor ctx.get returned it)'
+        : 'the session controller exposes neither resolveAgent nor prompt'
+      log.warn('sessionController is unavailable; cannot resume', sessionId, detail)
+      noteRecovery(state, sessionId, 'session-controller-unavailable', detail)
       runtime.persist()
-      return { sessionId, action: 'session-controller-unavailable', detail: 'sessionController.resolveAgent is unavailable' }
+      return { sessionId, action: 'session-controller-unavailable', detail, controllerPath }
     }
     // A freshly reloaded profile can expose the live agent a moment after the
     // state file was written, so a THROWN error is retried inside the same boot
@@ -1508,6 +1602,10 @@ async function recoverSession(ctx, runtime, entry, config) {
       return { sessionId, action: 'agent-not-live', detail: lastError, error: lastError }
     }
     agent = result && result.agent
+    if (agent) {
+      noteRecovery(state, sessionId, 'resume-via-resolve-agent', `sessionController.resolveAgent (${controllerPath})`)
+      runtime.persist()
+    }
   }
   if (!agent) {
     entry.lastResumeError = 'resolveAgent returned no agent'
@@ -2527,7 +2625,7 @@ function buildRecoverRoute(ctx, runtime, config) {
       void readJsonBody(req).then(async (payload) => {
         const body = payload && typeof payload === 'object' ? payload : {}
         const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
-        const results = await runtime.recoverNow(sessionId !== '' ? sessionId : undefined)
+        const results = await runtime.recoverNow(sessionId !== '' ? sessionId : undefined, { force: body.force === true })
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')

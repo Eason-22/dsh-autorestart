@@ -48,6 +48,29 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 
 ---
 
+## 占用 DSH 的哪些位置（安装前请先看一眼）
+
+下面就是它动到的全部位置，没有别的：
+
+| 类型 | 具体占用 |
+| --- | --- |
+| Agent 工具（6 个） | `continuum_restart`、`continuum_status`、`continuum_cancel_restart`、`continuum_park_goal`、`continuum_recover_now`、`continuum_handoff` |
+| HTTP 路由（4 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`；只接受本机回环或已认证的浏览器 |
+| 前端槽位（2 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`） |
+| 系统提示词 | 一段「重启政策」说明，告诉 agent 怎么请求重启、插件会做什么 |
+| 宿主事件 | `agent/status`（跟踪哪些会话在忙）、`tools/pre-execute`（拦下"手动杀/重启 DSH"的 shell 命令）、启动时的恢复流程 |
+| profile 行 | 一条 bundle 行：`dsh-autorestart` |
+| 写文件 | 只在 `<DSH_HOME>/storages/dsh-autorestart/` 下写：`state.json`（检查点）、`backups/`（重启前快照）、`restart-<代次>.cmd` / `restart-<代次>-watch.ps1`（脱离进程的重启 helper）、`last-rollback.json`（回退报告）。唯一会写进 profile 的时机是**回退**：把快照里的 `cordis.patch.yml`、`package.json`、`pnpm-lock.yaml` 和 `node_modules` 拷回去 |
+
+## 重启前备份与自动回退
+
+- **每次重启前**先给 profile 拍快照：`cordis.patch.yml`、`package.json`、`pnpm-lock.yaml`，以及（默认开启）已安装插件目录 `node_modules`。本机实测：**2.76 秒 / 117.6 MB / 5,562 个文件**。
+- 快照放在 `storages/dsh-autorestart/backups/<时间戳>/`，带 `manifest.json`；**只保留最新 2 份**，写新快照时自动删旧的。
+- 重启后 helper 会跑一个隐藏的看护脚本，轮询健康端点 **90 秒**（`rollbackTimeoutMs`）：正常回答就静默退出，**什么都不动**。
+- 宿主**一直不回应**时：把快照拷回去 → 写 `last-rollback.json`（含"本次重启之后"的崩溃日志尾部，旧日志不会被误当证据）→ **自动再拉起一次**。
+- 下次启动时 `continuum_status` 会报 `lastRollback`（时间、等了多久、是否回滚、快照路径、崩溃日志名与尾部摘要）。
+- 开关：`backupOnRestart`（默认 `true`）、`backupIncludePlugins`（默认 `true`，关掉就只备配置文件）、`maxBackups`（默认 `2`）、`rollbackTimeoutMs`（默认 `90000`）。
+
 ## 工作方式
 
 ```

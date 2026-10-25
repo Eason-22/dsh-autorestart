@@ -297,9 +297,13 @@ test('the gated helper runs the watcher only after the relaunch', () => {
     watchScriptPath: watchPath,
   });
   const startIndex = script.indexOf('start ""');
-  const watchIndex = script.indexOf('powershell.exe -NoProfile -ExecutionPolicy Bypass -File');
+  const watchIndex = script.indexOf('powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File');
   assert.ok(startIndex > 0, 'the relaunch is still there');
   assert.ok(watchIndex > startIndex, 'the watcher starts after the relaunch');
+  assert.ok(
+    script.includes('powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File'),
+    'the watcher runs as its own hidden process, so the helper console closes right away',
+  );
   assert.ok(script.includes(watchPath));
 
   const plain = buildGateScript({ appExePath: APP_EXE, relaunchDelaySeconds: 2, gateUrl });

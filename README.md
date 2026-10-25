@@ -29,12 +29,33 @@ round starts, so the session goes idle and the restart can proceed. The goal is 
 restart and continues.
 
 The browser shows the state: a compact "pending restart" pill on the left side of the input toolbar
-and a small dot next to the session title in the sidebar. The pill can be clicked for details, and
-the dot breathes when the restart is about to fire.
+and a small dot next to the session title in the sidebar. The pill's text reports how many
+conversations are still in the way (counted once per conversation, and the tooltip explains that a
+conversation with queued-but-not-started work counts too); it does not open a details panel. The dot
+breathes when the restart is about to fire.
+
+Before every restart the plugin snapshots the profile, so a restart that leaves the host unable to
+boot is rolled back automatically — see
+[Pre-restart backup and automatic rollback](#pre-restart-backup-and-automatic-rollback).
 
 Two safety gates protect the restart. The host checks that no conversation is busy, and the detached
 helper checks the same gate over loopback immediately before it kills the process, so a turn that
 starts in between is never killed.
+
+## What it occupies in DSH
+
+Nothing here is hidden: this is the complete list of where the plugin attaches itself, so you can see
+what it adds before you install it.
+
+| Kind | What it adds |
+| --- | --- |
+| Agent tools (6) | `continuum_restart`, `continuum_status`, `continuum_cancel_restart`, `continuum_park_goal`, `continuum_recover_now`, `continuum_handoff` |
+| HTTP routes (4) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`. Loopback or an authenticated browser only |
+| Client slots (2) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`) |
+| System prompt | One "Restart policy" section that tells the agent how to ask for a restart and what the plugin will do |
+| Harness hooks | `agent/status` (tracks which conversations are busy), `tools/pre-execute` (blocks a shell command that would kill or relaunch DSH by hand), and the boot pass that resumes interrupted sessions |
+| Profile row | One bundle row, `dsh-autorestart` |
+| Writes | Only under `<DSH_HOME>/storages/dsh-autorestart/` — `state.json` (checkpoint), `backups/` (pre-restart snapshots), `restart-<gen>.cmd` / `restart-<gen>-watch.ps1` (the detached helper), `last-rollback.json` (rollback report). The only time it writes into the profile itself is a rollback, which copies that snapshot's `cordis.patch.yml`, `package.json`, `pnpm-lock.yaml` and `node_modules` back |
 
 ## Why
 

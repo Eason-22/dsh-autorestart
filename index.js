@@ -19,6 +19,7 @@
  */
 
 import crypto from 'node:crypto'
+import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -486,23 +487,70 @@ function resolveStateFile(config) {
 /**
  * Resolve the profile directory the running host was started from.
  *
- * The host exports it (`DSH_PROFILE_DIR`), and falls back to `DSH_HOME/profiles/
- * <DSH_PROFILE>` for older launchers. A null answer means the pre-restart backup
- * is skipped (with a logged reason) rather than written somewhere guessed.
+ * The host process does NOT necessarily carry `DSH_PROFILE_DIR` / `DSH_PROFILE`
+ * (those are injected into shell commands, not into the host environment), so this
+ * walks four independent sources and reports which one answered:
  *
- * @returns {string|null}
+ *   1. `DSH_PROFILE_DIR` — the host exported it.
+ *   2. `DSH_HOME` + `DSH_PROFILE`.
+ *   3. `--profile <name>` / `--profile=<name>` on the host command line.
+ *   4. the only profile whose `dsh.profile.bundles` lists this plugin.
+ *
+ * @returns {{ dir: string|null, source: string }}
  */
-function resolveProfileDir() {
+function resolveProfileDirDetailed() {
   const explicit = process.env.DSH_PROFILE_DIR
-  if (typeof explicit === 'string' && explicit.trim() !== '') return path.resolve(explicit.trim())
+  if (typeof explicit === 'string' && explicit.trim() !== '') {
+    const dir = path.resolve(explicit.trim())
+    if (fs.existsSync(dir)) return { dir, source: 'DSH_PROFILE_DIR' }
+  }
   const home = process.env.DSH_HOME && process.env.DSH_HOME.trim() !== ''
     ? process.env.DSH_HOME.trim()
     : ''
   const profile = process.env.DSH_PROFILE && process.env.DSH_PROFILE.trim() !== ''
     ? process.env.DSH_PROFILE.trim()
     : ''
-  if (home === '' || profile === '') return null
-  return path.join(home, 'profiles', profile)
+  if (home !== '' && profile !== '') {
+    const dir = path.join(home, 'profiles', profile)
+    if (fs.existsSync(dir)) return { dir, source: 'DSH_HOME/DSH_PROFILE' }
+  }
+  // The host may have been started with an explicit --profile flag instead.
+  const argv = Array.isArray(process.argv) ? process.argv : []
+  let fromArgv = ''
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = String(argv[index] ?? '')
+    if (arg === '--profile' && index + 1 < argv.length) fromArgv = String(argv[index + 1] ?? '')
+    else if (arg.startsWith('--profile=')) fromArgv = arg.slice('--profile='.length)
+  }
+  const root = home !== '' ? home : path.join(os.homedir(), '.dsh')
+  if (fromArgv.trim() !== '') {
+    const dir = path.join(root, 'profiles', fromArgv.trim())
+    if (fs.existsSync(dir)) return { dir, source: 'host --profile flag' }
+  }
+  // Last resort: the only profile that lists this plugin as a bundle.
+  try {
+    const profilesDir = path.join(root, 'profiles')
+    const matches = []
+    for (const entry of fs.readdirSync(profilesDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const candidate = path.join(profilesDir, entry.name)
+      try {
+        const manifest = JSON.parse(fs.readFileSync(path.join(candidate, 'package.json'), 'utf8'))
+        const bundles = manifest && manifest.dsh && manifest.dsh.profile
+          && Array.isArray(manifest.dsh.profile.bundles)
+          ? manifest.dsh.profile.bundles
+          : []
+        if (bundles.includes(name)) matches.push(candidate)
+      } catch {}
+    }
+    if (matches.length === 1) return { dir: matches[0], source: 'profile bundles scan' }
+  } catch {}
+  return { dir: null, source: 'unknown' }
+}
+
+/** The profile directory, or null when it cannot be resolved. */
+function resolveProfileDir() {
+  return resolveProfileDirDetailed().dir
 }
 
 /** A logger that never throws and never requires a particular Cordis logger shape. */
@@ -1220,7 +1268,8 @@ function createRuntime(ctx, config) {
         // decide whether every bundle loads, so a snapshot is what makes a
         // "the host does not come back" rollback possible at all.
         const stateDir = path.dirname(stateFile)
-        const profileDir = resolveProfileDir()
+        const profileInfo = resolveProfileDirDetailed()
+        const profileDir = profileInfo.dir
         let backup = null
         if (config.backupOnRestart === true && profileDir !== null) {
           backup = createBackup({
@@ -1235,6 +1284,7 @@ function createRuntime(ctx, config) {
               bytes: backup.bytes,
               includePlugins: backup.includePlugins,
               pruned: backup.pruned,
+              profileDirSource: profileInfo.source,
             })
             // A report from an older boot must not be mistaken for this one.
             clearRollbackReport(stateDir)
@@ -1242,7 +1292,7 @@ function createRuntime(ctx, config) {
             log.warn('the pre-restart backup failed; continuing without a rollback point', { error: backup.error })
           }
         } else if (config.backupOnRestart === true) {
-          log.warn('no profile directory is known; skipping the pre-restart backup')
+          log.warn('no profile directory is known; skipping the pre-restart backup', { source: profileInfo.source })
         }
 
         const healthUrl = restartHealthUrl()
@@ -1348,6 +1398,13 @@ function createRuntime(ctx, config) {
     },
     get isNewBoot() {
       return boot.isNewBoot
+    },
+    /**
+     * Where the pre-restart backup will be taken from, and which source answered.
+     * `dir` is null when no source could resolve it (the backup is then skipped).
+     */
+    get profileDir() {
+      return resolveProfileDirDetailed()
     },
     /**
      * The rollback report the detached watcher left behind, or null.
@@ -2115,6 +2172,8 @@ function registerTools(ctx, runtime, config) {
           parkedGoals: { type: 'array', items: { type: 'object' } },
           recovery: { type: 'array', items: { type: 'object' } },
           handoffs: { type: 'array', items: { type: 'object' } },
+          profileDir: { type: 'string' },
+          profileDirSource: { type: 'string' },
           lastRollback: { type: 'object' },
           environment: { type: 'object' },
           sessions: { type: 'array', items: { type: 'object' } },
@@ -2139,6 +2198,9 @@ function registerTools(ctx, runtime, config) {
         parkedGoals: parkedGoalDetails(),
         recovery: recoveryList(state),
         handoffs: diagnosticSessions(state),
+        // Where the pre-restart backup comes from (null dir = it would be skipped).
+        profileDirSource: runtime.profileDir.source,
+        ...(runtime.profileDir.dir ? { profileDir: runtime.profileDir.dir } : {}),
         // Present only when the previous restart had to be rolled back.
         ...(runtime.lastRollback ? { lastRollback: runtime.lastRollback } : {}),
         environment: {

@@ -77,9 +77,13 @@ test('buildRestartCommand produces the exact verified detached cmd line', () => 
   const command = buildRestartCommand({ appExePath: APP_EXE });
   const expected =
     `cmd.exe /c ping -n ${DEFAULT_RELAUNCH_DELAY_SECONDS + 1} 127.0.0.1 >nul` +
-    ` & taskkill /IM "${DEFAULT_IMAGE_NAME}" /T /F & start "" "${APP_EXE}"`;
+    ` & taskkill /IM "${DEFAULT_IMAGE_NAME}" /T /F & start "" powershell.exe -WindowStyle Hidden -NoProfile -Command Start-Process -FilePath '${APP_EXE}'`;
   assert.equal(command, expected);
   assert.equal(command.includes('& taskkill /IM "DeepSeek Harness.exe" /T /F & start "" '), true);
+  assert.ok(
+    command.includes("Start-Process -FilePath '" + APP_EXE + "'"),
+    'the relaunch goes through ShellExecute, so the host never inherits the helper console',
+  );
 });
 
 test('buildRestartCommand honours the delay, image name and missing exe', () => {
@@ -92,7 +96,7 @@ test('buildRestartCommand honours the delay, image name and missing exe', () => 
     true,
   );
   const noExe = buildRestartCommand({});
-  assert.equal(noExe.includes('start "" ""'), true);
+  assert.equal(noExe.includes("Start-Process -FilePath ''"), true);
 });
 
 test('buildWmiRestartCommand escapes the cmd line for PowerShell', () => {
@@ -100,7 +104,9 @@ test('buildWmiRestartCommand escapes the cmd line for PowerShell', () => {
   const wmi = buildWmiRestartCommand(command);
   assert.equal(wmi.file, 'powershell.exe');
   assert.deepEqual(wmi.args.slice(0, 3), ['-NoProfile', '-NonInteractive', '-Command']);
-  assert.equal(wmi.args[3].includes("O''Brien"), true);
+  // Two escaping layers: the inner `Start-Process -FilePath '...'` argument and the
+  // outer `CommandLine = '...'` literal the WMI call carries.
+  assert.equal(wmi.args[3].includes("O''''Brien"), true);
   assert.equal(wmi.args[3].includes('Invoke-CimMethod -ClassName Win32_Process -MethodName Create'), true);
   assert.equal(wmi.args[3].includes('CommandLine = '), true);
 });
@@ -114,7 +120,7 @@ test('scheduleDetachedRestart dry-run plans WMI + schtasks without executing', (
 
   const expectedCommand =
     `cmd.exe /c ping -n ${DEFAULT_RELAUNCH_DELAY_SECONDS + 1} 127.0.0.1 >nul` +
-    ` & taskkill /IM "DeepSeek Harness.exe" /T /F & start "" "${APP_EXE}"`;
+    ` & taskkill /IM "DeepSeek Harness.exe" /T /F & start "" powershell.exe -WindowStyle Hidden -NoProfile -Command Start-Process -FilePath '${APP_EXE}'`;
   assert.equal(result.command, expectedCommand);
 
   assert.equal(Array.isArray(result.commands), true);
@@ -212,7 +218,7 @@ test('buildGateScript re-checks the idle gate before killing anything', () => {
   assert.ok(gateIndex > 0 && gateIndex < killIndex, 'the gate check must come before taskkill');
   assert.ok(killIndex < startIndex, 'the kill must come before the relaunch');
   assert.equal(script.includes('taskkill /IM "DeepSeek Harness.exe" /T /F'), true);
-  assert.equal(script.includes('start "" "' + APP_EXE + '"'), true);
+  assert.equal(script.includes("Start-Process -FilePath '" + APP_EXE + "'"), true);
   assert.equal(script.includes('exit /b 0'), true, 'a denied gate must abort without killing');
   // The delay is the ping count minus one, as in the inline command.
   assert.equal(buildGateScript({ appExePath: APP_EXE, gateUrl, relaunchDelaySeconds: 0 }).includes('ping -n 1 '), true);
@@ -237,7 +243,7 @@ test('scheduleDetachedRestart gate dry-run plans the helper script without writi
   assert.equal(result.script.includes(gateUrl), true);
   assert.equal(result.script.includes('Invoke-RestMethod'), true);
   assert.equal(result.script.includes('taskkill /IM "DeepSeek Harness.exe" /T /F'), true);
-  assert.equal(result.script.includes('start "" "' + APP_EXE + '"'), true);
+  assert.equal(result.script.includes("Start-Process -FilePath '" + APP_EXE + "'"), true);
   assert.equal(result.commands.length, 3);
   assert.equal(fs.existsSync(scriptPath), false, 'a dry run must write no files');
   assert.equal(fs.existsSync(path.dirname(scriptPath)), false, 'a dry run must create no directories');

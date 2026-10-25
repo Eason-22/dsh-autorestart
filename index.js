@@ -1258,6 +1258,8 @@ function createRuntime(ctx, config) {
             reportPath: path.join(stateDir, ROLLBACK_REPORT_NAME),
             appExePath: env.appExePath,
             timeoutMs: config.rollbackTimeoutMs,
+            // Only a crash log written after this point belongs to this restart.
+            since: new Date().toISOString(),
           })
         const result = scheduleDetachedRestart({
           appExePath: env.appExePath,

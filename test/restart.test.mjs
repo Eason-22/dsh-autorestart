@@ -283,6 +283,7 @@ test('buildWatchScript polls the health route, rolls the snapshot back and relau
     'the report must be written without a BOM (the plugin parses it with JSON.parse)',
   );
   assert.ok(script.includes('Start-Process -FilePath $exe'), 'it launches the host again');
+  assert.ok(script.includes('[datetime]'), 'the crash log is filtered to this restart');
   assert.equal(DEFAULT_ROLLBACK_TIMEOUT_MS, 90000);
 });
 

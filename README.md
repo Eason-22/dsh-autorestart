@@ -116,6 +116,10 @@ show up in the Plugin Manager and in the config editor.
 | `blockManualRestart` | `true` | Hard-block an agent that tries to kill or restart DSH with a shell command, and point it at `continuum_restart` instead. |
 | `healthPath` | `/__dsh_autorestart/health` | Health check route. Returns the boot id, the pid, the phase and the self-check flags. |
 | `continuationText` | `''` | Overrides the default continuation prompt text. |
+| `backupOnRestart` | `true` | Snapshot the profile before every restart, so a restart that leaves the host unable to boot can be rolled back. |
+| `backupIncludePlugins` | `true` | Include the installed plugin tree in that snapshot (about 117 MB here, ~3 s). `false` keeps only the configuration files. |
+| `maxBackups` | `2` | How many snapshots are kept; older ones are deleted when a new one is written. |
+| `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the relaunched host before it restores the snapshot and launches the host again. |
 
 The two waits are independent of each other, and both default to two seconds:
 
@@ -140,6 +144,35 @@ restart command of its own:
 ```
 
 Remember that this replaces the whole config instead of merging into it.
+
+## Pre-restart backup and automatic rollback
+
+A restart is only safe if the host comes back. Before every restart the plugin snapshots the profile
+it was started from, so a restart that leaves the host unable to boot can be undone automatically.
+
+- **What is backed up:** `cordis.patch.yml`, `package.json` and `pnpm-lock.yaml`, plus — unless
+  `backupIncludePlugins` is turned off — the installed plugin tree (`node_modules`). Snapshots live in
+  `<storage>/dsh-autorestart/backups/<timestamp>/` with a `manifest.json` next to them. On a profile
+  like this one the full snapshot measures about 117 MB and takes under three seconds.
+- **How many are kept:** the newest `maxBackups` snapshots (default `2`); older ones are deleted when
+  a new one is written.
+- **How a failed boot is detected:** the detached helper that kills and relaunches the host also runs
+  a small PowerShell watcher. It polls the health route for `rollbackTimeoutMs` (default `90000`). A
+  healthy answer ends the watch and nothing is touched.
+- **What happens when the host never answers:** the watcher copies the snapshot back over the profile
+  (configuration files, and the plugin tree when the snapshot holds one), writes
+  `last-rollback.json` next to the checkpoint — including the tail of the newest crash log written
+  *after* this restart — and launches the host again with the restored configuration.
+- **How you learn about it:** the next boot reports it. `continuum_status` gains a `lastRollback`
+  object (`at`, `waitedMs`, `rolledBack`, `backupDir`, `crashLog`, `crashTail`), and the next restart
+  clears the report so it is never mistaken for a fresh one.
+- **Turning it off:** `backupOnRestart: false` skips the snapshot entirely (no rollback point, and no
+  watcher), which is what a user who keeps their own backups may prefer. `backupIncludePlugins:
+  false` keeps the snapshot but limits it to the configuration files.
+
+The rollback is deliberately conservative: it only runs when the relaunched host never answers its
+own health route. A slow start inside `rollbackTimeoutMs` is never treated as a failure, and a
+healthy host is never touched.
 
 ## Requirements and limits
 

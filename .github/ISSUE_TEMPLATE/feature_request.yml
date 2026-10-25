@@ -1,0 +1,58 @@
+name: Feature request
+description: Suggest something this plugin should do differently or in addition.
+title: '[feature] '
+labels: ['enhancement']
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you hitting?
+      description: Describe the situation, not the solution yet.
+      placeholder: |
+        Every time I upgrade a plugin I have to ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Restart timing and safety gates
+        - Session resume after a restart
+        - Backup and rollback
+        - Configuration options
+        - UI (pill / sidebar dot)
+        - Tools and their output
+        - Documentation
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: '0.3.5'
+    validations:
+      required: false
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows, desktop app
+        - macOS, desktop app
+        - Linux, desktop app
+        - dsh web (hosted)
+        - Other
+    validations:
+      required: false

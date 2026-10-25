@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security problem
+    url: https://github.com/Eason-22/dsh-autorestart/security/advisories/new
+    about: Please report vulnerabilities privately, not in a public issue.
+  - name: Restart policy and configuration
+    url: https://github.com/Eason-22/dsh-autorestart#configuration
+    about: Every option, including the pre-restart backup and the rollback timeout.

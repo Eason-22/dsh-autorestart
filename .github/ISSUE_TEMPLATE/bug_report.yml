@@ -1,0 +1,104 @@
+name: Bug report
+description: A restart, a resume, or a rollback did not work as expected.
+title: '[bug] '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill in the fields below. A restart problem cannot be reproduced without the
+        version numbers and the area it happened in, and a report without them usually ends in
+        "cannot reproduce".
+
+        Paste only what you are comfortable making public: remove tokens, private paths and
+        anything from your own projects.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what happened instead?
+      placeholder: |
+        I asked the agent to restart. I expected the session to continue by itself.
+        Instead ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Ask for a restart (continuum_restart, or the agent does it itself)
+        2. Wait for the host to come back
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part is broken?
+      options:
+        - The restart never fires
+        - The session is not resumed after the restart
+        - The host did not come back (rollback / safe mode)
+        - The pending-restart pill or sidebar dot
+        - The manual-restart guard blocked a command
+        - Handoff / context-window rescue
+        - Install or upgrade of the plugin itself
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      description: Run `npm view dsh-autorestart version`, or read the version on the Plugin Manager row.
+      placeholder: '0.3.5'
+    validations:
+      required: true
+
+  - type: input
+    id: dsh-version
+    attributes:
+      label: DeepSeek Harness version
+      description: Shown in the app's About box, or `dsh --version`.
+      placeholder: '0.2.1-rc.3'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows, desktop app
+        - macOS, desktop app
+        - Linux, desktop app
+        - dsh web (hosted)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: |
+        Any of these helps a lot:
+        - the output of the `continuum_status` tool,
+        - the newest file in %APPDATA%\@deepseek-ai\dsh-desktop\logs\ (crash-*.log),
+        - <DSH_HOME>/storages/dsh-autorestart/last-rollback.json when a rollback happened.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I am running the latest version (`npm view dsh-autorestart version`).
+        - label: I removed secrets, tokens and private paths from everything I pasted.

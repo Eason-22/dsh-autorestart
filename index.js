@@ -58,7 +58,16 @@ import {
   selectGoalDisarms,
 } from './lib/lifecycle.js'
 import {
+  backupsRoot,
+  clearRollbackReport,
+  createBackup,
+  readRollbackReport,
+  ROLLBACK_REPORT_NAME,
+} from './lib/backup.js'
+import {
   buildCustomCommand,
+  buildWatchScript,
+  DEFAULT_ROLLBACK_TIMEOUT_MS,
   detectEnvironment,
   runCommandNow,
   scheduleDetachedRestart,
@@ -196,6 +205,13 @@ function buildConfigSchema() {
       recoveryBatchDelayMs: schemastery.number().min(0).default(1200),
       // pause between two resolveAgent attempts inside one boot
       resumeRetryDelayMs: schemastery.number().min(0).default(1000),
+      // pre-restart snapshot + automatic rollback when the host never comes back
+      backupOnRestart: schemastery.boolean().default(true),
+      // include the installed plugin tree in the snapshot (bigger, but it makes a
+      // rollback of "a plugin upgrade broke the boot" possible)
+      backupIncludePlugins: schemastery.boolean().default(true),
+      maxBackups: schemastery.number().step(1).min(1).default(2),
+      rollbackTimeoutMs: schemastery.number().min(1000).default(90000),
     })
   } catch (error) {
     schemasterySource = `construction-failed: ${String(error)}`
@@ -227,6 +243,14 @@ const DEFAULTS = {
   blockManualRestart: true,
   healthPath: '/__dsh_autorestart/health',
   continuationText: '',
+  // Pre-restart snapshot + automatic rollback. The plugin copies the profile
+  // configuration (and, unless disabled, the installed plugin tree) before every
+  // restart; when the relaunched host never answers its health route, the
+  // detached watcher puts the snapshot back and launches the host again.
+  backupOnRestart: true,
+  backupIncludePlugins: true,
+  maxBackups: 2,
+  rollbackTimeoutMs: 90000,
 }
 
 /** Merge a loader row config over {@link DEFAULTS}, dropping wrong-typed values. */
@@ -246,6 +270,11 @@ function normalizeConfig(raw) {
   }
   if (config.deferPolicy !== 'auto' && config.deferPolicy !== 'wait') config.deferPolicy = 'auto'
   if (config.restartMode !== 'app' && config.restartMode !== 'command') config.restartMode = 'app'
+  const maxBackups = Number(config.maxBackups)
+  config.maxBackups = Number.isFinite(maxBackups) && maxBackups >= 1 ? Math.trunc(maxBackups) : 2
+  const rollbackTimeout = Number(config.rollbackTimeoutMs)
+  config.rollbackTimeoutMs =
+    Number.isFinite(rollbackTimeout) && rollbackTimeout >= 1000 ? Math.trunc(rollbackTimeout) : 90000
   return config
 }
 
@@ -452,6 +481,28 @@ function resolveStateFile(config) {
     ? process.env.DSH_HOME
     : path.join(os.homedir(), '.dsh')
   return path.join(home, 'storages', 'dsh-autorestart', 'state.json')
+}
+
+/**
+ * Resolve the profile directory the running host was started from.
+ *
+ * The host exports it (`DSH_PROFILE_DIR`), and falls back to `DSH_HOME/profiles/
+ * <DSH_PROFILE>` for older launchers. A null answer means the pre-restart backup
+ * is skipped (with a logged reason) rather than written somewhere guessed.
+ *
+ * @returns {string|null}
+ */
+function resolveProfileDir() {
+  const explicit = process.env.DSH_PROFILE_DIR
+  if (typeof explicit === 'string' && explicit.trim() !== '') return path.resolve(explicit.trim())
+  const home = process.env.DSH_HOME && process.env.DSH_HOME.trim() !== ''
+    ? process.env.DSH_HOME.trim()
+    : ''
+  const profile = process.env.DSH_PROFILE && process.env.DSH_PROFILE.trim() !== ''
+    ? process.env.DSH_PROFILE.trim()
+    : ''
+  if (home === '' || profile === '') return null
+  return path.join(home, 'profiles', profile)
 }
 
 /** A logger that never throws and never requires a particular Cordis logger shape. */
@@ -1105,6 +1156,13 @@ function createRuntime(ctx, config) {
     return 'http://127.0.0.1:' + port + resolveHealthPath(config) + '?gate=1'
   }
 
+  /** The plain health URL the rollback watcher polls after the relaunch. */
+  const restartHealthUrl = () => {
+    const port = runtime.webPort
+    if (!Number.isFinite(port) || port <= 0) return null
+    return 'http://127.0.0.1:' + port + resolveHealthPath(config)
+  }
+
   /** Execute the restart now; the detached helper survives our own death. */
   const executeRestart = async () => {
     stopPolling()
@@ -1158,11 +1216,56 @@ function createRuntime(ctx, config) {
         } else if (url === null) {
           log.warn('the web server port is unknown; scheduling an UNGATED restart (the helper cannot re-check the idle gate)')
         }
+        // Snapshot the profile BEFORE anything is killed: the configuration files
+        // decide whether every bundle loads, so a snapshot is what makes a
+        // "the host does not come back" rollback possible at all.
+        const stateDir = path.dirname(stateFile)
+        const profileDir = resolveProfileDir()
+        let backup = null
+        if (config.backupOnRestart === true && profileDir !== null) {
+          backup = createBackup({
+            profileDir,
+            backupsDir: backupsRoot(stateDir),
+            includePlugins: config.backupIncludePlugins !== false,
+            maxBackups: config.maxBackups,
+          })
+          if (backup.ok === true) {
+            log.warn('pre-restart backup written', {
+              dir: backup.dir,
+              bytes: backup.bytes,
+              includePlugins: backup.includePlugins,
+              pruned: backup.pruned,
+            })
+            // A report from an older boot must not be mistaken for this one.
+            clearRollbackReport(stateDir)
+          } else {
+            log.warn('the pre-restart backup failed; continuing without a rollback point', { error: backup.error })
+          }
+        } else if (config.backupOnRestart === true) {
+          log.warn('no profile directory is known; skipping the pre-restart backup')
+        }
+
+        const healthUrl = restartHealthUrl()
+        const watchScriptPath = backup && backup.ok === true && healthUrl !== null && profileDir !== null
+          ? path.join(stateDir, 'restart-' + state.generation + '-watch.ps1')
+          : null
+        const watchScript = watchScriptPath === null
+          ? null
+          : buildWatchScript({
+            healthUrl,
+            backupDir: backup.dir,
+            profileDir,
+            reportPath: path.join(stateDir, ROLLBACK_REPORT_NAME),
+            appExePath: env.appExePath,
+            timeoutMs: config.rollbackTimeoutMs,
+          })
         const result = scheduleDetachedRestart({
           appExePath: env.appExePath,
           relaunchDelaySeconds: config.relaunchDelaySeconds,
           gateUrl: url,
-          scriptPath: url === null ? null : path.join(path.dirname(stateFile), 'restart-' + state.generation + '.cmd'),
+          scriptPath: url === null ? null : path.join(stateDir, 'restart-' + state.generation + '.cmd'),
+          watchScriptPath,
+          watchScript,
         })
         log.warn('scheduled detached restart:', result)
         if (!result || result.ok !== true) rollbackRestart((result && result.error) || 'detached restart refused')
@@ -1243,6 +1346,26 @@ function createRuntime(ctx, config) {
     },
     get isNewBoot() {
       return boot.isNewBoot
+    },
+    /**
+     * The rollback report the detached watcher left behind, or null.
+     *
+     * It means the previous restart never brought the host back and the snapshot
+     * taken before that restart was restored. Read once per process: the next
+     * restart clears it.
+     */
+    get lastRollback() {
+      const report = readRollbackReport(path.dirname(stateFile))
+      if (!report || report.ok !== false) return null
+      const tail = typeof report.crashTail === 'string' ? report.crashTail : ''
+      return {
+        at: typeof report.at === 'string' ? report.at : null,
+        waitedMs: Number.isFinite(report.waitedMs) ? report.waitedMs : null,
+        rolledBack: report.rolledBack === true,
+        backupDir: typeof report.backupDir === 'string' ? report.backupDir : null,
+        crashLog: typeof report.crashLog === 'string' ? report.crashLog : null,
+        crashTail: tail.length > 4000 ? tail.slice(-4000) : tail,
+      }
     },
     env,
     stateFile,
@@ -1990,6 +2113,7 @@ function registerTools(ctx, runtime, config) {
           parkedGoals: { type: 'array', items: { type: 'object' } },
           recovery: { type: 'array', items: { type: 'object' } },
           handoffs: { type: 'array', items: { type: 'object' } },
+          lastRollback: { type: 'object' },
           environment: { type: 'object' },
           sessions: { type: 'array', items: { type: 'object' } },
         },
@@ -2013,6 +2137,8 @@ function registerTools(ctx, runtime, config) {
         parkedGoals: parkedGoalDetails(),
         recovery: recoveryList(state),
         handoffs: diagnosticSessions(state),
+        // Present only when the previous restart had to be rolled back.
+        ...(runtime.lastRollback ? { lastRollback: runtime.lastRollback } : {}),
         environment: {
           platform: runtime.env.platform,
           isDesktopApp: runtime.env.isDesktopApp,

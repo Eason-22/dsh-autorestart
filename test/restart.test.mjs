@@ -7,10 +7,12 @@ import path from 'node:path';
 import {
   DEFAULT_IMAGE_NAME,
   DEFAULT_RELAUNCH_DELAY_SECONDS,
+  DEFAULT_ROLLBACK_TIMEOUT_MS,
   DEFAULT_TASK_NAME,
   buildCustomCommand,
   buildGateScript,
   buildRestartCommand,
+  buildWatchScript,
   buildWmiRestartCommand,
   detectEnvironment,
   runCommandNow,
@@ -250,4 +252,84 @@ test('scheduleDetachedRestart gate dry-run plans the helper script without writi
   assert.equal(plain.gated, false);
   assert.equal(plain.script, null);
   assert.equal(plain.scriptPath, null);
+});
+
+// ---------------------------------------------------------------------------
+// Rollback watcher: runs right after the relaunch, waits for the host to answer
+// its health route, and puts the pre-restart snapshot back when it never does.
+// ---------------------------------------------------------------------------
+
+test('buildWatchScript polls the health route, rolls the snapshot back and relaunches', () => {
+  const script = buildWatchScript({
+    healthUrl: 'http://127.0.0.1:51004/__dsh_autorestart/health',
+    backupDir: 'C:/state/backups/2026-10-25T12-00-00-000Z',
+    profileDir: 'C:/Users/x/.dsh/profiles/desktop',
+    reportPath: 'C:/state/last-rollback.json',
+    appExePath: APP_EXE,
+    timeoutMs: 90000,
+  });
+
+  assert.equal(script.includes('\r\n'), true, 'the watcher uses CRLF lines');
+  assert.ok(script.includes('Invoke-RestMethod'), 'it polls the health route');
+  assert.ok(script.includes('AddMilliseconds(90000)'), 'it honours the configured timeout');
+  assert.ok(script.includes('robocopy $configBackup $profile /E'), 'it restores the configuration files');
+  assert.ok(
+    script.includes("robocopy $pluginsBackup (Join-Path $profile 'node_modules') /MIR"),
+    'it restores the plugin tree',
+  );
+  assert.ok(script.includes('last-rollback.json'), 'it writes the report where the plugin reads it');
+  assert.ok(
+    script.includes('UTF8Encoding($false)'),
+    'the report must be written without a BOM (the plugin parses it with JSON.parse)',
+  );
+  assert.ok(script.includes('Start-Process -FilePath $exe'), 'it launches the host again');
+  assert.equal(DEFAULT_ROLLBACK_TIMEOUT_MS, 90000);
+});
+
+test('the gated helper runs the watcher only after the relaunch', () => {
+  const gateUrl = 'http://127.0.0.1:51004/__dsh_autorestart/health?gate=1';
+  const watchPath = 'C:/state/restart-3-watch.ps1';
+  const script = buildGateScript({
+    appExePath: APP_EXE,
+    relaunchDelaySeconds: 2,
+    gateUrl,
+    watchScriptPath: watchPath,
+  });
+  const startIndex = script.indexOf('start ""');
+  const watchIndex = script.indexOf('powershell.exe -NoProfile -ExecutionPolicy Bypass -File');
+  assert.ok(startIndex > 0, 'the relaunch is still there');
+  assert.ok(watchIndex > startIndex, 'the watcher starts after the relaunch');
+  assert.ok(script.includes(watchPath));
+
+  const plain = buildGateScript({ appExePath: APP_EXE, relaunchDelaySeconds: 2, gateUrl });
+  assert.equal(plain.includes('ExecutionPolicy'), false, 'without a watcher the helper is unchanged');
+});
+
+test('a planned restart refuses a watcher path without its text', () => {
+  const gateUrl = 'http://127.0.0.1:51004/__dsh_autorestart/health?gate=1';
+  const scriptPath = path.join(os.tmpdir(), 'dsh-ar-watch-dry', 'restart-1.cmd');
+  const watchScriptPath = path.join(os.tmpdir(), 'dsh-ar-watch-dry', 'restart-1-watch.ps1');
+
+  const missing = scheduleDetachedRestart({
+    appExePath: APP_EXE,
+    gateUrl,
+    scriptPath,
+    watchScriptPath,
+    dryRun: true,
+  });
+  assert.equal(missing.ok, false);
+  assert.match(String(missing.error), /watchScript/);
+
+  const planned = scheduleDetachedRestart({
+    appExePath: APP_EXE,
+    gateUrl,
+    scriptPath,
+    watchScriptPath,
+    watchScript: '# watcher',
+    dryRun: true,
+  });
+  assert.equal(planned.ok, true);
+  assert.equal(planned.watchScriptPath, watchScriptPath);
+  assert.ok(String(planned.script).includes(watchScriptPath));
+  assert.equal(fs.existsSync(path.dirname(scriptPath)), false, 'a dry run still writes nothing');
 });

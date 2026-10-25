@@ -31,3 +31,14 @@
         blockManualRestart: true
         healthPath: /__dsh_autorestart/health
         continuationText: ''
+        # Take a snapshot of the profile before every restart, so a restart that
+        # leaves the host unable to boot can be rolled back automatically.
+        backupOnRestart: true
+        # Include the installed plugin tree in that snapshot (bigger: ~120 MB here,
+        # but it is what lets a rollback undo "a plugin upgrade broke the boot").
+        backupIncludePlugins: true
+        # Keep at most this many snapshots; older ones are deleted automatically.
+        maxBackups: 2
+        # How long the detached watcher waits for the relaunched host (ms) before
+        # it restores the snapshot and launches the host again.
+        rollbackTimeoutMs: 90000

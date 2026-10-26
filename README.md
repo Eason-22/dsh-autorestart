@@ -246,9 +246,9 @@ toggle while the standby is armed. If a conversation starts working again during
 countdown goes back to "waiting" and nothing is switched off.
 
 **Where the button is.** The moon button sits in the **top-left corner of the main area, left of the
-session title** (`conversation.header.leading`). The very top row of the window ("应用 / 编辑") is
-Electron's own menu bar — a plugin cannot put anything there — so the button lives in the web layout
-right below it.
+session title** (`conversation.header.leading`). The very top row of the window is Electron's own
+menu bar (「文件 / 编辑」 on Windows, 「应用 / 编辑」 on macOS) — a plugin cannot put anything there —
+so the button lives in the web layout right below it.
 
 **What gets switched off: the real host.** Not a subsystem — the whole machine:
 
@@ -276,6 +276,14 @@ settings page and the prompt always show the same value.
 
 **Trying it without switching anything off.** Set `DSH_AUTORESTART_SLEEP_DRYRUN=1` in the host
 environment: the plugin then reports the command it *would* run and never runs it.
+
+**The machine-readable state.** `GET <healthPath 前缀>/sleep` (default
+`/__dsh_autorestart/sleep`) answers with the phase, the countdown and the host that is about to be
+closed. Three of its fields are meant to be read by code rather than by a human: `host.kind` is the
+kind of machine (`windows`, `wsl`, `linux`, `macos`, `unsupported`, or `custom` when the platform
+could not be recognised but a `sleepCommand` was configured); `host.suspect` is `true` when the host
+was only recognised as WSL because the Windows drive is mounted — a hint, not a proof; and
+`lastRun.dryRun` marks the last run as a rehearsal that switched nothing off.
 
 **When the shutdown command does not start.** The host waits for the real answer of the process. If
 the command cannot start (missing binary, denied permission), the standby does **not** pretend it

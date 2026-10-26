@@ -114,6 +114,24 @@ const SLEEP_DEFAULT_COUNTDOWN_SECONDS = 20
 /** How long a real pointer gesture stays valid (ms); the host uses the same window. */
 const SLEEP_GESTURE_WINDOW_MS = 3_000
 
+/**
+ * The flag that remembers "this session already reloaded itself once".
+ *
+ * A page that was opened before the plugin was updated has no gesture ticket
+ * (the host injects it into the HTML it serves), and reloading the page is
+ * the only way to get one. The flag keeps that from becoming a loop.
+ */
+const SLEEP_RELOAD_FLAG = 'dsh-autorestart-sleep-ticket-reload'
+
+/**
+ * The reasons a refresh of the page fixes.
+ *
+ * The ticket is single use and lives in the page: a page that is too old,
+ * that sat open for too long, or that already spent its ticket gets a fresh
+ * one by reloading.
+ */
+const SLEEP_REFRESHABLE_REASONS = ['no-ticket', 'bad-ticket', 'expired-ticket', 'replayed-ticket']
+
 const ZH = {
   label: '待重启',
   busyPrefix: ' · 被 ',
@@ -172,6 +190,9 @@ const ZH = {
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
   'sleep.refused': '这次点击没有被接受：{message}',
+  'sleep.gestureMissing': '请用鼠标（或触控笔）直接点一下这个按钮：只有真实的点击才算数。',
+  'sleep.refresh.hint': '页面需要刷新一次（插件刚更新过，这个页面还没拿到手势票据）。',
+  'sleep.refresh.button': '刷新页面',
   'sleep.countdown.caption.20': '鲸鱼娘开始收网了',
   'sleep.countdown.caption.19': '备份已经替你打包好',
   'sleep.countdown.caption.18': '没说完的话，再讲一句',
@@ -281,6 +302,9 @@ const EN = {
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
   'sleep.refused': 'This click was not accepted: {message}',
+  'sleep.gestureMissing': 'Click the button with the mouse (or a stylus): only a real click counts.',
+  'sleep.refresh.hint': 'The page needs a refresh (the plugin was just updated; this page has no gesture ticket yet).',
+  'sleep.refresh.button': 'Refresh the page',
   'sleep.countdown.caption.20': 'The whale is casting her net',
   'sleep.countdown.caption.19': 'Your backup is already packed',
   'sleep.countdown.caption.18': 'One unfinished thought, one more',
@@ -1801,21 +1825,79 @@ if (moduleLoader) moduleLoader.load({
     }
 
     /**
-     * The headers of a real click: the one-time ticket plus the timestamp of
-     * the gesture. Without a fresh gesture the headers are empty and the host
-     * refuses the request (with a readable reason).
+     * The headers of a click: the one-time ticket of this page plus the
+     * timestamp of the gesture.
+     *
+     * The ticket always travels with the request (on its own it is worth
+     * nothing: the host wants the gesture as well), the gesture only when it
+     * is fresh.
      *
      * @returns {object}
      */
     function gestureHeaders() {
-      const at = sleepGesture.at
-      if (!at || Date.now() - at > SLEEP_GESTURE_WINDOW_MS) return {}
       const grant = sleepTicket()
       if (!grant) return {}
-      return {
-        'x-dsh-sleep-ticket': grant.ticket,
-        'x-dsh-sleep-gesture': String(at),
+      const headers = { 'x-dsh-sleep-ticket': grant.ticket }
+      const at = sleepGesture.at
+      if (at && Date.now() - at <= SLEEP_GESTURE_WINDOW_MS) {
+        headers['x-dsh-sleep-gesture'] = String(at)
       }
+      return headers
+    }
+
+    /**
+     * Reload the page ONCE per browser session.
+     *
+     * A page that was opened BEFORE the plugin was updated has no gesture
+     * ticket at all (the ticket is injected into the HTML the host serves),
+     * so a real click cannot be proven. Reloading the page is the only way to
+     * get a fresh ticket — there is deliberately no HTTP route that hands one
+     * out, because that would let any script arm the machine.
+     *
+     * The flag in sessionStorage survives the reload, so the page cannot
+     * reload itself for ever: the second attempt returns false and the
+     * button offers the refresh the user has to click.
+     *
+     * @returns {boolean} true when a reload was started, false when this
+     *   session already reloaded itself once
+     */
+    function reloadPageOnce() {
+      if (typeof window === 'undefined' || !window.location) return false
+      let already = false
+      try {
+        already = Boolean(window.sessionStorage)
+          && window.sessionStorage.getItem(SLEEP_RELOAD_FLAG) === '1'
+      } catch {
+        already = false
+      }
+      if (already) return false
+      try {
+        if (window.sessionStorage) window.sessionStorage.setItem(SLEEP_RELOAD_FLAG, '1')
+      } catch {
+        // Without a sessionStorage the reload may happen twice — never more.
+      }
+      try {
+        window.location.reload()
+      } catch {
+        // A page that cannot reload still shows the refresh button.
+      }
+      return true
+    }
+
+    /**
+     * Reload the page because the user asked for it.
+     *
+     * The Electron shell has no usable Ctrl+R / F5, so the refresh button
+     * under the moon button is the way out — it always reloads.
+     */
+    function reloadPageNow() {
+      if (typeof window === 'undefined' || !window.location) return false
+      try {
+        window.location.reload()
+      } catch {
+        // Nothing else to try.
+      }
+      return true
     }
 
     /**
@@ -1929,6 +2011,32 @@ if (moduleLoader) moduleLoader.load({
       '  font-size:11.5px;',
       '  line-height:15px;',
       '  text-align:left;',
+      '}',
+      // The way out of a page without a gesture ticket: refresh it.
+      '.dsh-autorestart-sleep-button__refresh{',
+      '  display:flex;',
+      '  align-items:center;',
+      '  flex-wrap:wrap;',
+      '  gap:4px 6px;',
+      '  max-width:100%;',
+      '  color:var(--dsw-alias-label-secondary);',
+      '  font-size:11.5px;',
+      '  line-height:15px;',
+      '  text-align:left;',
+      '}',
+      '.dsh-autorestart-sleep-button__refresh-button{',
+      '  padding:1px 8px;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:6px;',
+      '  background:transparent;',
+      '  color:var(--dsw-alias-label-primary);',
+      '  font:inherit;',
+      '  font-size:11.5px;',
+      '  line-height:16px;',
+      '  cursor:pointer;',
+      '}',
+      '.dsh-autorestart-sleep-button__refresh-button:hover{',
+      '  background:var(--dsw-alias-interactive-bg-hover);',
       '}',
       '.dsh-autorestart-sleep-button__spinner{',
       '  width:12px;',
@@ -2206,6 +2314,9 @@ if (moduleLoader) moduleLoader.load({
       const status = useSleepStatus()
       const [arming, setArming] = useState(false)
       const [error, setError] = useState('')
+      // The page needs a refresh before the button can work again (it was
+      // opened before the plugin was updated, or it spent its ticket).
+      const [refreshNeeded, setRefreshNeeded] = useState(false)
       const t = translate ?? ((name) => name)
 
       // The Host's truth decides, and an UNKNOWN truth decides NOTHING: before
@@ -2249,20 +2360,47 @@ if (moduleLoader) moduleLoader.load({
        * The Host only accepts a REAL gesture: the one-time ticket the page
        * got from the host plus the timestamp of a trusted `pointerdown` that
        * happened a moment ago. Without them the host refuses the request
-       * (403) and nothing is armed.
+       * (403) and nothing is armed — so the button does not even send a
+       * request it knows would be refused.
+       *
+       * A page that was opened BEFORE the plugin was updated has no ticket
+       * at all (the host injects it into the HTML it serves). Then there is
+       * nothing to send: the page reloads itself once (that is the only way
+       * to get a ticket — there is no HTTP route that hands one out) and the
+       * button offers a refresh the user can click.
        */
       const arm = async () => {
         if (arming) return
         setArming(true)
         setError('')
         try {
-          await requestSleep('arm', gestureHeaders())
+          if (!sleepTicket()) {
+            // The page is too old for a gesture ticket: reload it once.
+            setRefreshNeeded(true)
+            reloadPageOnce()
+            return
+          }
+          const headers = gestureHeaders()
+          if (!headers['x-dsh-sleep-gesture']) {
+            // No trusted pointerdown (a scripted click, a keyboard
+            // activation): the host would refuse it anyway.
+            setError(t('sleep.gestureMissing'))
+            return
+          }
+          await requestSleep('arm', headers)
         } catch (failure) {
           // A refused gesture has its own sentence (the host explains why).
           const message = describeError(failure)
           setError(failure && failure.reason
             ? fill(t('sleep.refused'), { message })
             : fill(t('sleep.error'), { message }))
+          // A ticket that is too old, too fresh or already spent is fixed by
+          // a fresh page: offer it and reload once.
+          if (failure && typeof failure.reason === 'string'
+            && SLEEP_REFRESHABLE_REASONS.indexOf(failure.reason) !== -1) {
+            setRefreshNeeded(true)
+            reloadPageOnce()
+          }
         } finally {
           setArming(false)
         }
@@ -2321,16 +2459,35 @@ if (moduleLoader) moduleLoader.load({
 
       // A refused request (no gesture, an expired ticket, ...) is never
       // silent: the reason is written under the button.
-      if (!wide || error === '') return button
+      if (!wide || (error === '' && !refreshNeeded)) return button
       return h(
         'div',
         { className: 'dsh-autorestart-sleep-button__wrap' },
         button,
-        h(
-          'span',
-          { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
-          error,
-        ),
+        error === ''
+          ? null
+          : h(
+            'span',
+            { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
+            error,
+          ),
+        // The way out: a fresh page carries a fresh ticket.
+        refreshNeeded
+          ? h(
+            'span',
+            { className: 'dsh-autorestart-sleep-button__refresh' },
+            h('span', null, t('sleep.refresh.hint')),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-autorestart-sleep-button__refresh-button',
+                onClick: () => { reloadPageNow() },
+              },
+              t('sleep.refresh.button'),
+            ),
+          )
+          : null,
       )
     }
 

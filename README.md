@@ -302,6 +302,14 @@ the host's memory) can still forge a ticket. If you really want a script to trig
 `humanOnly: false`, and you take the risk that anything on the machine (including your own agent) can
 switch it off.
 
+**A page that was open before the update heals itself.** The ticket lives *in the page* (the host
+injects it into the HTML it serves), so a page that was already open when the plugin was updated has
+no ticket — and a real click on it would be refused. The button notices that, shows "the page needs a
+refresh" with a **Refresh the page** button, and reloads the page once by itself (a flag in
+`sessionStorage` keeps it from looping; a refresh you click yourself always works). There is
+deliberately **no HTTP route that hands out a ticket**: any script could call it, and the whole point
+of the gesture is that only a person can arm the machine.
+
 **The one-time install question.** The first time the plugin is used, the composer dock asks once
 more whether the button should stay. The answer is written into the profile configuration
 (`showSleepButton`) through the same `configEditor` service the backup question uses, so the

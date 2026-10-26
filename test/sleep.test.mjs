@@ -1318,19 +1318,24 @@ function mountClient({
   language = 'zh',
   ticket = null,
   refuseArm = null,
+  sessionStorage = createStorage(),
 } = {}) {
   const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   let definition = null
   const fetches = []
   const polls = []
   const state = { status }
+  // How often the page reloaded itself (the self-heal of a stale page).
+  const reloads = { count: 0 }
   const sandbox = {
     window: {
       __ModuleLoader__: { load: (value) => { definition = value } },
       localStorage: storage,
+      sessionStorage,
       matchMedia: () => ({ matches: false }),
       addEventListener: () => {},
       removeEventListener: () => {},
+      location: { reload: () => { reloads.count += 1 } },
       // The one-time gesture ticket the host injected into this page.
       __DSH_SLEEP_TICKET__: ticket,
     },
@@ -1397,6 +1402,7 @@ function mountClient({
     fetches,
     dictionaries,
     slots,
+    reloads,
     setStatus: (next) => { state.status = next },
     // Deliver the new status the way the shared poll would.
     poll: async () => {
@@ -1611,19 +1617,15 @@ test('a real click sends the gesture ticket, a scripted one does not', async () 
   assert.ok(button, 'the button must be rendered')
   assert.equal(typeof button.props.onPointerDown, 'function', 'the button must watch the pointer')
 
-  // A scripted pointerdown (isTrusted === false) is not a gesture.
+  // A scripted pointerdown (isTrusted === false) is not a gesture: nothing
+  // is sent at all, because the host would refuse it anyway.
   button.props.onPointerDown({ isTrusted: false })
   button.props.onClick()
   await settleClient()
   const scripted = mounted.fetches
     .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
     .find((call) => JSON.parse(call.init.body).action === 'arm')
-  assert.ok(scripted, 'the click must reach the host')
-  assert.equal(
-    scripted.init.headers['x-dsh-sleep-ticket'],
-    undefined,
-    'a scripted pointerdown must not carry a ticket',
-  )
+  assert.equal(scripted, undefined, 'a scripted pointerdown must not arm anything')
 
   // A trusted pointerdown is a real gesture: the ticket goes with it.
   button.props.onPointerDown({ isTrusted: true })
@@ -1638,11 +1640,99 @@ test('a real click sends the gesture ticket, a scripted one does not', async () 
   assert.ok(real.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
 })
 
+test('a page without a gesture ticket does not arm: it reloads itself and offers a refresh', async () => {
+  // The page was opened before the plugin was updated: it has no ticket at
+  // all. There is no HTTP route that hands one out, so the only way out is a
+  // fresh page.
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
+    ticket: null,
+  })
+  await mounted.poll()
+  const button = await mounted.settled('sidebar.footer.action')
+  button.props.onPointerDown({ isTrusted: true })
+  button.props.onClick()
+  await settleClient()
+
+  const armed = mounted.fetches
+    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
+    .filter((call) => JSON.parse(call.init.body).action === 'arm')
+  assert.equal(armed.length, 0, 'without a ticket nothing may be armed')
+  assert.equal(mounted.reloads.count, 1, 'the page reloads itself once')
+
+  // The button offers the way out: a refresh the user can click. A reload
+  // the user asked for always happens.
+  const after = mounted.render('sidebar.footer.action')
+  const shown = textOf(after)
+  assert.ok(shown.includes('刷新'), `the refresh entry must be visible, got: ${shown}`)
+  const refresh = walk(after).find((node) => node.type === 'button' && textOf(node).includes('刷新'))
+  assert.ok(refresh, 'there must be a clickable refresh button')
+  refresh.props.onClick()
+  await settleClient()
+  assert.equal(mounted.reloads.count, 2, 'the refresh the user asked for happens')
+})
+
+test('the page never reloads itself for ever', async () => {
+  // The flag in sessionStorage survives the reload: the second attempt only
+  // shows the refresh button.
+  const sessionStorage = createStorage()
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
+    ticket: null,
+    sessionStorage,
+  })
+  await mounted.poll()
+  const button = await mounted.settled('sidebar.footer.action')
+
+  button.props.onPointerDown({ isTrusted: true })
+  button.props.onClick()
+  await settleClient()
+  assert.equal(mounted.reloads.count, 1, 'the first click reloads the page')
+  assert.equal(sessionStorage.getItem('dsh-autorestart-sleep-ticket-reload'), '1')
+
+  // The reloaded page has no ticket either (the test keeps the same page).
+  const again = mounted.render('sidebar.footer.action')
+  const againButton = walk(again).find(
+    (node) => node.props && node.props['data-dsh-autorestart-sleep-button'] === 'true',
+  )
+  assert.ok(againButton, 'the button must still be there')
+  againButton.props.onPointerDown({ isTrusted: true })
+  againButton.props.onClick()
+  await settleClient()
+  assert.equal(mounted.reloads.count, 1, 'the second click must not reload again')
+
+  // The button still offers the refresh the user can click.
+  const after = mounted.render('sidebar.footer.action')
+  assert.ok(textOf(after).includes('刷新'), 'the refresh entry stays visible')
+  const refresh = walk(after).find((node) => node.type === 'button' && textOf(node).includes('刷新'))
+  assert.ok(refresh, 'the refresh button stays clickable')
+  refresh.props.onClick()
+  await settleClient()
+  assert.equal(mounted.reloads.count, 2, 'a refresh the user asked for always happens')
+})
+
+test('a spent ticket is fixed by a fresh page', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
+    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
+    refuseArm: { reason: 'replayed-ticket', message: '这张手势票据已经用过了。' },
+  })
+  await mounted.poll()
+  const button = await mounted.settled('sidebar.footer.action')
+  button.props.onPointerDown({ isTrusted: true })
+  button.props.onClick()
+  await settleClient()
+
+  assert.equal(mounted.reloads.count, 1, 'a spent ticket reloads the page once')
+  const after = mounted.render('sidebar.footer.action')
+  assert.ok(textOf(after).includes('刷新'), 'the refresh entry must be visible')
+})
+
 test('a refused request is shown, never silent', async () => {
   const mounted = mountClient({
     status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
     ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
-    refuseArm: { reason: 'no-ticket', message: '这个请求没有带手势票据：收工关机只能由真人点按钮触发。' },
+    refuseArm: { reason: 'stale-gesture', message: '这次点击不是刚刚发生的真人手势，请在 3 秒内再点一次。' },
   })
   await mounted.poll()
   const button = await mounted.settled('sidebar.footer.action')
@@ -1653,7 +1743,8 @@ test('a refused request is shown, never silent', async () => {
   const after = mounted.render('sidebar.footer.action')
   const shown = textOf(after)
   assert.ok(
-    shown.includes('手势票据') || String(after.props.title || '').includes('手势票据'),
+    shown.includes('真人手势') || String(after.props.title || '').includes('真人手势'),
     `the refusal must be visible, got: ${shown} / ${after.props.title}`,
   )
+  assert.equal(mounted.reloads.count, 0, 'a stale gesture is not fixed by a reload')
 })

@@ -256,6 +256,9 @@ test('a settle window longer than the countdown never postpones the power-off', 
     // down for 10 and must NOT wait for them.
     settleMs: 15000,
     sleepCountdownSeconds: 10,
+    // This case is about the settle window, not about the gesture: the route
+    // is called directly.
+    sleepHumanOnly: false,
   }, {
     sleepNow: () => clockRef.value,
     sleepSpawn: (command, args) => {

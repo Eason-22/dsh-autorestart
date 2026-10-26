@@ -26,6 +26,7 @@
       "busy": "Getting ready…"
     },
     "error": "Could not reach the sleep service: {message}",
+    "refused": "This click was not accepted: {message}",
     "countdown": {
       "caption": {
         "20": "The whale is casting her net",

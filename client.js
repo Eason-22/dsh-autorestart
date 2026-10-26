@@ -111,6 +111,9 @@ const SLEEP_COUNTDOWN_CHOICES = Object.freeze([0, 10, 20, 30, 60])
 /** The countdown length used when the Host did not report one. */
 const SLEEP_DEFAULT_COUNTDOWN_SECONDS = 20
 
+/** How long a real pointer gesture stays valid (ms); the host uses the same window. */
+const SLEEP_GESTURE_WINDOW_MS = 3_000
+
 const ZH = {
   label: '待重启',
   busyPrefix: ' · 被 ',
@@ -168,6 +171,7 @@ const ZH = {
   'sleep.button.titleImmediate': '等所有会话收工后立即关机（不倒数）',
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
+  'sleep.refused': '这次点击没有被接受：{message}',
   'sleep.countdown.caption.20': '鲸鱼娘开始收网了',
   'sleep.countdown.caption.19': '备份已经替你打包好',
   'sleep.countdown.caption.18': '没说完的话，再讲一句',
@@ -276,6 +280,7 @@ const EN = {
   'sleep.button.titleImmediate': 'Waits for every session to finish, then powers off right away (no countdown)',
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
+  'sleep.refused': 'This click was not accepted: {message}',
   'sleep.countdown.caption.20': 'The whale is casting her net',
   'sleep.countdown.caption.19': 'Your backup is already packed',
   'sleep.countdown.caption.18': 'One unfinished thought, one more',
@@ -1726,12 +1731,19 @@ if (moduleLoader) moduleLoader.load({
      * reason.
      *
      * @param {'arm'|'cancel'} action
+     * @param {object} [extraHeaders] the gesture headers of a real click
      * @returns {Promise<object>} the new sleep status
      */
-    async function requestSleep(action) {
+    async function requestSleep(action, extraHeaders) {
+      const headers = { 'content-type': 'application/json' }
+      if (extraHeaders && typeof extraHeaders === 'object') {
+        for (const [key, value] of Object.entries(extraHeaders)) {
+          if (typeof value === 'string' && value !== '') headers[key] = value
+        }
+      }
       const response = await fetch(DEFAULT_SLEEP_URL, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify({ action }),
       })
       let body = null
@@ -1742,17 +1754,72 @@ if (moduleLoader) moduleLoader.load({
       }
       if (!response.ok) {
         const message = body && typeof body === 'object'
-          ? (body.error || body.message || '')
+          ? (body.message || body.error || '')
           : ''
         const failure = new Error(message || String(response.status))
         failure.sleepStatus = response.status
+        if (body && typeof body === 'object' && typeof body.reason === 'string') {
+          failure.reason = body.reason
+        }
         throw failure
       }
       if (body && typeof body === 'object') setSleepInfo(body)
       return body
     }
 
-    /** The current sleep status, re-rendered whenever the shared poll lands. */
+    /**
+     * The last real gesture on the shutdown button.
+     *
+     * A `pointerdown` with `isTrusted === true` is something the page itself
+     * cannot fake, so it is the proof that a person really clicked. The host
+     * only accepts an arm request within {@link SLEEP_GESTURE_WINDOW_MS} of
+     * it.
+     */
+    const sleepGesture = { at: 0 }
+
+    /**
+     * Remember a trusted pointerdown.
+     *
+     * @param {object} event the DOM event of the pointerdown
+     */
+    function rememberSleepGesture(event) {
+      if (!event || event.isTrusted !== true) return
+      sleepGesture.at = Date.now()
+    }
+
+    /**
+     * The one-time ticket the host injected into this page.
+     *
+     * @returns {{ ticket: string, issuedAt: number }|null}
+     */
+    function sleepTicket() {
+      if (typeof window === 'undefined') return null
+      const grant = window.__DSH_SLEEP_TICKET__
+      if (!grant || typeof grant !== 'object') return null
+      if (typeof grant.ticket !== 'string' || grant.ticket === '') return null
+      return { ticket: grant.ticket, issuedAt: Number(grant.issuedAt) || 0 }
+    }
+
+    /**
+     * The headers of a real click: the one-time ticket plus the timestamp of
+     * the gesture. Without a fresh gesture the headers are empty and the host
+     * refuses the request (with a readable reason).
+     *
+     * @returns {object}
+     */
+    function gestureHeaders() {
+      const at = sleepGesture.at
+      if (!at || Date.now() - at > SLEEP_GESTURE_WINDOW_MS) return {}
+      const grant = sleepTicket()
+      if (!grant) return {}
+      return {
+        'x-dsh-sleep-ticket': grant.ticket,
+        'x-dsh-sleep-gesture': String(at),
+      }
+    }
+
+    /**
+     * The current sleep status, re-rendered whenever the shared poll lands. */
     function useSleepStatus() {
       const [status, setStatus] = useState(sleepStore.info)
       useEffect(() => {
@@ -1845,6 +1912,23 @@ if (moduleLoader) moduleLoader.load({
       '  white-space:nowrap;',
       '  overflow:hidden;',
       '  text-overflow:ellipsis;',
+      '}',
+      // The button and the reason a request was refused.
+      '.dsh-autorestart-sleep-button__wrap{',
+      '  display:flex;',
+      '  flex-direction:column;',
+      '  align-items:flex-start;',
+      '  gap:2px;',
+      '  min-width:0;',
+      '  max-width:100%;',
+      '}',
+      '.dsh-autorestart-sleep-button__error{',
+      '  max-width:100%;',
+      '  padding:0 2px;',
+      '  color:var(--dsw-alias-danger,#d14343);',
+      '  font-size:11.5px;',
+      '  line-height:15px;',
+      '  text-align:left;',
       '}',
       '.dsh-autorestart-sleep-button__spinner{',
       '  width:12px;',
@@ -2161,15 +2245,24 @@ if (moduleLoader) moduleLoader.load({
       /**
        * Ask the Host to stand by: it waits for every session to finish and
        * then counts down.
+       *
+       * The Host only accepts a REAL gesture: the one-time ticket the page
+       * got from the host plus the timestamp of a trusted `pointerdown` that
+       * happened a moment ago. Without them the host refuses the request
+       * (403) and nothing is armed.
        */
       const arm = async () => {
         if (arming) return
         setArming(true)
         setError('')
         try {
-          await requestSleep('arm')
+          await requestSleep('arm', gestureHeaders())
         } catch (failure) {
-          setError(fill(t('sleep.error'), { message: describeError(failure) }))
+          // A refused gesture has its own sentence (the host explains why).
+          const message = describeError(failure)
+          setError(failure && failure.reason
+            ? fill(t('sleep.refused'), { message })
+            : fill(t('sleep.error'), { message }))
         } finally {
           setArming(false)
         }
@@ -2192,7 +2285,7 @@ if (moduleLoader) moduleLoader.load({
       if (!visible) return null
       ensureSleepStyle()
 
-      return h(
+      const button = h(
         'button',
         {
           type: 'button',
@@ -2203,6 +2296,9 @@ if (moduleLoader) moduleLoader.load({
           title: error || (armed ? t('sleep.button.cancel') : countdownHint),
           disabled: arming,
           onClick: armed ? cancel : arm,
+          // The gesture: only a trusted pointerdown counts, so the page
+          // cannot arm the machine on its own.
+          onPointerDown: rememberSleepGesture,
           'data-dsh-autorestart-sleep-button': 'true',
           'data-armed': armed ? 'true' : 'false',
           'data-wide': wide ? 'true' : 'false',
@@ -2221,6 +2317,20 @@ if (moduleLoader) moduleLoader.load({
               : (armed ? t('sleep.button.cancel') : t('sleep.button.label')),
           )
           : null,
+      )
+
+      // A refused request (no gesture, an expired ticket, ...) is never
+      // silent: the reason is written under the button.
+      if (!wide || error === '') return button
+      return h(
+        'div',
+        { className: 'dsh-autorestart-sleep-button__wrap' },
+        button,
+        h(
+          'span',
+          { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
+          error,
+        ),
       )
     }
 

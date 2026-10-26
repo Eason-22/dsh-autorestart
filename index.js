@@ -82,6 +82,10 @@ import {
   runShutdown,
   snapCountdownChoice,
 } from './lib/sleep.js'
+import {
+  createGestureTickets,
+  describeTicketReason,
+} from './lib/ticket.js'
 
 /**
  * `@deepseek-ai/schemastery` resolves inside modules that live in the dsh installation,
@@ -262,6 +266,8 @@ function buildConfigSchema() {
         .default(DEFAULT_COUNTDOWN_SECONDS)
         .loose()
         .description('收工关机的倒计时秒数（下拉框：0 / 10 / 20 / 30 / 60 秒，默认 20；0 表示不倒数、立即关机，但仍会先等所有会话收工）。'),
+      sleepHumanOnly: schemastery.boolean().default(true)
+        .description('是否只接受真人点击：默认开启时「收工关机」必须由页面上真实的手势触发（一次性票据），纯 HTTP 请求会被拒绝（403）；关掉它就允许脚本直接调用（风险自负）。'),
       sleepCommand: schemastery.string().default('')
         .description('自定义关机命令：留空表示按系统自动识别（Windows / WSL / Linux / macOS），填了就用这条命令代替自动识别。'),
     })
@@ -308,6 +314,7 @@ const DEFAULTS = {
   // shutdown command (empty = the host is detected automatically).
   showSleepButton: true,
   sleepCountdownSeconds: DEFAULT_COUNTDOWN_SECONDS,
+  sleepHumanOnly: true,
   sleepCommand: '',
 }
 
@@ -339,6 +346,7 @@ function normalizeConfig(raw) {
   config.sleepCountdownSeconds = snapCountdownChoice(config.sleepCountdownSeconds)
   if (typeof config.sleepCommand !== 'string') config.sleepCommand = ''
   if (typeof config.showSleepButton !== 'boolean') config.showSleepButton = true
+  if (typeof config.sleepHumanOnly !== 'boolean') config.sleepHumanOnly = true
   return config
 }
 
@@ -1850,6 +1858,14 @@ export function createRuntime(ctx, config, options = {}) {
     log,
     persist,
     /**
+     * The one-time gesture tickets of this host start: the page gets one
+     * with every page load, and the host consumes it when the button was
+     * really clicked.
+     */
+    sleepTickets: typeof options.sleepTickets === 'object' && options.sleepTickets !== null
+      ? options.sleepTickets
+      : createGestureTickets(),
+    /**
      * Persist one or more user choices into the profile row of this plugin.
      *
      * @param {{ backupIncludePlugins?: boolean, showSleepButton?: boolean }} changes
@@ -2891,6 +2907,30 @@ function injectPageHeartbeat(html, bootId, routePath) {
 }
 
 /**
+ * Inject the one-time gesture ticket into the served index.
+ *
+ * The ticket is the proof that the request comes from a page this host
+ * served, and the client only sends it after a real `pointerdown`. A shell
+ * process on the same machine cannot read it out of the page, so it cannot
+ * arm the machine that way.
+ *
+ * @param {string} html
+ * @param {{ ticket: string, issuedAt: number }} grant
+ * @returns {string}
+ */
+function injectSleepTicket(html, grant) {
+  if (typeof html !== 'string') return html
+  if (html.includes('data-dsh-autorestart-sleep-ticket')) return html
+  if (!grant || typeof grant.ticket !== 'string' || grant.ticket === '') return html
+  const script = [
+    '<script data-dsh-autorestart-sleep-ticket>',
+    `window.__DSH_SLEEP_TICKET__=${JSON.stringify({ ticket: grant.ticket, issuedAt: grant.issuedAt })};`,
+    '</script>',
+  ].join('')
+  return html.includes('</head>') ? html.replace('</head>', `${script}</head>`) : `${script}${html}`
+}
+
+/**
  * The system-prompt section that makes the restart policy discoverable to every agent:
  * call `continuum_restart` instead of killing the app by hand. This is a real Host hook,
  * so it applies without touching any AGENTS.md.
@@ -3619,6 +3659,12 @@ function sleepStatusPayload(sleep, config) {
     armed: status.armed,
     showSleepButton: config.showSleepButton !== false,
     countdownSeconds: status.countdownSeconds,
+    /**
+     * Whether arming needs a real human click. `false` means the route
+     * accepts a plain HTTP request again (for the users who really want an
+     * automated script).
+     */
+    humanOnly: config.sleepHumanOnly !== false,
     remainingMs: status.remainingMs,
     blockers: status.blockers,
     host: {
@@ -3684,6 +3730,31 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
         const body = payload && typeof payload === 'object' ? payload : {}
         const action = typeof body.action === 'string' ? body.action.trim() : ''
         if (action === 'arm') {
+          // The button is a HUMAN control: arming it needs a real click on the
+          // page (a one-time ticket plus a fresh gesture). A shell script on
+          // the same machine cannot get that ticket, so it is refused here —
+          // BEFORE anything is armed, counted down or switched off.
+          if (config.sleepHumanOnly !== false) {
+            const headers = req && req.headers && typeof req.headers === 'object' ? req.headers : {}
+            const verdict = runtime.sleepTickets.verify({
+              ticket: headers['x-dsh-sleep-ticket'],
+              gesture: headers['x-dsh-sleep-gesture'],
+              headers,
+              host: req && typeof req.headers === 'object' && typeof req.headers.host === 'string'
+                ? req.headers.host
+                : '',
+            })
+            if (verdict.ok !== true) {
+              const reason = typeof verdict.reason === 'string' ? verdict.reason : 'no-ticket'
+              answer({
+                ok: false,
+                error: 'human-gesture-required',
+                reason,
+                message: describeTicketReason(reason),
+              }, 403)
+              return
+            }
+          }
           sleep.controller.arm()
         } else if (action === 'cancel') {
           sleep.controller.cancel()
@@ -3929,6 +4000,22 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
         runtime.log.warn('could not register the sleep route:', String(error))
       }
     }
+    if (typeof webServer.tapIndex === 'function') {
+      // The gesture ticket: every page load gets a fresh one-time ticket, so
+      // the button can only be armed by a real click on that page.
+      try {
+        target.effect(
+          () => webServer.tapIndex((html) => {
+            runtime.indexTaps = (runtime.indexTaps ?? 0) + 1
+            return injectSleepTicket(html, runtime.sleepTickets.issue())
+          }),
+          'dsh-autorestart: sleep gesture ticket',
+        )
+        runtime.sleepTicketTap = true
+      } catch (error) {
+        runtime.log.warn('could not inject the sleep gesture ticket:', String(error))
+      }
+    }
     if (config.autoReloadPage !== false && typeof webServer.tapIndex === 'function') {
       try {
         target.effect(
@@ -4078,7 +4165,12 @@ export function apply(ctx, rawConfig, options = {}) {
   // fallback file fills the gap, the built-in default applies otherwise.
   const sleepChoice = resolveShowSleepButton(rawConfig, stateDir)
   config.showSleepButton = sleepChoice.showSleepButton
-  const runtime = createRuntime(ctx, config, { backupChoiceSource: choice.source })
+  const runtime = createRuntime(ctx, config, {
+    backupChoiceSource: choice.source,
+    // The one-time gesture tickets of this host start. Production creates
+    // them here; a test may bring its own (with a clock it controls).
+    sleepTickets: options.sleepTickets,
+  })
   const log = runtime.log
   // The graceful sleep: the host plan and the state machine that waits for the
   // conversations, counts down and switches the machine off.

@@ -492,14 +492,22 @@ test('the served index gets a boot-token heartbeat for dsh web pages', () => {
   assert.equal(routes[4].path, '/__dsh_autorestart/choice')
   assert.equal(routes[5].kind, 'exact')
   assert.equal(routes[5].path, '/__dsh_autorestart/sleep')
-  assert.equal(taps.length, 1)
-  const html = taps[0]('<html><head></head><body>app</body></html>')
+  assert.equal(taps.length, 2, 'the page gets the boot heartbeat and the gesture ticket')
+  const html = taps.reduce(
+    (page, tap) => tap(page),
+    '<html><head></head><body>app</body></html>',
+  )
   assert.match(html, /data-dsh-autorestart-heartbeat/)
   assert.match(html, /__DSH_AUTORESTART_BOOT__/)
   assert.match(html, /\/__dsh_autorestart\/health/)
+  assert.match(html, /data-dsh-autorestart-sleep-ticket/)
+  assert.match(html, /__DSH_SLEEP_TICKET__/)
   assert.ok(html.indexOf('data-dsh-autorestart-heartbeat') < html.indexOf('</head>'))
   // Idempotent: tapping the same document twice must not duplicate the script.
-  assert.equal(taps[0](html), html)
+  assert.equal(
+    taps.reduce((page, tap) => tap(page), html),
+    html,
+  )
 })
 
 test('autoReloadPage: false suppresses the heartbeat but keeps the health route', () => {
@@ -522,7 +530,10 @@ test('autoReloadPage: false suppresses the heartbeat but keeps the health route'
   })
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, autoReloadPage: false })
   assert.equal(routes.length, 6)
-  assert.equal(taps.length, 0)
+  assert.equal(taps.length, 1, 'only the gesture ticket is injected without the heartbeat')
+  const html = taps[0]('<html><head></head><body>app</body></html>')
+  assert.doesNotMatch(html, /data-dsh-autorestart-heartbeat/, 'the heartbeat must stay off')
+  assert.match(html, /data-dsh-autorestart-sleep-ticket/, 'the gesture ticket is always there')
 })
 
 test('every exported default key is present in cordis.patch.yml (no dead knobs)', () => {

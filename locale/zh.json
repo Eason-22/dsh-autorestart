@@ -26,6 +26,7 @@
       "busy": "准备中…"
     },
     "error": "没能联系上关机服务：{message}",
+    "refused": "这次点击没有被接受：{message}",
     "countdown": {
       "caption": {
         "20": "鲸鱼娘开始收网了",

@@ -195,6 +195,39 @@ The rollback is deliberately conservative: it only runs when the relaunched host
 own health route. A slow start inside `rollbackTimeoutMs` is never treated as a failure, and a
 healthy host is never touched.
 
+### The one-time install question
+
+The first time the plugin is used, the composer dock shows ONE non-modal panel that asks whether the
+pre-restart backup should also snapshot the installed plugin tree:
+
+- **"Configuration + installed plugins"** — about 3 seconds and 117 MB more per restart; a plugin
+  that breaks the boot can be rolled back too.
+- **"Configuration only"** — instant, about 66 KB; plugin problems cannot be rolled back and need a
+  manual reinstall.
+
+Both options share the same base: the **configuration** is always backed up. The plugins are an
+addition to it, never a rival of it.
+
+- **It is asked exactly once.** The panel is rendered only while
+  `localStorage['dsh-autorestart:backup-choice-v1']` is missing; picking an option records the answer and the
+  panel never comes back.
+- **Closing the panel counts as answering.** `×` and `Esc` write the very same "already answered" mark as
+  picking an option, so that browser is never asked again — and closing keeps the default (configuration *and*
+  plugins).
+- **It never blocks you.** The panel is a `role="status"` block in the composer dock: the input box
+  stays usable, nothing is modal, and the panel does not disappear on its own. It is keyboard
+  reachable and `Esc` closes it.
+- **Where the answer goes.** The host writes it into the profile configuration with the official
+  `configEditor` service — the same `backupIncludePlugins` key the settings page edits, so there is
+  one source of truth. If that service is unavailable the answer degrades to
+  `<DSH_HOME>/storages/dsh-autorestart/install-choice.json` and a warning is logged. The same fallback
+  happens in a hosted profile that declares no `dsh-autorestart` row of its own: there is no row for the
+  editor to write, so the answer lands in that file instead of the profile. Declare the row (see
+  *Hosted `dsh web` deployments* below) to keep the profile configuration as the single source of truth.
+- **How to change your mind later:** Settings → Plugins → dsh-autorestart → `backupIncludePlugins`.
+  `continuum_status` always reports the value that is in effect right now
+  (`backupIncludePlugins: true | false`).
+
 ## Requirements and limits
 
 - **Windows desktop.** `restartMode: app` restarts the DSH desktop app on Windows. Any other
@@ -216,6 +249,37 @@ healthy host is never touched.
   show the pill.
 - **The restart closes and reopens the desktop window.** It is a full app restart, not a hot reload.
 - **The resumed round consumes API tokens**, exactly like typing "continue" by hand.
+
+### Hosted `dsh web` deployments
+
+| Deployment | `restartMode` | How the host is restarted |
+| --- | --- | --- |
+| DeepSeek Harness desktop app (Windows) | `app` (the default) | The host's own app restart: the old process tree is killed and the desktop app is relaunched |
+| A hosted `dsh web` deployment | `command` | There is no "restart the app" in a web deployment — you must supply the command yourself |
+
+Minimal configuration for a hosted `dsh web` (it **replaces** the whole `config` block, it is not merged):
+
+```yaml
+- id: dsh-autorestart
+  config:
+    restartMode: command
+    restartCommand: systemctl --user restart dsh-web
+```
+
+`restartCommand` may use the placeholders `{pid}` (this host), `{ppid}` (its parent) and `{app}` (the desktop
+app path).
+
+**Without that configuration the restart fails, and it says so.** A hosted host is not the desktop app, so
+the plugin has no way to relaunch it: the log gets
+`no restart method available (not the desktop app and restartCommand is empty); leaving the checkpoint in place`,
+the pending restart is rolled back (one retry with a backoff, then it is cancelled instead of retrying
+forever), and nothing is relaunched — the checkpoint simply stays on disk, so the session is picked up again
+when the host is started by hand. `continuum_status` keeps reporting the pending state until it is cancelled.
+
+The same profile row is what the one-time install question writes into: a hosted profile that declares no
+`dsh-autorestart` row has no row for the `configEditor` service to edit, so the answer falls back to
+`<DSH_HOME>/storages/dsh-autorestart/install-choice.json` instead of the profile configuration. Declaring the
+row keeps the profile (and therefore the settings page) as the single source of truth.
 
 ## Verify
 

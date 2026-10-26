@@ -60,6 +60,11 @@ window.__ModuleLoader__.load({
     // is only the fallback for an older Host.
     const ROUTE_PREFIX = HEALTH_URL.split('?')[0].replace(/\/[^/]*$/, '')
     const DEFAULT_PARK_URL = ROUTE_PREFIX + '/park'
+    // The route that persists the one-time install choice.
+    const DEFAULT_CHOICE_URL = ROUTE_PREFIX + '/choice'
+    // The browser-side record of the one-time install choice. The prompt is
+    // shown only while this key is missing, so it is asked exactly once.
+    const BACKUP_CHOICE_KEY = 'dsh-autorestart:backup-choice-v1'
     const POLL_MS = 2000
     // The brand accent (blue-purple). The pending-restart marker is a brand
     // signal, not a warning: no warning/yellow token is used here.
@@ -112,6 +117,21 @@ window.__ModuleLoader__.load({
       durationSeconds: '{n} 秒',
       durationMinutes: '{n} 分 {m} 秒',
       durationHours: '{n} 小时 {m} 分',
+      // The one-time install prompt (the choice is asked exactly once).
+      // "Backup" is the verb and BOTH options share the "configuration" base:
+      // the plugins are an ADDITION to the configuration, never a rival of it.
+      backupChoiceTitle: '重启前自动备份：要不要把已安装的插件也一起备份？',
+      backupChoiceBody: '每次重启前会快照当前配置，万一重启后起不来就能自动回退。',
+      backupChoiceWithPlugins: '配置 + 已安装插件',
+      backupChoiceWithPluginsHint: '多约 3 秒、约 117 MB；插件把启动搞坏时也能回退。',
+      backupChoiceConfigOnly: '只备份配置',
+      backupChoiceConfigOnlyHint: '瞬间完成、约 66 KB；插件问题无法回退，需要手动重装。',
+      backupChoiceFootnote: '以后可在 设置 → 插件 → dsh-autorestart 修改',
+      backupChoicePickPrimary: '用这个',
+      backupChoicePickSecondary: '只备份配置',
+      backupChoiceRecommended: '推荐',
+      backupChoiceDismissAria: '关闭这个一次性提示',
+      backupChoiceError: '保存失败：{message}',
     }
 
     const EN = {
@@ -149,6 +169,21 @@ window.__ModuleLoader__.load({
       durationSeconds: '{n}s',
       durationMinutes: '{n}m {m}s',
       durationHours: '{n}h {m}m',
+      // The one-time install prompt (the choice is asked exactly once).
+      // "Backup" is the verb and BOTH options share the "configuration" base:
+      // the plugins are an ADDITION to the configuration, never a rival of it.
+      backupChoiceTitle: 'Automatic pre-restart backup: include the installed plugins too?',
+      backupChoiceBody: 'A snapshot of the current configuration is taken before every restart, so a host that fails to come back can be rolled back automatically.',
+      backupChoiceWithPlugins: 'Configuration + installed plugins',
+      backupChoiceWithPluginsHint: 'About 3 seconds and 117 MB more; a plugin that breaks the boot can be rolled back too.',
+      backupChoiceConfigOnly: 'Configuration only',
+      backupChoiceConfigOnlyHint: 'Instant, about 66 KB; plugin problems cannot be rolled back and need a manual reinstall.',
+      backupChoiceFootnote: 'You can change this later in Settings → Plugins → dsh-autorestart',
+      backupChoicePickPrimary: 'Use this',
+      backupChoicePickSecondary: 'Configuration only',
+      backupChoiceRecommended: 'Recommended',
+      backupChoiceDismissAria: 'Close this one-time prompt',
+      backupChoiceError: 'Could not save the choice: {message}',
     }
 
     // Bound during `apply`. The slots are registered without a locale
@@ -336,6 +371,49 @@ window.__ModuleLoader__.load({
       return DEFAULT_PARK_URL
     }
 
+    /**
+     * The route that persists the one-time install choice: the one the Host
+     * sent with the state payload, or the one derived from the health path.
+     */
+    function choiceUrlFor(info) {
+      const sent = info && typeof info.choiceUrl === 'string' ? info.choiceUrl.trim() : ''
+      if (sent.startsWith('/')) return sent
+      return DEFAULT_CHOICE_URL
+    }
+
+    /**
+     * Whether the one-time install prompt may be shown.
+     *
+     * It may be shown only while the browser has no record of a choice yet,
+     * i.e. while `localStorage['dsh-autorestart:backup-choice-v1']` is
+     * missing. A browser without a usable localStorage answers "no": the
+     * prompt must not come back on every reload there.
+     */
+    function backupChoicePending() {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return false
+        return window.localStorage.getItem(BACKUP_CHOICE_KEY) === null
+      } catch {
+        return false
+      }
+    }
+
+    /**
+     * Record the one-time choice in the browser.
+     *
+     * The key is written as soon as the user picks an option (or closes the
+     * prompt), so the question is asked exactly once.
+     */
+    function writeBackupChoice(value) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return false
+        window.localStorage.setItem(BACKUP_CHOICE_KEY, String(value))
+        return true
+      } catch {
+        return false
+      }
+    }
+
     /** A short, human readable description of a failed request. */
     function describeError(error) {
       if (!error) return 'unknown error'
@@ -485,6 +563,180 @@ window.__ModuleLoader__.load({
       fontWeight: 600,
       color: 'var(--dsw-alias-danger, #d14343)',
     }
+
+    // The one-time install prompt. It is NOT a modal: it is an ordinary block
+    // in the composer dock, so the input box stays usable and nothing is
+    // blocked. It never disappears on its own.
+    //
+    // The look follows the established DSH plugin styling: one 14px/600
+    // heading, a muted subtitle, two selectable rows (a name + a note on the
+    // left, the action on the right) and a muted footnote. The primary option
+    // carries a "recommended" pill and a solid button; the secondary one is
+    // outlined. Only theme tokens are used, so light and dark themes both
+    // work.
+    const CHOICE_STYLE_ID = 'dsh-autorestart-choice'
+    const CHOICE_CSS = [
+      '.dsh-autorestart-choice{',
+      '  display:flex;',
+      '  flex-direction:column;',
+      '  gap:8px;',
+      '  width:min(560px,94vw);',
+      '  max-width:100%;',
+      '  box-sizing:border-box;',
+      '  margin:0 0 6px;',
+      '  padding:16px 18px;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:12px;',
+      '  background:var(--dsw-alias-bg-layer-1);',
+      '  box-shadow:0 8px 24px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 20%, transparent);',
+      '  color:var(--dsw-alias-label-secondary);',
+      '  font-size:13px;',
+      '  line-height:18px;',
+      '}',
+      '.dsh-autorestart-choice h3{',
+      '  margin:0;',
+      '  font-size:14px;',
+      '  font-weight:600;',
+      '  line-height:20px;',
+      '  color:var(--dsw-alias-label-primary);',
+      '}',
+      '.dsh-autorestart-choice p{margin:0;}',
+      '.dsh-autorestart-choice__head{',
+      '  display:flex;',
+      '  align-items:flex-start;',
+      '  justify-content:space-between;',
+      '  gap:10px;',
+      '}',
+      '.dsh-autorestart-choice__subtitle{',
+      '  font-size:12.5px;',
+      '  line-height:18px;',
+      '  color:var(--dsw-alias-label-secondary);',
+      '}',
+      '.dsh-autorestart-choice__options{',
+      '  display:flex;',
+      '  flex-direction:column;',
+      '  gap:10px;',
+      '}',
+      '.dsh-autorestart-choice__row{',
+      '  display:flex;',
+      '  align-items:center;',
+      '  justify-content:space-between;',
+      '  gap:10px;',
+      '  padding:10px 12px;',
+      '  border:1px solid transparent;',
+      '  border-radius:10px;',
+      '  cursor:pointer;',
+      '  transition:background-color .14s,border-color .14s;',
+      '}',
+      '.dsh-autorestart-choice__row:hover,',
+      '.dsh-autorestart-choice__row:focus-within{',
+      '  border-color:var(--dsw-alias-border-l1);',
+      '  background:var(--dsw-alias-bg-layer-2, color-mix(in srgb, var(--dsw-alias-label-primary) 4%, transparent));',
+      '}',
+      '.dsh-autorestart-choice__row:focus-visible{',
+      '  outline:2px solid var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  outline-offset:2px;',
+      '}',
+      '.dsh-autorestart-choice__text{flex:1 1 auto;min-width:0;}',
+      '.dsh-autorestart-choice__title{',
+      '  display:flex;',
+      '  align-items:center;',
+      '  gap:6px;',
+      '  min-width:0;',
+      '}',
+      '.dsh-autorestart-choice__name{',
+      '  font-size:13px;',
+      '  font-weight:600;',
+      '  line-height:18px;',
+      '  color:var(--dsw-alias-label-primary);',
+      '}',
+      '.dsh-autorestart-choice__hint{',
+      '  display:block;',
+      '  margin-top:2px;',
+      '  font-size:12px;',
+      '  line-height:17px;',
+      '  color:var(--dsw-alias-label-secondary);',
+      '}',
+      '.dsh-autorestart-choice__badge{',
+      '  flex:none;',
+      '  display:inline-block;',
+      '  padding:1px 7px;',
+      '  border-radius:999px;',
+      '  font-size:11px;',
+      '  font-weight:600;',
+      '  line-height:16px;',
+      '  color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  background:color-mix(in srgb, var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe)) 12%, transparent);',
+      '}',
+      '.dsh-autorestart-choice__cta{',
+      '  flex:none;',
+      '  min-width:28px;',
+      '  min-height:28px;',
+      '  padding:4px 12px;',
+      '  border-radius:8px;',
+      '  font:inherit;',
+      '  font-size:12.5px;',
+      '  font-weight:600;',
+      '  line-height:18px;',
+      '  cursor:pointer;',
+      '  transition:background-color .14s,border-color .14s,color .14s;',
+      '}',
+      '.dsh-autorestart-choice__cta:focus-visible{',
+      '  outline:2px solid var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  outline-offset:2px;',
+      '}',
+      '.dsh-autorestart-choice__cta--primary{',
+      '  border:1px solid transparent;',
+      '  background:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  color:var(--dsw-alias-bg-layer-1,#fff);',
+      '}',
+      '.dsh-autorestart-choice__cta--secondary{',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  background:transparent;',
+      '  color:var(--dsw-alias-label-primary);',
+      '}',
+      '.dsh-autorestart-choice__cta--secondary:hover{',
+      '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '}',
+      '.dsh-autorestart-choice__close{',
+      '  flex:none;',
+      '  width:28px;',
+      '  height:28px;',
+      '  padding:0;',
+      '  border:1px solid transparent;',
+      '  border-radius:8px;',
+      '  background:transparent;',
+      '  color:var(--dsw-alias-label-secondary);',
+      '  font:inherit;',
+      '  font-size:16px;',
+      '  line-height:1;',
+      '  cursor:pointer;',
+      '  transition:background-color .14s;',
+      '}',
+      '.dsh-autorestart-choice__close:hover{',
+      '  background:var(--dsw-alias-bg-layer-2, color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent));',
+      '}',
+      '.dsh-autorestart-choice__close:focus-visible{',
+      '  outline:2px solid var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  outline-offset:2px;',
+      '}',
+      '.dsh-autorestart-choice__footnote{',
+      '  margin-top:10px;',
+      '  padding-top:10px;',
+      '  border-top:1px solid var(--dsw-alias-border-l1);',
+      '  font-size:11px;',
+      '  line-height:16px;',
+      '  color:var(--dsw-alias-label-secondary);',
+      '}',
+      '@media (max-width:1023px){',
+      '  .dsh-autorestart-choice{width:calc(100vw - 32px);}',
+      '}',
+      '@media (max-width:640px){',
+      '  .dsh-autorestart-choice__row{flex-direction:column;align-items:stretch;}',
+      '  .dsh-autorestart-choice__cta{width:100%;}',
+      '}',
+    ].join('\n')
 
     /**
      * One compact pill in the composer tool row, visible only while THIS
@@ -681,6 +933,220 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /**
+     * Inject the prompt styles exactly once. The id keeps a second injection
+     * from duplicating the rule.
+     */
+    function ensureChoiceStyle() {
+      if (typeof document === 'undefined' || !document.head) return
+      try {
+        if (document.getElementById(CHOICE_STYLE_ID)) return
+        const style = document.createElement('style')
+        style.id = CHOICE_STYLE_ID
+        style.textContent = CHOICE_CSS
+        document.head.appendChild(style)
+      } catch {
+        // Without the stylesheet the prompt is still readable, just plainer.
+      }
+    }
+
+    /**
+     * The one-time install prompt.
+     *
+     * It asks ONE question — should the pre-restart backup also snapshot the
+     * installed plugin tree? — and it is asked exactly once: the panel is
+     * rendered only while `localStorage['dsh-autorestart:backup-choice-v1']`
+     * is missing.
+     *
+     * "Backup" is the verb and BOTH options share the "configuration" base:
+     * the plugins are an addition to the configuration, never a rival of it.
+     *
+     * It is deliberately NOT a modal: it is an ordinary block in the composer
+     * dock (`role="status"`), so the input box stays usable, nothing is
+     * blocked, and it never disappears on its own — it stays until the user
+     * picks an option or closes it. It is keyboard reachable (focusable, Esc
+     * closes it) and adapts to a narrow window.
+     *
+     * The answer goes to the Host, which writes it into the profile
+     * configuration (the same key the settings page edits).
+     */
+    function BackupChoicePanel() {
+      const info = useSharedInfo(true)
+      // The prompt is rendered only while the browser has no record yet.
+      const [visible, setVisible] = useState(backupChoicePending)
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
+      const t = translate ?? ((name) => name)
+
+      /**
+       * Hand the choice to the Host.
+       *
+       * The browser records the choice FIRST (so the question is never asked
+       * twice) and then posts it to the Host, which persists it in the
+       * profile configuration.
+       */
+      const choose = (includePlugins) => {
+        if (busy) return
+        setBusy(true)
+        setError('')
+        writeBackupChoice(includePlugins ? 'plugins' : 'config-only')
+        setVisible(false)
+        void (async () => {
+          try {
+            const response = await fetch(choiceUrlFor(info), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ includePlugins }),
+            })
+            if (!response.ok) {
+              setError(fill(t('backupChoiceError'), { message: String(response.status) }))
+            }
+          } catch (failure) {
+            setError(fill(t('backupChoiceError'), { message: describeError(failure) }))
+          } finally {
+            setBusy(false)
+          }
+        })()
+      }
+
+      /**
+       * Close the prompt without answering: the default (the configuration
+       * AND the installed plugins) stays in place, and the question is not
+       * asked again.
+       */
+      const dismiss = () => {
+        if (busy) return
+        writeBackupChoice('dismissed')
+        setVisible(false)
+      }
+
+      /** Esc closes the prompt (the panel itself is focusable). */
+      const onKeyDown = (event) => {
+        if (!event) return
+        if (event.key === 'Escape' || event.key === 'Esc') dismiss()
+      }
+
+      if (!visible) return null
+      ensureChoiceStyle()
+
+      /**
+       * One option row.
+       *
+       * The WHOLE row is the click target (and it is focusable, with the
+       * radio semantics of a one-of-two choice), while the right side carries
+       * the concrete action. The primary row wears a "recommended" pill and a
+       * solid button; the secondary one an outlined button.
+       */
+      const optionRow = (key, name, hint, cta, variant, recommended) => {
+        const pick = () => choose(key === 'plugins')
+        const onRowClick = () => pick()
+        const onRowKeyDown = (event) => {
+          if (!event) return
+          if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+            if (typeof event.preventDefault === 'function') event.preventDefault()
+            pick()
+          }
+        }
+        // The button inside the row must not trigger the row a second time.
+        const onCtaClick = (event) => {
+          if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+          pick()
+        }
+        return h(
+          'div',
+          {
+            key,
+            className: 'dsh-autorestart-choice__row',
+            role: 'radio',
+            'aria-checked': 'false',
+            'aria-label': name,
+            tabIndex: busy ? -1 : 0,
+            'data-backup-choice': key,
+            onClick: onRowClick,
+            onKeyDown: onRowKeyDown,
+          },
+          h(
+            'div',
+            { className: 'dsh-autorestart-choice__text' },
+            h(
+              'span',
+              { className: 'dsh-autorestart-choice__title' },
+              recommended
+                ? h('span', { className: 'dsh-autorestart-choice__badge' }, t('backupChoiceRecommended'))
+                : null,
+              h('span', { className: 'dsh-autorestart-choice__name' }, name),
+            ),
+            h('span', { className: 'dsh-autorestart-choice__hint' }, hint),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-autorestart-choice__cta dsh-autorestart-choice__cta--' + variant,
+              'data-backup-choice': key,
+              'aria-label': cta,
+              title: cta,
+              disabled: busy,
+              onClick: onCtaClick,
+            },
+            cta,
+          ),
+        )
+      }
+
+      return h(
+        'div',
+        {
+          className: 'dsh-autorestart-choice',
+          role: 'status',
+          'aria-live': 'polite',
+          tabIndex: 0,
+          onKeyDown,
+          'data-dsh-autorestart-backup-choice': 'true',
+        },
+        h(
+          'div',
+          { className: 'dsh-autorestart-choice__head' },
+          h('h3', null, t('backupChoiceTitle')),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-autorestart-choice__close',
+              'aria-label': t('backupChoiceDismissAria'),
+              title: t('backupChoiceDismissAria'),
+              disabled: busy,
+              onClick: dismiss,
+            },
+            '×',
+          ),
+        ),
+        h('p', { className: 'dsh-autorestart-choice__subtitle' }, t('backupChoiceBody')),
+        h(
+          'div',
+          { className: 'dsh-autorestart-choice__options' },
+          optionRow(
+            'plugins',
+            t('backupChoiceWithPlugins'),
+            t('backupChoiceWithPluginsHint'),
+            t('backupChoicePickPrimary'),
+            'primary',
+            true,
+          ),
+          optionRow(
+            'config-only',
+            t('backupChoiceConfigOnly'),
+            t('backupChoiceConfigOnlyHint'),
+            t('backupChoicePickSecondary'),
+            'secondary',
+            false,
+          ),
+        ),
+        h('p', { className: 'dsh-autorestart-choice__footnote' }, t('backupChoiceFootnote')),
+        error === '' ? null : h('p', { role: 'alert' }, error),
+      )
+    }
+
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
@@ -692,6 +1158,7 @@ window.__ModuleLoader__.load({
         translate = t
         ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'autorestart-restart-pill', order: 0 }, RestartPill))
         ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'autorestart-restart-dot', order: 20 }, RestartDot))
+        ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'autorestart-backup-choice', order: 7, locale: NS }, BackupChoicePanel))
       },
     }
   },

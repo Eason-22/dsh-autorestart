@@ -2,5 +2,18 @@
   "meta": {
     "title": "Autorestart — restart continuation",
     "description": "Keeps agent work alive across a DeepSeek Harness restart: a durable checkpoint, goal re-arm or a continuation message on boot, and an idle-aware graceful restart the agent can request itself."
+  },
+  "backupChoice": {
+    "title": "Automatic pre-restart backup: include the installed plugins too?",
+    "body": "A snapshot of the current configuration is taken before every restart, so a host that fails to come back can be rolled back automatically.",
+    "withPlugins": "Configuration + installed plugins",
+    "withPluginsHint": "About 3 seconds and 117 MB more; a plugin that breaks the boot can be rolled back too.",
+    "configOnly": "Configuration only",
+    "configOnlyHint": "Instant, about 66 KB; plugin problems cannot be rolled back and need a manual reinstall.",
+    "footnote": "You can change this later in Settings → Plugins → dsh-autorestart",
+    "pickPrimary": "Use this",
+    "pickSecondary": "Configuration only",
+    "recommended": "Recommended",
+    "dismissAria": "Close this one-time prompt"
   }
 }

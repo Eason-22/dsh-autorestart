@@ -71,6 +71,21 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 - 下次启动时 `continuum_status` 会报 `lastRollback`（时间、等了多久、是否回滚、快照路径、崩溃日志名与尾部摘要）。
 - 开关：`backupOnRestart`（默认 `true`）、`backupIncludePlugins`（默认 `true`，关掉就只备配置文件）、`maxBackups`（默认 `2`）、`rollbackTimeoutMs`（默认 `90000`）。
 
+### 首次安装只问一次：备份要不要连已装插件一起备
+
+第一次用这个插件时，输入框上方会出现**一条非模态提示**（不是弹窗，不挡输入框，也不会自己消失），问一句：
+
+- **「配置 + 已安装插件」** —— 每次重启多约 3 秒、约 117 MB；插件把启动搞坏时也能一起回退。
+- **「只备份配置」** —— 瞬间完成、约 66 KB；插件问题无法回退，需要手动重装。
+
+两个选项共享同一个基底：**配置一定会被备份**，插件只是"要不要额外带上"，不是二选一。
+
+- **只问一次**：只有 `localStorage['dsh-autorestart:backup-choice-v1']` 缺失时才渲染；点任一项都会写下这个键，之后不再出现。
+- **关掉也算作答**：按 `×` 或 `Esc` 与点选项写的是同一个「已作答」标记，这个浏览器此后**不会再被问**；关掉等于保留默认（配置 + 已安装插件）。
+- **不打扰**：面板是 `role="status"` 的普通块，放在输入框下方的 dock 里；可聚焦、键盘可达、`Esc` 关闭。
+- **答案存在哪**：宿主用官方 `configEditor` Service 写进 profile 配置（就是设置页里那个 `backupIncludePlugins` 键，**只有一份真相**）。万一这个服务不可用，才退化到写 `<DSH_HOME>/storages/dsh-autorestart/install-choice.json` 并在日志里 `warn`。**托管 profile 如果自己没有声明 `dsh-autorestart` 行**，就没有行可写，答案同样落在这个文件里而不是 profile 里 —— 声明那一行（见「平台与部署」）才能让 profile 配置保持唯一真相。
+- **想改主意**：设置 → 插件 → dsh-autorestart → `backupIncludePlugins`。`continuum_status` 里随时能看到当前生效值（`backupIncludePlugins: true | false`）。
+
 ## 工作方式
 
 ```
@@ -491,6 +506,18 @@ or by requesting the health path with ?gate=1.
     restartMode: command
     restartCommand: systemctl --user restart dsh-web
 ```
+
+`restartCommand` 里可以用占位符 `{pid}`（当前宿主）、`{ppid}`（它的父进程）、`{app}`（桌面端路径）。
+
+**不配这个，重启就会失败，而且失败是有提示的**：托管宿主不是桌面端，插件没有「重启应用」的能力，
+日志里会出现
+`no restart method available (not the desktop app and restartCommand is empty); leaving the checkpoint in place`，
+待重启会被回退（退避后重试一次，再失败就取消，不会永远重试），**不会有任何进程被拉起** —— 只是把检查点
+留在盘上，等你手动把宿主再起一次时它会接着跑。`continuum_status` 在取消之前会一直报待重启状态。
+
+同一个 profile 行也是首次安装那次提问的落点：**托管 profile 如果自己没有 `dsh-autorestart` 行**，
+`configEditor` 就没有行可写，答案会退到 `<DSH_HOME>/storages/dsh-autorestart/install-choice.json`
+而不是 profile 配置；声明这一行才能让 profile（以及设置页）保持唯一真相。
 
 - **浏览器侧的「待重启」小胶囊**依赖 `GET <healthPath>?state=1` 这条状态路由。这条路由现在接受
   **loopback 调用者**，*或* **宿主 connection 服务判定为「已认证浏览器」的请求**

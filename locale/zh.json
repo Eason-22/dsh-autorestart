@@ -2,5 +2,18 @@
   "meta": {
     "title": "Autorestart — 重启续接",
     "description": "让 Agent 的工作跨 DSH 重启不中断：持久检查点、启动时重新武装目标或注入续接消息，以及 Agent 可自行请求的“空闲即重启”。"
+  },
+  "backupChoice": {
+    "title": "重启前自动备份：要不要把已安装的插件也一起备份？",
+    "body": "每次重启前会快照当前配置，万一重启后起不来就能自动回退。",
+    "withPlugins": "配置 + 已安装插件",
+    "withPluginsHint": "多约 3 秒、约 117 MB；插件把启动搞坏时也能回退。",
+    "configOnly": "只备份配置",
+    "configOnlyHint": "瞬间完成、约 66 KB；插件问题无法回退，需要手动重装。",
+    "footnote": "以后可在 设置 → 插件 → dsh-autorestart 修改",
+    "pickPrimary": "用这个",
+    "pickSecondary": "只备份配置",
+    "recommended": "推荐",
+    "dismissAria": "关闭这个一次性提示"
   }
 }

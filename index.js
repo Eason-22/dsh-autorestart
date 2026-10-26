@@ -173,6 +173,9 @@ export const inject = ['agents', 'goals', 'tools', 'timer', 'systemPrompt', 'ses
  * the real schema and project defaults; `normalizeConfig` still re-applies the same
  * defaults for direct `apply()` calls in tests.
  *
+ * Every key carries a one-sentence description, so the settings page explains what
+ * each knob does instead of showing a bare name.
+ *
  * Construction is guarded: a wrong/foreign schemastery fallback must never turn a
  * missing schema into a failed plugin activation, and the coarsened `schemasterySource`
  * is reported by the health route instead of an absolute install path.
@@ -181,38 +184,63 @@ function buildConfigSchema() {
   if (schemastery === undefined) return undefined
   try {
     return schemastery.object({
-      enabled: schemastery.boolean().default(true),
-      stateFile: schemastery.string().default(''),
-      resumeOnBoot: schemastery.boolean().default(true),
-      recoveryDelayMs: schemastery.number().min(0).default(6000),
-      maxSessions: schemastery.number().step(1).min(1).default(4),
-      maxResumeAttempts: schemastery.number().step(1).min(1).default(2),
-      deferPollMs: schemastery.number().min(250).default(3000),
-      deferSoftMs: schemastery.number().min(0).default(300000),
-      deferHardMs: schemastery.number().min(0).default(900000),
-      deferPolicy: schemastery.union(['auto', 'wait']).default('auto'),
+      enabled: schemastery.boolean().default(true)
+        .description('Master switch: when false the plugin loads but does nothing.'),
+      stateFile: schemastery.string().default('')
+        .description('Absolute path of the durable checkpoint file; empty means <DSH_HOME>/storages/dsh-autorestart/state.json.'),
+      resumeOnBoot: schemastery.boolean().default(true)
+        .description('Resume interrupted sessions automatically after the host starts again.'),
+      recoveryDelayMs: schemastery.number().min(0).default(6000)
+        .description('Milliseconds the plugin waits after boot before it recovers interrupted sessions.'),
+      maxSessions: schemastery.number().step(1).min(1).default(4)
+        .description('How many interrupted sessions one recovery pass resumes.'),
+      maxResumeAttempts: schemastery.number().step(1).min(1).default(2)
+        .description('How often a single session is retried before the recovery gives up on it.'),
+      deferPollMs: schemastery.number().min(250).default(3000)
+        .description('Milliseconds between two restart-gate checks.'),
+      deferSoftMs: schemastery.number().min(0).default(300000)
+        .description('Milliseconds after which a pending restart is announced as waiting for a long time.'),
+      deferHardMs: schemastery.number().min(0).default(900000)
+        .description('Milliseconds after which a pending restart gives up, unless forceRestartWhenBusy is enabled.'),
+      deferPolicy: schemastery.union(['auto', 'wait']).default('auto')
+        .description('How a pending restart treats a busy conversation: auto waits for it, wait blocks until every conversation is idle.'),
       // hard deadline only forces a restart over a running conversation when enabled
-      forceRestartWhenBusy: schemastery.boolean().default(false),
-      restartMode: schemastery.union(['app', 'command']).default('app'),
-      restartCommand: schemastery.string().default(''),
-      relaunchDelaySeconds: schemastery.number().min(0).default(2),
+      forceRestartWhenBusy: schemastery.boolean().default(false)
+        .description('Let the hard deadline restart the host even while a conversation is still running.'),
+      restartMode: schemastery.union(['app', 'command']).default('app')
+        .description('How the host is restarted: app relaunches the desktop app, command runs restartCommand.'),
+      restartCommand: schemastery.string().default('')
+        .description('Shell command used when restartMode is "command"; empty means there is no custom command.'),
+      relaunchDelaySeconds: schemastery.number().min(0).default(2)
+        .description('Seconds between the kill of the old host and the relaunch of the new one.'),
       // quiet window that must pass after the last conversation activity
-      settleMs: schemastery.number().min(0).default(2000),
-      autoReloadPage: schemastery.boolean().default(true),
-      blockManualRestart: schemastery.boolean().default(true),
-      healthPath: schemastery.string().default('/__dsh_autorestart/health'),
-      continuationText: schemastery.string().default(''),
+      settleMs: schemastery.number().min(0).default(2000)
+        .description('Milliseconds the host must stay quiet after the last conversation activity before a restart may fire.'),
+      autoReloadPage: schemastery.boolean().default(true)
+        .description('Reload the web page automatically when the host boot token changes.'),
+      blockManualRestart: schemastery.boolean().default(true)
+        .description('Block shell commands that would kill or relaunch DeepSeek Harness by hand.'),
+      healthPath: schemastery.string().default('/__dsh_autorestart/health')
+        .description('HTTP path of the read-only health route used by the client UI and by verification scripts.'),
+      continuationText: schemastery.string().default('')
+        .description('Custom text injected as the continuation message; empty means the built-in notice.'),
       // pause between two recovery batches (each batch resumes maxSessions sessions)
-      recoveryBatchDelayMs: schemastery.number().min(0).default(1200),
+      recoveryBatchDelayMs: schemastery.number().min(0).default(1200)
+        .description('Milliseconds between two recovery batches.'),
       // pause between two resolveAgent attempts inside one boot
-      resumeRetryDelayMs: schemastery.number().min(0).default(1000),
+      resumeRetryDelayMs: schemastery.number().min(0).default(1000)
+        .description('Milliseconds between two resolveAgent attempts inside one boot.'),
       // pre-restart snapshot + automatic rollback when the host never comes back
-      backupOnRestart: schemastery.boolean().default(true),
+      backupOnRestart: schemastery.boolean().default(true)
+        .description('Take a snapshot of the profile before every restart, so a host that cannot boot again is rolled back automatically.'),
       // include the installed plugin tree in the snapshot (bigger, but it makes a
       // rollback of "a plugin upgrade broke the boot" possible)
-      backupIncludePlugins: schemastery.boolean().default(true),
-      maxBackups: schemastery.number().step(1).min(1).default(2),
-      rollbackTimeoutMs: schemastery.number().min(1000).default(90000),
+      backupIncludePlugins: schemastery.boolean().default(true)
+        .description('Include the installed plugin tree in that snapshot: about 117 MB and roughly 3 extra seconds, but it is what makes a rollback of a broken plugin upgrade possible.'),
+      maxBackups: schemastery.number().step(1).min(1).default(2)
+        .description('How many snapshots are kept; older ones are deleted automatically.'),
+      rollbackTimeoutMs: schemastery.number().min(1000).default(90000)
+        .description('Milliseconds the detached watcher waits for the relaunched host before it restores the snapshot.'),
     })
   } catch (error) {
     schemasterySource = `construction-failed: ${String(error)}`
@@ -326,6 +354,20 @@ function resolveHandoffPath(config) {
   const index = healthPath.lastIndexOf('/')
   const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
   return `${prefix}/handoff`
+}
+
+/**
+ * Resolve the choice-route path: a sibling of the health route, under the same
+ * prefix (`POST /choice` persists the one-time install choice of the user).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveChoicePath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/choice`
 }
 
 /**
@@ -485,6 +527,86 @@ function resolveStateFile(config) {
 }
 
 /**
+ * The directory the plugin owns its durable state in.
+ *
+ * It is the directory of the checkpoint file, so a custom `stateFile` moves the
+ * whole state directory with it (the backups live next to it as well).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveStateDir(config) {
+  return path.dirname(resolveStateFile(config))
+}
+
+/**
+ * The file the DEGRADED choice path writes to.
+ *
+ * It is only used when the official `configEditor` service is unavailable: the
+ * profile configuration stays the single source of truth, and this file is the
+ * last-resort record of a choice the Host could not persist yet.
+ */
+const INSTALL_CHOICE_FILE = 'install-choice.json'
+
+/**
+ * Read the recorded install choice from the fallback file.
+ *
+ * @param {string} stateDir
+ * @returns {boolean|null} the recorded value, or null when there is none
+ */
+function readInstallChoice(stateDir) {
+  try {
+    const raw = fs.readFileSync(path.join(stateDir, INSTALL_CHOICE_FILE), 'utf8')
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    return typeof parsed.includePlugins === 'boolean' ? parsed.includePlugins : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Write the install choice into the fallback file.
+ *
+ * @param {string} stateDir
+ * @param {boolean} includePlugins
+ * @returns {string} the file that was written
+ */
+function writeInstallChoice(stateDir, includePlugins) {
+  const file = path.join(stateDir, INSTALL_CHOICE_FILE)
+  fs.mkdirSync(stateDir, { recursive: true })
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ includePlugins: includePlugins === true, at: new Date().toISOString() }, null, 2),
+    'utf8',
+  )
+  return file
+}
+
+/**
+ * Resolve the effective `backupIncludePlugins` value and where it came from.
+ *
+ * The profile row config always wins: it is the single source of truth (the
+ * settings page and the one-time install prompt write the same key). Only when
+ * the row config does not set the key at all does the degraded fallback file
+ * get a say, and only when it does not exist does the built-in default apply.
+ *
+ * @param {object|null|undefined} rawConfig the loader row config, as received
+ * @param {string} stateDir
+ * @returns {{ includePlugins: boolean, source: 'config'|'fallback-file'|'default' }}
+ */
+export function resolveBackupIncludePlugins(rawConfig, stateDir) {
+  if (rawConfig && typeof rawConfig === 'object'
+    && Object.prototype.hasOwnProperty.call(rawConfig, 'backupIncludePlugins')
+    && typeof rawConfig.backupIncludePlugins === 'boolean') {
+    return { includePlugins: rawConfig.backupIncludePlugins, source: 'config' }
+  }
+  const fallback = typeof stateDir === 'string' && stateDir !== '' ? readInstallChoice(stateDir) : null
+  if (fallback !== null) return { includePlugins: fallback, source: 'fallback-file' }
+  return { includePlugins: DEFAULTS.backupIncludePlugins, source: 'default' }
+}
+
+/**
  * Resolve the profile directory the running host was started from.
  *
  * The host process does NOT necessarily carry `DSH_PROFILE_DIR` / `DSH_PROFILE`
@@ -596,8 +718,65 @@ function isRootAgent(ctx, agent) {
   }
 }
 
+/**
+ * Resolve the official `configEditor` service, or null when it is unavailable.
+ *
+ * The service is optional: the plugin must load in a composition that does not
+ * provide it, and the one-time install choice then falls back to a file.
+ *
+ * @param {object} ctx
+ * @returns {any|null}
+ */
+function resolveConfigEditor(ctx) {
+  try {
+    if (ctx && ctx.configEditor && typeof ctx.configEditor.edit === 'function') return ctx.configEditor
+  } catch {}
+  try {
+    if (ctx && typeof ctx.get === 'function') {
+      const service = ctx.get('configEditor')
+      if (service && typeof service.edit === 'function') return service
+    }
+  } catch {}
+  return null
+}
+
+/**
+ * Find this plugin's own row among the profile entries.
+ *
+ * The service hands out the LOADER's own entries, so the row id lives in
+ * `entry.options.id` (the id the bundle layer inserts: `dsh-autorestart`).
+ * A projected entry (the shape the settings UI shows) carries the same id as
+ * `patchId` or `id`, so both are accepted as well.
+ *
+ * @param {any} editor the configEditor service
+ * @returns {any|null} the entry, or null when this plugin has no row
+ */
+function findOwnEntry(editor) {
+  let entries = []
+  try {
+    entries = typeof editor.entries === 'function' ? editor.entries() : []
+  } catch {
+    return null
+  }
+  if (!Array.isArray(entries)) return null
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue
+    const options = entry.options && typeof entry.options === 'object' ? entry.options : null
+    const candidates = [
+      options ? options.id : undefined,
+      entry.patchId,
+      entry.id,
+    ]
+    for (const candidate of candidates) {
+      if (candidate === undefined || candidate === null) continue
+      if (String(candidate) === name) return entry
+    }
+  }
+  return null
+}
+
 /** The plugin's whole runtime state. */
-function createRuntime(ctx, config) {
+function createRuntime(ctx, config, options = {}) {
   const log = createLogger(ctx)
   const env = detectEnvironment()
   const stateFile = resolveStateFile(config)
@@ -1396,6 +1575,14 @@ function createRuntime(ctx, config) {
     get bootId() {
       return bootId
     },
+    /**
+     * Where the effective `backupIncludePlugins` value came from:
+     * `config` (the profile row), `fallback-file` (the degraded path) or
+     * `default` (nothing was ever chosen).
+     */
+    get backupChoiceSource() {
+      return options.backupChoiceSource || 'default'
+    },
     get isNewBoot() {
       return boot.isNewBoot
     },
@@ -1430,6 +1617,53 @@ function createRuntime(ctx, config) {
     stateFile,
     log,
     persist,
+    /**
+     * Persist the user's one-time install choice: whether the pre-restart
+     * backup also snapshots the installed plugin tree.
+     *
+     * The official `configEditor` service is the primary path: the choice goes
+     * into the profile row of this plugin, so the settings page and this prompt
+     * read and write the same key (one source of truth). When the service is
+     * unavailable the choice degrades to a file in the plugin's state directory
+     * and a warning is logged, so the choice is never silently lost.
+     *
+     * @param {boolean} includePlugins
+     * @returns {Promise<{ applied: 'config'|'fallback-file', includePlugins: boolean }>}
+     */
+    async applyBackupChoice(includePlugins) {
+      const value = includePlugins === true
+      const editor = resolveConfigEditor(ctx)
+      if (editor !== null) {
+        try {
+          const entry = findOwnEntry(editor)
+          if (entry !== null) {
+            await editor.edit(entry, (current) => {
+              const base = current && typeof current === 'object' ? { ...current } : {}
+              return { ...base, backupIncludePlugins: value }
+            })
+            // The Loader reconciles the row, but the running instance must not
+            // keep the old value until that happens.
+            config.backupIncludePlugins = value
+            log.info(`the install choice was written into the profile configuration: backupIncludePlugins=${value}`)
+            return { applied: 'config', includePlugins: value }
+          }
+          log.warn(`the configEditor service has no profile row for ${name}; the install choice degrades to ${INSTALL_CHOICE_FILE}`)
+        } catch (error) {
+          log.warn(`could not write the install choice into the profile configuration: ${describeError(error)}`)
+        }
+      } else {
+        log.warn(`the configEditor service is unavailable; the install choice degrades to ${INSTALL_CHOICE_FILE}`)
+      }
+      const file = path.join(path.dirname(stateFile), INSTALL_CHOICE_FILE)
+      try {
+        writeInstallChoice(path.dirname(stateFile), value)
+      } catch (error) {
+        throw new Error(`could not write the install choice to ${file}: ${describeError(error)}`)
+      }
+      config.backupIncludePlugins = value
+      log.warn(`the install choice was written to ${file} instead of the profile configuration`)
+      return { applied: 'fallback-file', includePlugins: value }
+    },
     toolErrors,
     startPolling,
     stopPolling,
@@ -2145,7 +2379,8 @@ function registerTools(ctx, runtime, config) {
       + '("goal-active" = an armed goal keeps it busy, "goal-exhausted" = its goal can no longer be '
       + 'resumed), the goals this plugin disarmed, the last recovery action/detail per session, '
       + 'whether a session was handed off to a fresh session (target session id and time) or is over '
-      + 'the model context window (such a session is never auto-resumed), the '
+      + 'the model context window (such a session is never auto-resumed), whether the pre-restart '
+      + 'backup also snapshots the installed plugins (backupIncludePlugins), the '
       + 'resolved state-file path, and the detected restart environment. Read-only.',
     parameters: {
       type: 'object',
@@ -2174,6 +2409,7 @@ function registerTools(ctx, runtime, config) {
           handoffs: { type: 'array', items: { type: 'object' } },
           profileDir: { type: 'string' },
           profileDirSource: { type: 'string' },
+          backupIncludePlugins: { type: 'boolean' },
           lastRollback: { type: 'object' },
           environment: { type: 'object' },
           sessions: { type: 'array', items: { type: 'object' } },
@@ -2201,6 +2437,8 @@ function registerTools(ctx, runtime, config) {
         // Where the pre-restart backup comes from (null dir = it would be skipped).
         profileDirSource: runtime.profileDir.source,
         ...(runtime.profileDir.dir ? { profileDir: runtime.profileDir.dir } : {}),
+        // Whether the pre-restart backup also snapshots the installed plugins.
+        backupIncludePlugins: config.backupIncludePlugins !== false,
         // Present only when the previous restart had to be rolled back.
         ...(runtime.lastRollback ? { lastRollback: runtime.lastRollback } : {}),
         environment: {
@@ -2906,6 +3144,77 @@ function buildHandoffRoute(ctx, runtime, config) {
   }
 }
 
+/**
+ * Build the POST `/choice` route: persist the one-time install choice of the
+ * user (whether the pre-restart backup also snapshots the installed plugins).
+ *
+ * It sits next to the health route and uses the same authentication rule
+ * (loopback OR a request the connection service admits). Body:
+ * `{ "includePlugins": boolean }`; anything that is not a boolean is refused
+ * with a 400 and NOTHING is written.
+ *
+ * The answer is `{ ok: true, applied: 'config' | 'fallback-file', includePlugins }`:
+ * `applied` says where the choice landed — the profile configuration (the
+ * official path) or the degraded fallback file.
+ */
+function buildChoiceRoute(ctx, runtime, config) {
+  const routePath = resolveChoicePath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      if (!req || req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then(async (payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const includePlugins = body.includePlugins
+        if (typeof includePlugins !== 'boolean') {
+          // Nothing is written for a malformed choice: the caller's answer
+          // must not change the profile configuration.
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'includePlugins-must-be-boolean',
+            instruction: 'Send { "includePlugins": true | false }.',
+          }))
+          return
+        }
+        const result = await runtime.applyBackupChoice(includePlugins)
+        res.statusCode = 200
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({
+          ok: true,
+          applied: result.applied,
+          includePlugins: result.includePlugins === true,
+        }))
+      }).catch((error) => {
+        res.statusCode = 500
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ ok: false, error: describeError(error) }))
+      })
+    },
+  }
+}
+
 /** Expose a tiny read-only health route for humans and verification scripts. */
 function registerHealthRoute(ctx, runtime, config) {
   const routePath = typeof config.healthPath === 'string' && config.healthPath.startsWith('/')
@@ -3016,6 +3325,10 @@ function registerHealthRoute(ctx, runtime, config) {
             // the restart).
             parkUrl: resolveParkPath(config),
             recoverUrl: resolveRecoverPath(config),
+            // The route that persists the one-time install choice, plus the
+            // value that is effective right now.
+            choiceUrl: resolveChoicePath(config),
+            backupIncludePlugins: config.backupIncludePlugins !== false,
             parkedGoals: parkedGoalList(runtime),
             recovery: recoveryList(live),
           })
@@ -3030,6 +3343,8 @@ function registerHealthRoute(ctx, runtime, config) {
             quietForMs: 0,
             parkUrl: resolveParkPath(config),
             recoverUrl: resolveRecoverPath(config),
+            choiceUrl: resolveChoicePath(config),
+            backupIncludePlugins: config.backupIncludePlugins !== false,
             parkedGoals: [],
             recovery: [],
           })
@@ -3086,6 +3401,7 @@ function registerHealthRoute(ctx, runtime, config) {
     const parkRoute = buildParkRoute(ctx, runtime, config)
     const recoverRoute = buildRecoverRoute(ctx, runtime, config)
     const handoffRoute = buildHandoffRoute(ctx, runtime, config)
+    const choiceRoute = buildChoiceRoute(ctx, runtime, config)
     try {
       const origin = typeof webServer.getOrigin === 'function' ? String(webServer.getOrigin()) : ''
       const portMatch = /:(\d+)\/?$/.exec(origin)
@@ -3111,6 +3427,11 @@ function registerHealthRoute(ctx, runtime, config) {
       target.effect(() => webServer.register(handoffRoute), 'dsh-autorestart: handoff route')
     } catch (error) {
       runtime.log.warn('could not register the handoff route:', String(error))
+    }
+    try {
+      target.effect(() => webServer.register(choiceRoute), 'dsh-autorestart: choice route')
+    } catch (error) {
+      runtime.log.warn('could not register the choice route:', String(error))
     }
     if (config.autoReloadPage !== false && typeof webServer.tapIndex === 'function') {
       try {
@@ -3245,7 +3566,12 @@ function trackAgents(ctx, runtime, config) {
  */
 export function apply(ctx, rawConfig) {
   const config = normalizeConfig(rawConfig)
-  const runtime = createRuntime(ctx, config)
+  // The one-time install choice lives in the profile row config (the single
+  // source of truth). Only when the row does not set the key at all does the
+  // degraded fallback file get a say.
+  const choice = resolveBackupIncludePlugins(rawConfig, resolveStateDir(config))
+  config.backupIncludePlugins = choice.includePlugins
+  const runtime = createRuntime(ctx, config, { backupChoiceSource: choice.source })
   const log = runtime.log
 
   log.info('activated', {
@@ -3256,6 +3582,8 @@ export function apply(ctx, rawConfig) {
     desktopApp: runtime.env.isDesktopApp,
     appExePath: runtime.env.appExePath,
     configSchema: Config !== undefined,
+    backupIncludePlugins: config.backupIncludePlugins,
+    backupChoiceSource: choice.source,
   })
   if (Config === undefined) {
     log.warn('Config schema is unavailable in this build (schemastery could not be loaded); configuration still works through cordis.patch.yml and the built-in defaults')
@@ -3294,4 +3622,4 @@ export function apply(ctx, rawConfig) {
   }, 'dsh-autorestart lifecycle')
 }
 
-export { DEFAULTS, normalizeConfig, resolveStateFile }
+export { DEFAULTS, normalizeConfig, resolveStateFile, resolveStateDir, resolveChoicePath }

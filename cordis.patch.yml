@@ -36,6 +36,9 @@
         backupOnRestart: true
         # Include the installed plugin tree in that snapshot (bigger: ~120 MB here,
         # but it is what lets a rollback undo "a plugin upgrade broke the boot").
+        # The first install asks once whether this should be on; the answer is
+        # written to THIS key through the official configEditor service, so the
+        # settings page and the one-time prompt always show the same value.
         backupIncludePlugins: true
         # Keep at most this many snapshots; older ones are deleted automatically.
         maxBackups: 2

@@ -53,7 +53,9 @@
     },
     "shuttingDown": {
       "title": "Good night 🌙",
-      "body": "Powering off — the whale turned off the lights."
+      "body": "Powering off — the whale turned off the lights.",
+      "dryRun": "Dry run: nothing will really be powered off (it would have run {command})",
+      "dismiss": "Close this notice"
     },
     "choice": {
       "title": "Keep the graceful standby button?",

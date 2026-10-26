@@ -170,6 +170,8 @@ const ZH = {
   'sleep.waiting.cancel': '不关了',
   'sleep.shuttingDown.title': '晚安 🌙',
   'sleep.shuttingDown.body': '正在关机，鲸鱼娘把灯关好了。',
+  'sleep.shuttingDown.dryRun': '试运行：不会真的关机（本来会执行 {command}）',
+  'sleep.shuttingDown.dismiss': '关掉这个提示',
   'sleep.choice.title': '优雅挂机按钮要不要留着？',
   'sleep.choice.body': '它待在工作区左上方：点一下就等所有会话收工，倒计时 10 秒后关机。',
   'sleep.choice.keep': '留着（推荐）',
@@ -264,6 +266,8 @@ const EN = {
   'sleep.waiting.cancel': 'Keep it on',
   'sleep.shuttingDown.title': 'Good night 🌙',
   'sleep.shuttingDown.body': 'Powering off — the whale turned off the lights.',
+  'sleep.shuttingDown.dryRun': 'Dry run: nothing will really be powered off (it would have run {command})',
+  'sleep.shuttingDown.dismiss': 'Close this notice',
   'sleep.choice.title': 'Keep the graceful standby button?',
   'sleep.choice.body': 'It lives in the top-left corner of the workspace: one click waits for every session to finish, counts down 10 seconds and powers the machine off.',
   'sleep.choice.keep': 'Keep it (recommended)',
@@ -1734,22 +1738,6 @@ if (moduleLoader) moduleLoader.load({
       }
     }
 
-    /**
-     * Whether the browser's own record wants the button.
-     *
-     * This is only the FALLBACK: the Host's truth always wins.
-     */
-    function localSleepButtonVisible() {
-      try {
-        if (typeof window === 'undefined' || !window.localStorage) return true
-        const raw = window.localStorage.getItem(SLEEP_BUTTON_KEY)
-        if (raw === null) return true
-        return raw !== 'hide' && raw !== 'false'
-      } catch {
-        return true
-      }
-    }
-
     // The styles of the sleep surfaces. They live in ONE <style> element so
     // the button and the overlay never disagree, and every colour comes from
     // a theme token: light and dark themes both work.
@@ -1919,21 +1907,6 @@ if (moduleLoader) moduleLoader.load({
       '.dsh-autorestart-sleep-waiting__cancel:hover{',
       '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
       '  color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
-      '}',
-      // The fallback notice (a request that failed).
-      '.dsh-autorestart-sleep-toast{',
-      '  position:fixed;',
-      '  right:16px;',
-      '  bottom:16px;',
-      '  z-index:9999;',
-      '  max-width:min(360px,calc(100vw - 32px));',
-      '  padding:10px 14px;',
-      '  border:1px solid var(--dsw-alias-border-l1);',
-      '  border-radius:10px;',
-      '  background:var(--dsw-alias-bg-layer-1);',
-      '  color:var(--dsw-alias-danger,#d14343);',
-      '  font-size:12.5px;',
-      '  line-height:18px;',
       '}',
       // The whale.
       '.dsh-autorestart-whale{width:min(44vmin,240px);height:auto;display:block;overflow:visible;}',
@@ -2288,6 +2261,10 @@ if (moduleLoader) moduleLoader.load({
       const [hidden, setHidden] = useState(false)
       const [error, setError] = useState('')
       const [busy, setBusy] = useState(false)
+      // The safety net of the "good night" screen: the user may close the
+      // notice, and a screen that stays for too long offers the same exit.
+      const [dismissed, setDismissed] = useState(false)
+      const [stuck, setStuck] = useState(false)
       const t = translate ?? ((name) => name)
 
       const phase = status && typeof status === 'object' && typeof status.phase === 'string'
@@ -2308,6 +2285,24 @@ if (moduleLoader) moduleLoader.load({
       // countdown would run without the user being able to see (or stop) it.
       useEffect(() => {
         if (phase === 'countdown') setHidden(false)
+      }, [phase])
+
+      /**
+       * The time safety net of the "good night" screen.
+       *
+       * A machine that really powers off is killed by the system, so this
+       * screen cannot last eight seconds — if it does, the command did not
+       * work and the user gets a way out. The timer is cleared when the phase
+       * changes and when the component leaves.
+       */
+      useEffect(() => {
+        if (phase !== 'shutting-down') {
+          setStuck(false)
+          setDismissed(false)
+          return undefined
+        }
+        const timer = setTimeout(() => setStuck(true), 8000)
+        return () => clearTimeout(timer)
       }, [phase])
 
       // The remaining time is measured from the moment the status arrived,
@@ -2438,6 +2433,29 @@ if (moduleLoader) moduleLoader.load({
 
       if (phase === 'shutting-down') {
         ensureSleepStyle()
+        // The user closed the notice: the screen is gone, the Host keeps
+        // whatever it thinks (this button never cancels anything).
+        if (dismissed) return null
+        // A dry run never powers the machine off, so the screen must say so
+        // and offer the way out right away.
+        const lastRun = status && typeof status === 'object' && status.lastRun && typeof status.lastRun === 'object'
+          ? status.lastRun
+          : null
+        const dryRun = (status && status.dryRun === true) || (lastRun !== null && lastRun.dryRun === true)
+        const planned = lastRun !== null && typeof lastRun.command === 'string' && lastRun.command !== ''
+          ? [lastRun.command].concat(Array.isArray(lastRun.args) ? lastRun.args : []).join(' ')
+          : ''
+        const closeButton = (dryRun || stuck)
+          ? h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-autorestart-sleep-overlay__cancel',
+              onClick: () => setDismissed(true),
+            },
+            t('sleep.shuttingDown.dismiss'),
+          )
+          : null
         return h(
           'div',
           {
@@ -2445,10 +2463,18 @@ if (moduleLoader) moduleLoader.load({
             role: 'status',
             'aria-live': 'assertive',
             'data-dsh-autorestart-sleep-shutdown': 'true',
+            'data-dsh-autorestart-sleep-dry-run': dryRun ? 'true' : 'false',
           },
           whaleArt(false),
-          h('p', { className: 'dsh-autorestart-sleep-overlay__caption' }, t('sleep.shuttingDown.title')),
+          h(
+            'p',
+            { className: 'dsh-autorestart-sleep-overlay__caption' },
+            dryRun
+              ? fill(t('sleep.shuttingDown.dryRun'), { command: planned })
+              : t('sleep.shuttingDown.title'),
+          ),
           h('p', { className: 'dsh-autorestart-sleep-overlay__hint' }, t('sleep.shuttingDown.body')),
+          closeButton,
         )
       }
 

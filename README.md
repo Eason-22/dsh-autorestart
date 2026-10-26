@@ -40,9 +40,8 @@ boot is rolled back automatically — see
 
 The same "wait until everything is quiet" idea is also available as a **graceful shutdown**: a moon
 button at the very bottom of the left sidebar (right next to Settings) waits for every conversation
-to be idle, counts down on screen for twenty seconds (a floating card with a huge number and a
-small whale) and then switches the **real host machine** off — see
-[Graceful shutdown](#graceful-shutdown-优雅关机).
+to be idle, counts down on screen (a floating card with a huge number and a small whale) and then
+switches the **real host machine** off — see [Graceful shutdown](#graceful-shutdown-收工关机).
 
 Two safety gates protect the restart. The host checks that no conversation is busy, and the detached
 helper checks the same gate over loopback immediately before it kills the process, so a turn that
@@ -148,7 +147,7 @@ show up in the Plugin Manager and in the config editor.
 | `maxBackups` | `2` | How many snapshots are kept; older ones are deleted when a new one is written. |
 | `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the relaunched host before it restores the snapshot and launches the host again. |
 | `showSleepButton` | `true` | Whether the moon button of the graceful shutdown is shown at the foot of the left sidebar, next to Settings. |
-| `sleepCountdownSeconds` | `20` | How many seconds the graceful shutdown counts down before the machine goes down (3–120). |
+| `sleepCountdownSeconds` | `20` | How many seconds the graceful shutdown counts down before the machine goes down — a dropdown: `0` / `10` / `20` / `30` / `60` seconds. `0` means "switch off right away" (still waiting for the conversations to be idle). |
 | `sleepCommand` | `''` | A custom shutdown command for the graceful shutdown. Empty = the host is detected automatically; a value replaces the detected command (`cmd.exe /c …` on Windows, `/bin/sh -c …` everywhere else). |
 
 The two waits are independent of each other, and both default to two seconds:
@@ -237,14 +236,14 @@ addition to it, never a rival of it.
   `continuum_status` always reports the value that is in effect right now
   (`backupIncludePlugins: true | false`).
 
-## Graceful shutdown (优雅关机)
+## Graceful shutdown (收工关机)
 
 **What it does.** One moon button at the very bottom of the left sidebar: press it and the plugin
-waits until **every** conversation is idle, the screen counts down for twenty seconds (a huge number
-and a small blue whale, one line of text per second), and then the machine is switched off. The
-countdown can always be cancelled — the card has a button, and the moon button itself becomes a
-toggle while the shutdown is armed. If a conversation starts working again during the countdown, the
-countdown goes back to "waiting" and nothing is switched off.
+waits until **every** conversation is idle, the screen counts down (a huge number and a small blue
+whale, one line of text per second), and then the machine is switched off. The countdown can always
+be cancelled — the card has a button, and the moon button itself becomes a toggle while the shutdown
+is armed. If a conversation starts working again during the countdown, the countdown goes back to
+"waiting" and nothing is switched off.
 
 **Where the button is.** The moon button sits at the **very bottom of the left sidebar, right next
 to the Settings row** (`sidebar.footer.action`). That seat is a **root** slot, so the button is
@@ -274,9 +273,12 @@ Microsoft, or the mounted Windows binary. The countdown belongs to the plugin, s
 system is asked to shut down immediately (`/t 0`) instead of counting down a second time.
 
 **Configuration.** `showSleepButton` (default `true`) decides whether the button is shown,
-`sleepCountdownSeconds` (default `20`, 3–120) how long the countdown runs, and `sleepCommand`
-(default `''`) replaces the detected command with one of your own — empty means "detect the host
-automatically".
+`sleepCountdownSeconds` (a **dropdown**: `0` / `10` / `20` / `30` / `60` seconds, default `20`) how
+long the countdown runs, and `sleepCommand` (default `''`) replaces the detected command with one of
+your own — empty means "detect the host automatically". `0` means **no countdown at all**: the
+machine is switched off as soon as every conversation is idle (a busy conversation still blocks it),
+and no countdown card appears. A profile that still carries a value the dropdown does not offer
+(`15`, `45`, …) is snapped onto the nearest offered one instead of breaking.
 
 **The one-time install question.** The first time the plugin is used, the composer dock asks once
 more whether the button should stay. The answer is written into the profile configuration
@@ -378,7 +380,7 @@ curl http://127.0.0.1:<gui port>/__dsh_autorestart/health
   /__dsh_autorestart/sleep` arms (`{ "action": "arm" }`) or cancels (`{ "action": "cancel" }`) it.
 - Inside a session, `continuum_status` reports the same lifecycle.
 
-The plugin ships its own test suite: **242 test cases** in `plugins/dsh-autorestart/test/`, all
+The plugin ships its own test suite: **250 test cases** in `plugins/dsh-autorestart/test/`, all
 green. Run it with the bundled Node, from the workspace root:
 
 ```sh

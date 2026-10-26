@@ -21,7 +21,8 @@
       "label": "Shut down",
       "cancel": "Cancel the shutdown",
       "aria": "Graceful shutdown: wait for every session to finish, then power off",
-      "title": "Waits for every session to finish, counts down 20 seconds, then powers off",
+      "title": "Waits for every session to finish, counts down {n} seconds, then powers off",
+      "titleImmediate": "Waits for every session to finish, then powers off right away (no countdown)",
       "busy": "Getting ready…"
     },
     "error": "Could not reach the sleep service: {message}",
@@ -49,9 +50,10 @@
         "1": "Good night 🌙",
         "default": "Good night 🌙"
       },
+      "remaining": "{n} seconds left",
       "cancel": "Never mind, keep it on",
       "goodNight": "Good night 🌙",
-      "hint": "Powering off in 20 seconds — pick \"Never mind, keep it on\" to stay."
+      "hint": "Powering off in {n} seconds — pick \"Never mind, keep it on\" to stay."
     },
     "waiting": {
       "title": "Waiting for everyone to finish",
@@ -69,7 +71,7 @@
     },
     "choice": {
       "title": "Keep the graceful shutdown button?",
-      "body": "It lives at the very bottom of the left sidebar, next to the Settings button: one click waits for every session to finish, counts down 20 seconds and powers the machine off.",
+      "body": "It lives at the very bottom of the left sidebar, next to the Settings button: one click waits for every session to finish, counts down and powers the machine off.",
       "keep": "Keep it (recommended)",
       "keepCta": "Keep it",
       "keepHint": "One moon button at the bottom of the left sidebar: one click to shut down gracefully.",

@@ -1,5 +1,5 @@
 /**
- * Tests for the graceful shutdown ("优雅关机") — the host half.
+ * Tests for the graceful shutdown ("收工关机") — the host half.
  *
  * The feature waits until every conversation is idle, counts down and then
  * switches the REAL machine off. The dangerous part is the host detection: a
@@ -20,11 +20,13 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 import {
+  COUNTDOWN_CHOICES,
   createSleepController,
   detectShutdownPlan,
   normalizeCountdownSeconds,
   planInvocation,
   runShutdown,
+  snapCountdownChoice,
   WSL_SHUTDOWN_EXE,
 } from '../lib/sleep.js'
 import { apply } from '../index.js'
@@ -452,10 +454,75 @@ test('a broken tick never takes the host down', () => {
 })
 
 test('the countdown length is clamped into the supported range', () => {
-  assert.equal(normalizeCountdownSeconds(0), 3)
+  assert.equal(normalizeCountdownSeconds(0), 0, 'zero means no countdown at all')
+  assert.equal(normalizeCountdownSeconds(-5), 0)
   assert.equal(normalizeCountdownSeconds(999), 120)
   assert.equal(normalizeCountdownSeconds(10), 10)
   assert.equal(normalizeCountdownSeconds('nonsense'), 20)
+})
+
+test('an old countdown value is snapped onto one of the offered choices', () => {
+  // A profile that still carries a value the dropdown does not offer must
+  // not break: the nearest offered length wins, a tie goes to the longer one.
+  assert.equal(snapCountdownChoice(15), 20)
+  assert.equal(snapCountdownChoice(45), 60)
+  assert.equal(snapCountdownChoice('20'), 20)
+  assert.equal(snapCountdownChoice(null), 20)
+  assert.equal(snapCountdownChoice(undefined), 20)
+  assert.equal(snapCountdownChoice(0), 0)
+  assert.equal(snapCountdownChoice(10), 10)
+  assert.equal(snapCountdownChoice(30), 30)
+  assert.equal(snapCountdownChoice(60), 60)
+  for (const value of [0, 10, 20, 30, 60]) {
+    assert.equal(COUNTDOWN_CHOICES.indexOf(snapCountdownChoice(value)) !== -1, true)
+  }
+})
+
+test('the countdown length is a DROPDOWN in the settings page', () => {
+  // The settings page renders a select when the schema key is a union of
+  // constants (the host projects it as an enum), not when it is a number.
+  const source = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const declaration = /sleepCountdownSeconds:\s*([^\n]*)\n/.exec(source)
+  assert.ok(declaration, 'the schema must declare sleepCountdownSeconds')
+  assert.match(
+    declaration[1],
+    /schemastery\.union\(/,
+    'the countdown length must be a union of constants (a dropdown), not a number field',
+  )
+  assert.match(declaration[1], /COUNTDOWN_CHOICES/, 'the union must be built from the offered choices')
+  assert.ok(
+    !/schemastery\.number\(\)/.test(declaration[1]),
+    'the countdown length must not be a free number field any more',
+  )
+  assert.deepEqual([...COUNTDOWN_CHOICES], [0, 10, 20, 30, 60], 'the dropdown offers exactly five values')
+})
+
+test('a countdown of zero seconds switches the machine off right away', () => {
+  const harness = createController({ countdownSeconds: 0 })
+  const status = harness.controller.arm()
+  assert.equal(status.phase, 'shutting-down', 'there is no countdown: the gate is asked at once')
+  assert.equal(status.remainingMs, 0)
+  assert.equal(harness.shutdowns.length, 1, 'the machine is closed exactly once')
+  assert.match(status.message, /0 秒：立即关机/, 'the message must say that there is no countdown')
+})
+
+test('a countdown of zero seconds still waits for the busy conversations', () => {
+  const harness = createController({
+    countdownSeconds: 0,
+    busy: [{ sessionId: 'sess-a', reason: 'running' }],
+    titles: { 'sess-a': '写代码的会话' },
+  })
+  const status = harness.controller.arm()
+  assert.equal(status.phase, 'waiting', 'a busy conversation blocks the shutdown')
+  assert.equal(harness.shutdowns.length, 0, 'nothing may be closed while somebody is working')
+  assert.deepEqual(status.blockers, [{ sessionId: 'sess-a', title: '写代码的会话' }])
+
+  // Once the conversation is done, the next tick switches the machine off.
+  harness.state.busy = []
+  harness.advance(1000)
+  const after = harness.controller.tick()
+  assert.equal(after.phase, 'shutting-down')
+  assert.equal(harness.shutdowns.length, 1)
 })
 
 test('the shortest and the longest countdown show every second', () => {
@@ -1168,14 +1235,14 @@ test('the collapsed sidebar shows the icon only, the wide one the label', async 
 
   const wide = await mounted.settled('sidebar.footer.action', { wide: true })
   assert.ok(wide, 'the wide column shows the button')
-  assert.ok(textOf(wide).includes('优雅关机'), 'the wide column shows the label')
+  assert.ok(textOf(wide).includes('收工关机'), 'the wide column shows the label')
   assert.ok(!wide.props.className.includes('--rail'), 'the wide column is not the rail')
   assert.ok(wide.props.title, 'the button always has a title')
   assert.ok(wide.props['aria-label'], 'the button always has an aria-label')
 
   const rail = await mounted.settled('sidebar.footer.action', { wide: false })
   assert.ok(rail, 'the narrow rail shows the button too')
-  assert.ok(!textOf(rail).includes('优雅关机'), 'the narrow rail shows the icon only')
+  assert.ok(!textOf(rail).includes('收工关机'), 'the narrow rail shows the icon only')
   assert.ok(rail.props.className.includes('--rail'), 'the narrow rail uses the rail style')
   assert.ok(rail.props.title, 'the rail button still has a title')
   assert.ok(rail.props['aria-label'], 'the rail button still has an aria-label')
@@ -1239,4 +1306,31 @@ test('switching the conversation does not interrupt the countdown', async () => 
     'true',
     'the countdown card is still the countdown card',
   )
+})
+
+test('a countdown of zero seconds shows no card at all', async () => {
+  // 0 means "no countdown": the machine goes off as soon as the gate opens,
+  // so there is no number, no whale and no card.
+  const mounted = mountClient({
+    status: {
+      ok: true,
+      phase: 'countdown',
+      showSleepButton: true,
+      countdownSeconds: 0,
+      remainingMs: 0,
+      blockers: [],
+    },
+  })
+  const card = await mounted.settled('shell.overlay')
+  assert.equal(card, null, 'a countdown of zero seconds must not render a card')
+})
+
+test('the button title says how long the countdown lasts', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, countdownSeconds: 60, blockers: [] },
+  })
+  await mounted.poll()
+  const button = await mounted.settled('sidebar.footer.action')
+  assert.ok(button, 'the button must be rendered')
+  assert.match(String(button.props.title), /60/, 'the title must carry the countdown length')
 })

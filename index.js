@@ -75,9 +75,12 @@ import {
 } from './lib/restart.js'
 import {
   createSleepController,
+  COUNTDOWN_CHOICES,
+  DEFAULT_COUNTDOWN_SECONDS,
   detectShutdownPlan,
   planInvocation,
   runShutdown,
+  snapCountdownChoice,
 } from './lib/sleep.js'
 
 /**
@@ -247,12 +250,18 @@ function buildConfigSchema() {
         .description('How many snapshots are kept; older ones are deleted automatically.'),
       rollbackTimeoutMs: schemastery.number().min(1000).default(90000)
         .description('Milliseconds the detached watcher waits for the relaunched host before it restores the snapshot.'),
-      // graceful shutdown ("优雅关机"): wait for every conversation, count down, then
+      // graceful shutdown ("收工关机"): wait for every conversation, count down, then
       // switch the REAL host machine off (a WSL host shuts Windows down, not the distro)
       showSleepButton: schemastery.boolean().default(true)
-        .description('是否在左侧栏最底部、设置按钮旁边显示「优雅关机」按钮：关掉之后界面上不再有这个按钮，关机接口也不再被界面调用。'),
-      sleepCountdownSeconds: schemastery.number().min(3).max(120).default(20)
-        .description('所有会话都收工之后、真正关机之前的倒计时秒数（3 到 120 秒，默认 20 秒）。'),
+        .description('是否在左侧栏最底部、设置按钮旁边显示「收工关机」按钮：关掉之后界面上不再有这个按钮，关机接口也不再被界面调用。'),
+      // The countdown length is a DROPDOWN: a union of the offered choices
+      // projects into an enum (the settings page renders a select, not a
+      // number field). `loose()` keeps an old profile value from breaking
+      // the boot — the value is snapped onto a choice in normalizeConfig.
+      sleepCountdownSeconds: schemastery.union(COUNTDOWN_CHOICES.map((value) => schemastery.const(value)))
+        .default(DEFAULT_COUNTDOWN_SECONDS)
+        .loose()
+        .description('收工关机的倒计时秒数（下拉框：0 / 10 / 20 / 30 / 60 秒，默认 20；0 表示不倒数、立即关机，但仍会先等所有会话收工）。'),
       sleepCommand: schemastery.string().default('')
         .description('自定义关机命令：留空表示按系统自动识别（Windows / WSL / Linux / macOS），填了就用这条命令代替自动识别。'),
     })
@@ -294,11 +303,11 @@ const DEFAULTS = {
   backupIncludePlugins: true,
   maxBackups: 2,
   rollbackTimeoutMs: 90000,
-  // Graceful shutdown ("优雅关机"): the button at the foot of the left sidebar,
+  // Graceful shutdown ("收工关机"): the button at the foot of the left sidebar,
   // the countdown before the machine is switched off and the optional custom
   // shutdown command (empty = the host is detected automatically).
   showSleepButton: true,
-  sleepCountdownSeconds: 20,
+  sleepCountdownSeconds: DEFAULT_COUNTDOWN_SECONDS,
   sleepCommand: '',
 }
 
@@ -324,12 +333,10 @@ function normalizeConfig(raw) {
   const rollbackTimeout = Number(config.rollbackTimeoutMs)
   config.rollbackTimeoutMs =
     Number.isFinite(rollbackTimeout) && rollbackTimeout >= 1000 ? Math.trunc(rollbackTimeout) : 90000
-  // The countdown of the graceful sleep is clamped: too short and the user
-  // cannot cancel it any more, too long and the machine stays awake forever.
-  const countdown = Number(config.sleepCountdownSeconds)
-  config.sleepCountdownSeconds = Number.isFinite(countdown)
-    ? Math.min(120, Math.max(3, Math.trunc(countdown)))
-    : 10
+  // The countdown of the graceful shutdown is one of the offered choices: a
+  // profile that still carries an old value (15, 45, …) is snapped onto the
+  // nearest one instead of breaking, and 0 means "no countdown at all".
+  config.sleepCountdownSeconds = snapCountdownChoice(config.sleepCountdownSeconds)
   if (typeof config.sleepCommand !== 'string') config.sleepCommand = ''
   if (typeof config.showSleepButton !== 'boolean') config.showSleepButton = true
   return config

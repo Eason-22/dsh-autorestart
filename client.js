@@ -49,7 +49,7 @@
  *
  *   - the shutdown BUTTON at the foot of the left sidebar, beside the
  *     Settings row (`sidebar.footer.action` slot): a moon icon and the label
- *     "优雅关机". That slot is a ROOT slot, so the button is there even when
+ *     "收工关机". That slot is a ROOT slot, so the button is there even when
  *     no conversation is open. It renders NOTHING at all when the Host says
  *     the button must not be shown, so no empty space is left behind;
  *   - the COUNTDOWN CARD in the shell's overlay layer (`shell.overlay`
@@ -96,6 +96,20 @@
  * written as soon as the user answers — or closes the prompt.
  */
 const SLEEP_BUTTON_KEY = 'dsh-autorestart:sleep-button-v1'
+
+/**
+ * The longest countdown the settings page offers (60 seconds).
+ *
+ * The first twenty seconds have a line each; every second above that uses
+ * the generic fallback line, so no offered length ever shows a blank.
+ */
+const SLEEP_MAX_COUNTDOWN_SECONDS = 60
+
+/** The countdown length the settings page offers (a dropdown). */
+const SLEEP_COUNTDOWN_CHOICES = Object.freeze([0, 10, 20, 30, 60])
+
+/** The countdown length used when the Host did not report one. */
+const SLEEP_DEFAULT_COUNTDOWN_SECONDS = 20
 
 const ZH = {
   label: '待重启',
@@ -147,10 +161,11 @@ const ZH = {
   // The graceful-shutdown (sleep) surfaces: the button at the foot of the
   // left sidebar, the floating countdown card, the waiting card and the
   // second install question.
-  'sleep.button.label': '优雅关机',
+  'sleep.button.label': '收工关机',
   'sleep.button.cancel': '取消关机',
-  'sleep.button.aria': '优雅关机：等所有会话收工后关机',
-  'sleep.button.title': '等所有会话收工，再倒数 20 秒关机',
+  'sleep.button.aria': '收工关机：等所有会话收工后关机',
+  'sleep.button.title': '等所有会话收工，再倒数 {n} 秒关机',
+  'sleep.button.titleImmediate': '等所有会话收工后立即关机（不倒数）',
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
   'sleep.countdown.caption.20': '鲸鱼娘开始收网了',
@@ -174,9 +189,10 @@ const ZH = {
   'sleep.countdown.caption.2': '还来得及说声再见',
   'sleep.countdown.caption.1': '晚安 🌙',
   'sleep.countdown.caption.default': '晚安 🌙',
+  'sleep.countdown.remaining': '还剩 {n} 秒',
   'sleep.countdown.cancel': '算了，别关',
   'sleep.countdown.goodNight': '晚安 🌙',
-  'sleep.countdown.hint': '20 秒后关机，点「算了，别关」可以留下。',
+  'sleep.countdown.hint': '再过 {n} 秒就关机，点「算了，别关」可以留下。',
   'sleep.waiting.title': '还在等大家收工',
   'sleep.waiting.body': '等这些会话忙完，就轮到关机啦：',
   'sleep.waiting.count': '还有 {n} 个会话在干活',
@@ -187,8 +203,8 @@ const ZH = {
   'sleep.shuttingDown.body': '正在关机，鲸鱼娘把灯关好了。',
   'sleep.shuttingDown.dryRun': '试运行：不会真的关机（本来会执行 {command}）',
   'sleep.shuttingDown.dismiss': '关掉这个提示',
-  'sleep.choice.title': '优雅关机按钮要不要留着？',
-  'sleep.choice.body': '它待在左侧栏最底部、设置按钮旁边：点一下就等所有会话收工，倒计时 20 秒后关机。',
+  'sleep.choice.title': '收工关机按钮要不要留着？',
+  'sleep.choice.body': '它待在左侧栏最底部、设置按钮旁边：点一下就等所有会话收工，倒数几秒后关机。',
   'sleep.choice.keep': '留着（推荐）',
   'sleep.choice.keepCta': '留着',
   'sleep.choice.keepHint': '左侧栏底部多一个月亮按钮，一键收工关机。',
@@ -256,7 +272,8 @@ const EN = {
   'sleep.button.label': 'Shut down',
   'sleep.button.cancel': 'Cancel the shutdown',
   'sleep.button.aria': 'Graceful shutdown: wait for every session to finish, then power off',
-  'sleep.button.title': 'Waits for every session to finish, counts down 20 seconds, then powers off',
+  'sleep.button.title': 'Waits for every session to finish, counts down {n} seconds, then powers off',
+  'sleep.button.titleImmediate': 'Waits for every session to finish, then powers off right away (no countdown)',
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
   'sleep.countdown.caption.20': 'The whale is casting her net',
@@ -280,9 +297,10 @@ const EN = {
   'sleep.countdown.caption.2': 'Time for one last goodbye',
   'sleep.countdown.caption.1': 'Good night 🌙',
   'sleep.countdown.caption.default': 'Good night 🌙',
+  'sleep.countdown.remaining': '{n} seconds left',
   'sleep.countdown.cancel': 'Never mind, keep it on',
   'sleep.countdown.goodNight': 'Good night 🌙',
-  'sleep.countdown.hint': 'Powering off in 20 seconds — pick "Never mind, keep it on" to stay.',
+  'sleep.countdown.hint': 'Powering off in {n} seconds — pick "Never mind, keep it on" to stay.',
   'sleep.waiting.title': 'Waiting for everyone to finish',
   'sleep.waiting.body': 'Once these sessions are done, the machine powers off:',
   'sleep.waiting.count': '{n} session(s) still working',
@@ -294,7 +312,7 @@ const EN = {
   'sleep.shuttingDown.dryRun': 'Dry run: nothing will really be powered off (it would have run {command})',
   'sleep.shuttingDown.dismiss': 'Close this notice',
   'sleep.choice.title': 'Keep the graceful shutdown button?',
-  'sleep.choice.body': 'It lives at the very bottom of the left sidebar, next to the Settings button: one click waits for every session to finish, counts down 20 seconds and powers the machine off.',
+  'sleep.choice.body': 'It lives at the very bottom of the left sidebar, next to the Settings button: one click waits for every session to finish, counts down and powers the machine off.',
   'sleep.choice.keep': 'Keep it (recommended)',
   'sleep.choice.keepCta': 'Keep it',
   'sleep.choice.keepHint': 'One moon button at the bottom of the left sidebar: one click to shut down gracefully.',
@@ -354,9 +372,12 @@ function lookupSleepText(locale, key) {
 /**
  * The countdown caption of one second.
  *
- * Every second has its own line, so the caption rotates while the number
- * counts down. Seconds outside the countdown (0, or more than the twenty
- * seconds the Host announced) use the "good night" line.
+ * The first twenty seconds have their own line each, so the caption rotates
+ * while the number counts down. A LONGER countdown (30 or 60 seconds, both
+ * offered in the settings) falls back to one generic line that carries the
+ * remaining seconds, so every second of every offered length has a text.
+ * Seconds outside the countdown (0, or more than the longest offered
+ * countdown) use the "good night" line.
  *
  * @param {number} remainingSeconds
  * @param {Function|object|string} [locale] a translator, a dictionary or a language code
@@ -365,10 +386,13 @@ function lookupSleepText(locale, key) {
 function pickSleepCaption(remainingSeconds, locale) {
   const raw = Number(remainingSeconds)
   const seconds = Number.isFinite(raw) ? Math.ceil(raw) : 0
-  const key = seconds >= 1 && seconds <= 20
-    ? 'sleep.countdown.caption.' + seconds
-    : 'sleep.countdown.caption.default'
-  return lookupSleepText(locale, key)
+  if (seconds >= 1 && seconds <= 20) {
+    return lookupSleepText(locale, 'sleep.countdown.caption.' + seconds)
+  }
+  if (seconds > 20 && seconds <= SLEEP_MAX_COUNTDOWN_SECONDS) {
+    return lookupSleepText(locale, 'sleep.countdown.remaining').replace(/\{n\}/g, String(seconds))
+  }
+  return lookupSleepText(locale, 'sleep.countdown.caption.default')
 }
 
 /**
@@ -2111,6 +2135,17 @@ if (moduleLoader) moduleLoader.load({
       // The narrow rail shows the icon only; the wide column shows the label.
       const wide = !(props && props.wide === false)
 
+      // How long the countdown lasts (the settings page offers a dropdown).
+      const reported = status && typeof status === 'object' && typeof status.countdownSeconds === 'number'
+        ? status.countdownSeconds
+        : SLEEP_DEFAULT_COUNTDOWN_SECONDS
+      const countdownSeconds = SLEEP_COUNTDOWN_CHOICES.indexOf(reported) === -1
+        ? SLEEP_DEFAULT_COUNTDOWN_SECONDS
+        : reported
+      const countdownHint = countdownSeconds > 0
+        ? fill(t('sleep.button.title'), { n: countdownSeconds })
+        : t('sleep.button.titleImmediate')
+
       // The button is a TOGGLE: a click arms the shutdown, and a click while
       // the shutdown is armed cancels it. That way there is ALWAYS a way out,
       // even when the countdown screen is not (or no longer) on top.
@@ -2165,7 +2200,7 @@ if (moduleLoader) moduleLoader.load({
             + (armed ? ' dsh-autorestart-sleep-button--armed' : '')
             + (wide ? '' : ' dsh-autorestart-sleep-button--rail'),
           'aria-label': armed ? t('sleep.button.cancel') : t('sleep.button.aria'),
-          title: error || (armed ? t('sleep.button.cancel') : t('sleep.button.title')),
+          title: error || (armed ? t('sleep.button.cancel') : countdownHint),
           disabled: arming,
           onClick: armed ? cancel : arm,
           'data-dsh-autorestart-sleep-button': 'true',
@@ -2439,6 +2474,18 @@ if (moduleLoader) moduleLoader.load({
       const elapsed = sleepStore.at > 0 ? Date.now() - sleepStore.at : 0
       const seconds = formatRemainingMs(Math.max(0, remainingMs - elapsed))
 
+      // How long the countdown lasts (the settings page offers a dropdown).
+      const reported = status && typeof status === 'object' && typeof status.countdownSeconds === 'number'
+        ? status.countdownSeconds
+        : SLEEP_DEFAULT_COUNTDOWN_SECONDS
+      const countdownSeconds = SLEEP_COUNTDOWN_CHOICES.indexOf(reported) === -1
+        ? SLEEP_DEFAULT_COUNTDOWN_SECONDS
+        : reported
+      // A countdown of zero seconds is NO countdown: the machine is switched
+      // off the moment the gate opens, so there is no card to show (and no
+      // whale). The waiting card takes over when the gate keeps it closed.
+      const noCountdown = countdownSeconds === 0
+
       /**
        * Cancel the shutdown.
        *
@@ -2520,8 +2567,13 @@ if (moduleLoader) moduleLoader.load({
       }
 
       if (phase === 'countdown') {
+        // A countdown of zero seconds shows NO card at all: the machine is
+        // switched off the moment the gate opens, so there is nothing to
+        // count down and nothing to cancel.
+        if (noCountdown) return null
         ensureSleepStyle()
         const urgent = seconds <= 3
+        const hint = fill(t('sleep.countdown.hint'), { n: seconds })
         return h(
           'div',
           {
@@ -2529,7 +2581,7 @@ if (moduleLoader) moduleLoader.load({
               + (urgent ? ' dsh-autorestart-sleep-overlay--urgent' : ''),
             role: 'dialog',
             'aria-live': 'assertive',
-            'aria-label': t('sleep.countdown.hint'),
+            'aria-label': hint,
             'data-dsh-autorestart-sleep-countdown': 'true',
             // The card is a FLOATING card: it never covers the interface and
             // it never eats a click — only its cancel button does.
@@ -2559,7 +2611,7 @@ if (moduleLoader) moduleLoader.load({
             },
             t('sleep.countdown.cancel'),
           ),
-          h('p', { className: 'dsh-autorestart-sleep-overlay__hint' }, t('sleep.countdown.hint')),
+          h('p', { className: 'dsh-autorestart-sleep-overlay__hint' }, hint),
           errorLine(),
         )
       }

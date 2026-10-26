@@ -1,5 +1,5 @@
 /**
- * Tests for the client half of the graceful standby ("优雅挂机").
+ * Tests for the client half of the graceful shutdown ("收工关机").
  *
  * `client.js` is a CLASSIC script: the client module loader evaluates the
  * bundle as a same-origin external classic script, so it has no ESM exports
@@ -39,7 +39,7 @@ assert.equal(typeof api.formatRemainingMs, 'function')
 
 test('every countdown second has its own caption', () => {
   const seen = new Map()
-  for (let seconds = 10; seconds >= 1; seconds -= 1) {
+  for (let seconds = 20; seconds >= 1; seconds -= 1) {
     const caption = api.pickSleepCaption(seconds)
     assert.equal(typeof caption, 'string')
     assert.ok(caption.trim() !== '', `the caption of ${seconds} must not be empty`)
@@ -49,7 +49,26 @@ test('every countdown second has its own caption', () => {
     )
     seen.set(caption, seconds)
   }
-  assert.equal(seen.size, 10, 'the ten countdown captions must all differ')
+  assert.equal(seen.size, 20, 'the twenty countdown captions must all differ')
+})
+
+test('a longer countdown has a line for every second', () => {
+  // 30 and 60 seconds are offered in the settings: every one of their
+  // seconds must show a text (the egg lines, or the generic fallback).
+  for (const seconds of [60, 30]) {
+    for (let remaining = seconds; remaining >= 1; remaining -= 1) {
+      const caption = api.pickSleepCaption(remaining)
+      assert.equal(typeof caption, 'string')
+      assert.ok(caption.trim() !== '', `the caption of ${remaining}s must not be empty`)
+    }
+  }
+  // Above the egg lines the generic line carries the remaining seconds.
+  const english = api.pickSleepCaption(45, 'en')
+  assert.match(english, /45/)
+  assert.match(english, /seconds left/)
+  const chinese = api.pickSleepCaption(45, 'zh')
+  assert.match(chinese, /45/)
+  assert.match(chinese, /还剩/)
 })
 
 test('the seconds outside the countdown fall back to one line', () => {

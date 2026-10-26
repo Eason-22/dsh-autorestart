@@ -157,6 +157,21 @@ test('normalizeConfig merges defaults and rejects wrong types', () => {
   assert.equal(normalizeConfig({ forceRestartWhenBusy: 'yes' }).forceRestartWhenBusy, false)
 })
 
+test('the countdown length is one of the offered choices', () => {
+  // The settings page offers a dropdown, so only these five values exist.
+  assert.deepEqual(DEFAULTS.sleepCountdownSeconds, 20)
+  assert.equal(normalizeConfig({}).sleepCountdownSeconds, 20)
+  for (const choice of [0, 10, 20, 30, 60]) {
+    assert.equal(normalizeConfig({ sleepCountdownSeconds: choice }).sleepCountdownSeconds, choice)
+  }
+  // A profile that still carries an old value is snapped onto the nearest
+  // offered one instead of breaking.
+  assert.equal(normalizeConfig({ sleepCountdownSeconds: 15 }).sleepCountdownSeconds, 20)
+  assert.equal(normalizeConfig({ sleepCountdownSeconds: 45 }).sleepCountdownSeconds, 60)
+  assert.equal(normalizeConfig({ sleepCountdownSeconds: '20' }).sleepCountdownSeconds, 20)
+  assert.equal(normalizeConfig({ sleepCountdownSeconds: null }).sleepCountdownSeconds, 20)
+})
+
 test('resolveStateFile honours config and DSH_HOME', () => {
   const previous = process.env.DSH_HOME
   process.env.DSH_HOME = path.join(os.tmpdir(), 'dsh-home-test')

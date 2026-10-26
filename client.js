@@ -45,28 +45,33 @@
  * Everything here is side-effect free until `apply(ctx)` runs: no timers, no
  * fetches, no DOM access at module scope.
  *
- * The graceful-standby ("sleep") half adds three more surfaces:
+ * The graceful-shutdown ("sleep") half adds three more surfaces:
  *
- *   - the standby BUTTON in the conversation header (`conversation.header.leading`
- *     slot): a moon icon and the label "优雅挂机". It renders NOTHING at all
- *     when the Host says the button must not be shown, so no empty space is
- *     left behind;
- *   - the COUNTDOWN OVERLAY in the shell's overlay layer (`shell.overlay`
- *     slot): a full-screen frosted surface with a very big number, a hand
- *     drawn whale (inline SVG + CSS keyframes, no image and no other plugin)
- *     and one funny line per second — plus a "算了，别关" button that cancels
- *     the standby. While the sessions are still working, a small corner card
- *     takes the place of the full screen, so nothing is covered up;
+ *   - the shutdown BUTTON at the foot of the left sidebar, beside the
+ *     Settings row (`sidebar.footer.action` slot): a moon icon and the label
+ *     "优雅关机". That slot is a ROOT slot, so the button is there even when
+ *     no conversation is open. It renders NOTHING at all when the Host says
+ *     the button must not be shown, so no empty space is left behind;
+ *   - the COUNTDOWN CARD in the shell's overlay layer (`shell.overlay`
+ *     slot): a FLOATING rounded card with a very big number, a hand drawn
+ *     whale (inline SVG + CSS keyframes, no image and no other plugin) and
+ *     one funny line per second — plus a "算了，别关" button that cancels
+ *     the shutdown. The card NEVER covers the interface: it sits in a corner,
+ *     it lets every click through (only the cancel button takes clicks), so
+ *     the conversation stays readable and the sidebar stays usable while the
+ *     machine counts down. While the sessions are still working, a small
+ *     corner card takes the place of the countdown card, so nothing is
+ *     covered up;
  *   - the SECOND install question: the first install asks about the backup
  *     scope, and only after that answer was persisted does it ask whether the
- *     standby button should stay.
+ *     shutdown button should stay.
  *
  * All of them read the Host's `GET/POST {prefix}/sleep` route and share ONE
  * poller with the same 2s cadence as the pending-restart store.
  */
 
 /* ------------------------------------------------------------------ *
- * The pure half of the graceful-standby ("sleep") feature.
+ * The pure half of the graceful-shutdown ("sleep") feature.
  *
  * This file is a CLASSIC script: the client module loader evaluates a
  * plugin bundle as a same-origin external classic script, so the ESM
@@ -139,29 +144,39 @@ const ZH = {
   backupChoiceRecommended: '推荐',
   backupChoiceDismissAria: '关闭这个一次性提示',
   backupChoiceError: '保存失败：{message}',
-  // The graceful-standby (sleep) surfaces: the button in the header, the
-  // full-screen countdown, the waiting card and the second install
-  // question.
-  'sleep.button.label': '优雅挂机',
-  'sleep.button.cancel': '取消挂机',
-  'sleep.button.aria': '优雅挂机：等所有会话收工后关机',
-  'sleep.button.title': '等所有会话收工，再倒数 10 秒关机',
+  // The graceful-shutdown (sleep) surfaces: the button at the foot of the
+  // left sidebar, the floating countdown card, the waiting card and the
+  // second install question.
+  'sleep.button.label': '优雅关机',
+  'sleep.button.cancel': '取消关机',
+  'sleep.button.aria': '优雅关机：等所有会话收工后关机',
+  'sleep.button.title': '等所有会话收工，再倒数 20 秒关机',
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
-  'sleep.countdown.caption.10': '鲸鱼娘开始收网了',
-  'sleep.countdown.caption.9': '备份已经替你打包好',
-  'sleep.countdown.caption.8': '没说完的话，再讲一句',
-  'sleep.countdown.caption.7': '大家都在慢慢安静下来',
-  'sleep.countdown.caption.6': '最后再巡一圈房间',
-  'sleep.countdown.caption.5': '海面开始变暗了',
-  'sleep.countdown.caption.4': '灯一盏一盏熄了',
+  'sleep.countdown.caption.20': '鲸鱼娘开始收网了',
+  'sleep.countdown.caption.19': '备份已经替你打包好',
+  'sleep.countdown.caption.18': '没说完的话，再讲一句',
+  'sleep.countdown.caption.17': '大家都在慢慢安静下来',
+  'sleep.countdown.caption.16': '最后再巡一圈房间',
+  'sleep.countdown.caption.15': '海面开始变暗了',
+  'sleep.countdown.caption.14': '灯一盏一盏熄了',
+  'sleep.countdown.caption.13': '房间已经安静下来',
+  'sleep.countdown.caption.12': '还有一小会儿',
+  'sleep.countdown.caption.11': '再看一眼屏幕吧',
+  'sleep.countdown.caption.10': '鲸鱼娘在数最后几秒',
+  'sleep.countdown.caption.9': '灯已经关了一半',
+  'sleep.countdown.caption.8': '声音越来越小',
+  'sleep.countdown.caption.7': '马上就到道别的时候了',
+  'sleep.countdown.caption.6': '最后一口海水',
+  'sleep.countdown.caption.5': '晚风越来越轻',
+  'sleep.countdown.caption.4': '说声晚安吧',
   'sleep.countdown.caption.3': '真的只剩三秒啦',
   'sleep.countdown.caption.2': '还来得及说声再见',
   'sleep.countdown.caption.1': '晚安 🌙',
   'sleep.countdown.caption.default': '晚安 🌙',
   'sleep.countdown.cancel': '算了，别关',
   'sleep.countdown.goodNight': '晚安 🌙',
-  'sleep.countdown.hint': '10 秒后关机，点「算了，别关」可以留下。',
+  'sleep.countdown.hint': '20 秒后关机，点「算了，别关」可以留下。',
   'sleep.waiting.title': '还在等大家收工',
   'sleep.waiting.body': '等这些会话忙完，就轮到关机啦：',
   'sleep.waiting.count': '还有 {n} 个会话在干活',
@@ -172,16 +187,16 @@ const ZH = {
   'sleep.shuttingDown.body': '正在关机，鲸鱼娘把灯关好了。',
   'sleep.shuttingDown.dryRun': '试运行：不会真的关机（本来会执行 {command}）',
   'sleep.shuttingDown.dismiss': '关掉这个提示',
-  'sleep.choice.title': '优雅挂机按钮要不要留着？',
-  'sleep.choice.body': '它待在工作区左上方：点一下就等所有会话收工，倒计时 10 秒后关机。',
+  'sleep.choice.title': '优雅关机按钮要不要留着？',
+  'sleep.choice.body': '它待在左侧栏最底部、设置按钮旁边：点一下就等所有会话收工，倒计时 20 秒后关机。',
   'sleep.choice.keep': '留着（推荐）',
   'sleep.choice.keepCta': '留着',
-  'sleep.choice.keepHint': '左上方多一个月亮按钮，一键收工关机。',
+  'sleep.choice.keepHint': '左侧栏底部多一个月亮按钮，一键收工关机。',
   'sleep.choice.hide': '不要这个按钮',
   'sleep.choice.hideCta': '不要',
   'sleep.choice.hideHint': '界面保持原样；以后想用，再从设置里打开。',
   'sleep.choice.footnote': '以后可在 设置 → 插件 → dsh-autorestart 修改',
-  'sleep.choice.diagramLabel': '按钮出现在工作区的左上角',
+  'sleep.choice.diagramLabel': '按钮出现在左侧栏最底部、设置按钮旁边',
   'sleep.choice.error': '保存失败：{message}',
 }
 
@@ -235,29 +250,39 @@ const EN = {
   backupChoiceRecommended: 'Recommended',
   backupChoiceDismissAria: 'Close this one-time prompt',
   backupChoiceError: 'Could not save the choice: {message}',
-  // The graceful-standby (sleep) surfaces: the button in the header, the
-  // full-screen countdown, the waiting card and the second install
-  // question.
-  'sleep.button.label': 'Stand by',
-  'sleep.button.cancel': 'Cancel the standby',
-  'sleep.button.aria': 'Stand by: wait for every session to finish, then power off',
-  'sleep.button.title': 'Waits for every session to finish, counts down 10 seconds, then powers off',
+  // The graceful-shutdown (sleep) surfaces: the button at the foot of the
+  // left sidebar, the floating countdown card, the waiting card and the
+  // second install question.
+  'sleep.button.label': 'Shut down',
+  'sleep.button.cancel': 'Cancel the shutdown',
+  'sleep.button.aria': 'Graceful shutdown: wait for every session to finish, then power off',
+  'sleep.button.title': 'Waits for every session to finish, counts down 20 seconds, then powers off',
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
-  'sleep.countdown.caption.10': 'The whale is casting her net',
-  'sleep.countdown.caption.9': 'Your backup is already packed',
-  'sleep.countdown.caption.8': 'One unfinished thought, one more',
-  'sleep.countdown.caption.7': 'Everyone is quieting down',
-  'sleep.countdown.caption.6': 'One last lap around the room',
-  'sleep.countdown.caption.5': 'The sea is going dark',
-  'sleep.countdown.caption.4': 'One light at a time goes out',
+  'sleep.countdown.caption.20': 'The whale is casting her net',
+  'sleep.countdown.caption.19': 'Your backup is already packed',
+  'sleep.countdown.caption.18': 'One unfinished thought, one more',
+  'sleep.countdown.caption.17': 'Everyone is quieting down',
+  'sleep.countdown.caption.16': 'One last lap around the room',
+  'sleep.countdown.caption.15': 'The sea is going dark',
+  'sleep.countdown.caption.14': 'One light at a time goes out',
+  'sleep.countdown.caption.13': 'The room has gone quiet',
+  'sleep.countdown.caption.12': 'A little bit left',
+  'sleep.countdown.caption.11': 'One last look at the screen',
+  'sleep.countdown.caption.10': 'The whale counts the last seconds',
+  'sleep.countdown.caption.9': 'Half the lights are out',
+  'sleep.countdown.caption.8': 'The voices get quieter',
+  'sleep.countdown.caption.7': 'The goodbyes are close',
+  'sleep.countdown.caption.6': 'One last sip of the sea',
+  'sleep.countdown.caption.5': 'The night wind gets lighter',
+  'sleep.countdown.caption.4': 'Say good night',
   'sleep.countdown.caption.3': 'Three seconds, really',
   'sleep.countdown.caption.2': 'Time for one last goodbye',
   'sleep.countdown.caption.1': 'Good night 🌙',
   'sleep.countdown.caption.default': 'Good night 🌙',
   'sleep.countdown.cancel': 'Never mind, keep it on',
   'sleep.countdown.goodNight': 'Good night 🌙',
-  'sleep.countdown.hint': 'Powering off in 10 seconds — pick "Never mind, keep it on" to stay.',
+  'sleep.countdown.hint': 'Powering off in 20 seconds — pick "Never mind, keep it on" to stay.',
   'sleep.waiting.title': 'Waiting for everyone to finish',
   'sleep.waiting.body': 'Once these sessions are done, the machine powers off:',
   'sleep.waiting.count': '{n} session(s) still working',
@@ -268,16 +293,16 @@ const EN = {
   'sleep.shuttingDown.body': 'Powering off — the whale turned off the lights.',
   'sleep.shuttingDown.dryRun': 'Dry run: nothing will really be powered off (it would have run {command})',
   'sleep.shuttingDown.dismiss': 'Close this notice',
-  'sleep.choice.title': 'Keep the graceful standby button?',
-  'sleep.choice.body': 'It lives in the top-left corner of the workspace: one click waits for every session to finish, counts down 10 seconds and powers the machine off.',
+  'sleep.choice.title': 'Keep the graceful shutdown button?',
+  'sleep.choice.body': 'It lives at the very bottom of the left sidebar, next to the Settings button: one click waits for every session to finish, counts down 20 seconds and powers the machine off.',
   'sleep.choice.keep': 'Keep it (recommended)',
   'sleep.choice.keepCta': 'Keep it',
-  'sleep.choice.keepHint': 'One moon button in the top-left corner: one click to stand by.',
+  'sleep.choice.keepHint': 'One moon button at the bottom of the left sidebar: one click to shut down gracefully.',
   'sleep.choice.hide': 'No button, thanks',
   'sleep.choice.hideCta': 'No button',
   'sleep.choice.hideHint': 'The interface stays as it is; turn it on again in the settings whenever you want it.',
   'sleep.choice.footnote': 'You can change this later in Settings → Plugins → dsh-autorestart',
-  'sleep.choice.diagramLabel': 'The button sits in the top-left corner of the workspace',
+  'sleep.choice.diagramLabel': 'The button sits at the bottom of the left sidebar, next to Settings',
   'sleep.choice.error': 'Could not save the choice: {message}',
 }
 
@@ -330,7 +355,7 @@ function lookupSleepText(locale, key) {
  * The countdown caption of one second.
  *
  * Every second has its own line, so the caption rotates while the number
- * counts down. Seconds outside the countdown (0, or more than the ten
+ * counts down. Seconds outside the countdown (0, or more than the twenty
  * seconds the Host announced) use the "good night" line.
  *
  * @param {number} remainingSeconds
@@ -340,14 +365,14 @@ function lookupSleepText(locale, key) {
 function pickSleepCaption(remainingSeconds, locale) {
   const raw = Number(remainingSeconds)
   const seconds = Number.isFinite(raw) ? Math.ceil(raw) : 0
-  const key = seconds >= 1 && seconds <= 10
+  const key = seconds >= 1 && seconds <= 20
     ? 'sleep.countdown.caption.' + seconds
     : 'sleep.countdown.caption.default'
   return lookupSleepText(locale, key)
 }
 
 /**
- * Whether the graceful-standby button may be shown.
+ * Whether the graceful-shutdown button may be shown.
  *
  * The Host's truth wins: an explicit `showSleepButton: false` or an
  * unsupported host hides the button (no placeholder, no space). An unknown
@@ -1242,7 +1267,8 @@ if (moduleLoader) moduleLoader.load({
      *
      *   1. should the pre-restart backup also snapshot the installed plugin
      *      tree? (the first question — its behaviour is unchanged);
-     *   2. should the graceful-standby button stay in the header?
+     *   2. should the graceful-shutdown button stay at the foot of the left
+     *      sidebar?
      *
      * The first answer is persisted BEFORE the second question appears: the
      * two questions are never stacked on top of each other, and the second
@@ -1267,7 +1293,7 @@ if (moduleLoader) moduleLoader.load({
       // Host) and 'done' when there is nothing left to ask.
       //
       // The two questions are judged SEPARATELY: an installation that already
-      // answered the backup question still has to be asked about the standby
+      // answered the backup question still has to be asked about the shutdown
       // button (that is how the arrow sketch ever reaches a user who
       // installed the plugin before this question existed).
       const [step, setStep] = useState(
@@ -1321,7 +1347,7 @@ if (moduleLoader) moduleLoader.load({
       }
 
       /**
-       * Hand the SECOND answer to the Host: should the standby button stay?
+       * Hand the SECOND answer to the Host: should the shutdown button stay?
        */
       const chooseSleep = (showSleepButton) => {
         if (busy) return
@@ -1510,7 +1536,7 @@ if (moduleLoader) moduleLoader.load({
         )
       }
 
-      // The SECOND question: should the graceful-standby button stay?
+      // The SECOND question: should the graceful-shutdown button stay?
       return h(
         'div',
         {
@@ -1579,15 +1605,15 @@ if (moduleLoader) moduleLoader.load({
     }
 
     /* ------------------------------------------------------------------ *
-     * The graceful-standby (sleep) half.
+     * The graceful-shutdown (sleep) half.
      * ------------------------------------------------------------------ */
 
-    // The route that arms and cancels the standby. It is a sibling of the
+    // The route that arms and cancels the shutdown. It is a sibling of the
     // health route and shares its prefix, so it is derived the very same way.
     const DEFAULT_SLEEP_URL = ROUTE_PREFIX + '/sleep'
 
     /**
-     * ONE shared poller for the sleep status, shared by the header button
+     * ONE shared poller for the sleep status, shared by the sidebar button
      * and the overlay.
      *
      * It follows the pattern of the pending-restart store: the first
@@ -1669,7 +1695,7 @@ if (moduleLoader) moduleLoader.load({
     }
 
     /**
-     * Ask the Host to arm or to cancel the standby.
+     * Ask the Host to arm or to cancel the shutdown.
      *
      * The answer carries the new status, so the surfaces do not have to wait
      * for the next poll. A refused request throws, and the caller shows the
@@ -1743,29 +1769,33 @@ if (moduleLoader) moduleLoader.load({
     // a theme token: light and dark themes both work.
     const SLEEP_STYLE_ID = 'dsh-autorestart-sleep'
     const SLEEP_CSS = [
-      // The header button.
+      // The button at the foot of the left sidebar, beside Settings.
+      // It follows the host's own row language (same hover token, same
+      // radius token, icon + label), but it stays compact: the sidebar foot
+      // is a tight place, and the Settings row must keep its own space.
       '.dsh-autorestart-sleep-button{',
+      '  box-sizing:border-box;',
       '  display:inline-flex;',
       '  align-items:center;',
-      '  gap:6px;',
-      '  height:28px;',
-      '  padding:0 10px;',
-      '  box-sizing:border-box;',
-      '  border:1px solid var(--dsw-alias-border-l1);',
-      '  border-radius:8px;',
+      '  gap:8px;',
+      '  height:32px;',
+      '  max-width:100%;',
+      '  padding:0 10px 0 8px;',
+      '  border:none;',
+      '  border-radius:var(--dsw-radius-md,8px);',
       '  background:transparent;',
-      '  color:var(--dsw-alias-label-secondary);',
+      '  color:var(--dsw-alias-label-primary);',
       '  font:inherit;',
-      '  font-size:12.5px;',
-      '  line-height:18px;',
+      '  font-size:13px;',
+      '  line-height:20px;',
       '  white-space:nowrap;',
+      '  overflow:hidden;',
+      '  flex:none;',
       '  cursor:pointer;',
-      '  transition:background-color .14s,color .14s,border-color .14s;',
+      '  transition:background-color .14s,color .14s;',
       '}',
       '.dsh-autorestart-sleep-button:hover{',
-      '  color:var(--dsw-alias-label-primary);',
-      '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
-      '  background:var(--dsw-alias-bg-layer-2,color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent));',
+      '  background:var(--dsw-alias-interactive-bg-hover);',
       '}',
       '.dsh-autorestart-sleep-button:focus-visible{',
       '  outline:2px solid var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
@@ -1774,9 +1804,24 @@ if (moduleLoader) moduleLoader.load({
       '.dsh-autorestart-sleep-button:disabled{cursor:default;opacity:.65;}',
       '.dsh-autorestart-sleep-button--armed{',
       '  color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
-      '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  background:var(--dsw-alias-bg-module-platform,color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent));',
+      '}',
+      // The narrow rail (the collapsed sidebar): the icon only, so the rail
+      // keeps its width and the row does not push the Settings row away.
+      '.dsh-autorestart-sleep-button--rail{',
+      '  width:36px;',
+      '  height:36px;',
+      '  padding:0;',
+      '  gap:0;',
+      '  justify-content:center;',
+      '  border-radius:50%;',
       '}',
       '.dsh-autorestart-sleep-button__icon{width:16px;height:16px;flex:none;display:block;}',
+      '.dsh-autorestart-sleep-button__label{',
+      '  white-space:nowrap;',
+      '  overflow:hidden;',
+      '  text-overflow:ellipsis;',
+      '}',
       '.dsh-autorestart-sleep-button__spinner{',
       '  width:12px;',
       '  height:12px;',
@@ -1786,25 +1831,33 @@ if (moduleLoader) moduleLoader.load({
       '  border-top-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
       '  animation:dsh-autorestart-sleep-spin .8s linear infinite;',
       '}',
-      // The full-screen countdown.
+      // The countdown CARD: a floating corner card, never a full-screen
+      // cover. It lets every click through (only the cancel button takes
+      // clicks), so the conversation below stays readable and usable.
       '.dsh-autorestart-sleep-overlay{',
       '  position:fixed;',
-      '  inset:0;',
-      '  z-index:9999;',
+      '  top:calc(var(--dsh-frame-chrome-top,0px) + 12px);',
+      '  right:16px;',
+      '  z-index:9998;',
       '  display:flex;',
       '  flex-direction:column;',
       '  align-items:center;',
-      '  justify-content:center;',
-      '  gap:6px;',
+      '  justify-content:flex-start;',
+      '  gap:4px;',
       '  box-sizing:border-box;',
-      '  padding:24px;',
-      '  background:color-mix(in srgb, var(--dsw-alias-bg-layer-1,#fff) 88%, transparent);',
-      '  backdrop-filter:blur(10px);',
+      '  width:max-content;',
+      '  max-width:min(320px,calc(100vw - 32px));',
+      '  padding:14px 18px 16px;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:16px;',
+      '  background:var(--dsw-alias-bg-layer-1);',
+      '  box-shadow:0 10px 30px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 22%, transparent);',
       '  color:var(--dsw-alias-label-primary);',
       '  text-align:center;',
+      '  pointer-events:none;',
       '}',
       '.dsh-autorestart-sleep-overlay__number{',
-      '  font-size:clamp(120px,26vmin,320px);',
+      '  font-size:clamp(72px,9vmin,140px);',
       '  font-weight:700;',
       '  line-height:1;',
       '  letter-spacing:-.02em;',
@@ -1812,13 +1865,14 @@ if (moduleLoader) moduleLoader.load({
       '  animation:dsh-autorestart-sleep-tick 1s ease-out;',
       '}',
       '.dsh-autorestart-sleep-overlay--urgent .dsh-autorestart-sleep-overlay__number{',
-      '  font-size:clamp(140px,31vmin,380px);',
       '  color:var(--dsw-alias-danger,#d14343);',
       '  animation:dsh-autorestart-sleep-tick .7s ease-out;',
       '}',
+      // The whale is a guest in the card now, not the star of a full screen.
+      '.dsh-autorestart-sleep-overlay .dsh-autorestart-whale{width:min(30vmin,150px);}',
       '.dsh-autorestart-sleep-overlay__caption{',
       '  margin:4px 0 0;',
-      '  font-size:clamp(15px,2.4vmin,22px);',
+      '  font-size:14px;',
       '  font-weight:600;',
       '  line-height:1.4;',
       '  color:var(--dsw-alias-label-primary);',
@@ -1837,18 +1891,21 @@ if (moduleLoader) moduleLoader.load({
       '  color:var(--dsw-alias-danger,#d14343);',
       '}',
       '.dsh-autorestart-sleep-overlay__cancel{',
-      '  margin-top:14px;',
-      '  min-height:34px;',
-      '  padding:6px 18px;',
+      '  margin-top:10px;',
+      '  min-height:32px;',
+      '  padding:6px 16px;',
       '  border:1px solid var(--dsw-alias-border-l1);',
       '  border-radius:9px;',
       '  background:transparent;',
       '  color:var(--dsw-alias-label-primary);',
       '  font:inherit;',
-      '  font-size:13.5px;',
+      '  font-size:13px;',
       '  font-weight:600;',
       '  line-height:20px;',
       '  cursor:pointer;',
+      // The card itself lets every click through; the cancel button is the
+      // one thing in it that takes a click.
+      '  pointer-events:auto;',
       '  transition:background-color .14s,border-color .14s,color .14s;',
       '}',
       '.dsh-autorestart-sleep-overlay__cancel:hover{',
@@ -1862,6 +1919,8 @@ if (moduleLoader) moduleLoader.load({
       '}',
       '.dsh-autorestart-sleep-overlay__cancel:disabled{cursor:default;opacity:.65;}',
       // The waiting card: a soft corner card that never covers the reading.
+      // Like the countdown card it lets every click through; only its
+      // cancel button takes clicks.
       '.dsh-autorestart-sleep-waiting{',
       '  position:fixed;',
       '  right:16px;',
@@ -1878,6 +1937,7 @@ if (moduleLoader) moduleLoader.load({
       '  font-size:12.5px;',
       '  line-height:18px;',
       '  text-align:left;',
+      '  pointer-events:none;',
       '}',
       '.dsh-autorestart-sleep-waiting__title{',
       '  margin:0 0 2px;',
@@ -1903,6 +1963,7 @@ if (moduleLoader) moduleLoader.load({
       '  font-weight:600;',
       '  line-height:18px;',
       '  cursor:pointer;',
+      '  pointer-events:auto;',
       '}',
       '.dsh-autorestart-sleep-waiting__cancel:hover{',
       '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
@@ -2001,7 +2062,7 @@ if (moduleLoader) moduleLoader.load({
       }
     }
 
-    /** The moon of the header button: an inline SVG, no external image. */
+    /** The moon of the sidebar button: an inline SVG, no external image. */
     function moonIcon() {
       return h(
         'svg',
@@ -2022,12 +2083,18 @@ if (moduleLoader) moduleLoader.load({
     }
 
     /**
-     * The graceful-standby button, in the header's leading slot.
+     * The graceful-shutdown button, at the foot of the left sidebar.
      *
      * It renders NOTHING at all when the Host says the button must not be
      * shown: no placeholder, no empty space.
+     *
+     * The sidebar hands the column state to the slot: `wide` is false while
+     * the sidebar is collapsed into its narrow rail, and there the button
+     * shows its icon only, so the rail keeps its width.
+     *
+     * @param {{ wide?: boolean }} [props] the sidebar's column state
      */
-    function SleepButton() {
+    function SleepButton(props) {
       const status = useSleepStatus()
       const [arming, setArming] = useState(false)
       const [error, setError] = useState('')
@@ -2041,8 +2108,11 @@ if (moduleLoader) moduleLoader.load({
       )
       const visible = remoteKnown && shouldShowSleepButton(status)
 
-      // The button is a TOGGLE: a click arms the standby, and a click while
-      // the standby is armed cancels it. That way there is ALWAYS a way out,
+      // The narrow rail shows the icon only; the wide column shows the label.
+      const wide = !(props && props.wide === false)
+
+      // The button is a TOGGLE: a click arms the shutdown, and a click while
+      // the shutdown is armed cancels it. That way there is ALWAYS a way out,
       // even when the countdown screen is not (or no longer) on top.
       const armed = Boolean(
         status && typeof status === 'object' && (
@@ -2070,7 +2140,7 @@ if (moduleLoader) moduleLoader.load({
         }
       }
 
-      /** Take the standby back: the countdown stops and the machine stays on. */
+      /** Take the shutdown back: the countdown stops and the machine stays on. */
       const cancel = async () => {
         if (arming) return
         setArming(true)
@@ -2092,26 +2162,36 @@ if (moduleLoader) moduleLoader.load({
         {
           type: 'button',
           className: 'dsh-autorestart-sleep-button'
-            + (armed ? ' dsh-autorestart-sleep-button--armed' : ''),
+            + (armed ? ' dsh-autorestart-sleep-button--armed' : '')
+            + (wide ? '' : ' dsh-autorestart-sleep-button--rail'),
           'aria-label': armed ? t('sleep.button.cancel') : t('sleep.button.aria'),
           title: error || (armed ? t('sleep.button.cancel') : t('sleep.button.title')),
           disabled: arming,
           onClick: armed ? cancel : arm,
           'data-dsh-autorestart-sleep-button': 'true',
           'data-armed': armed ? 'true' : 'false',
+          'data-wide': wide ? 'true' : 'false',
         },
         arming
           ? h('span', { className: 'dsh-autorestart-sleep-button__spinner', 'aria-hidden': 'true' })
           : moonIcon(),
-        h('span', null, arming
-          ? t('sleep.button.busy')
-          : (armed ? t('sleep.button.cancel') : t('sleep.button.label'))),
+        // The narrow rail has no room for a label: the icon alone, with the
+        // title and the aria-label telling what it does.
+        wide
+          ? h(
+            'span',
+            { className: 'dsh-autorestart-sleep-button__label' },
+            arming
+              ? t('sleep.button.busy')
+              : (armed ? t('sleep.button.cancel') : t('sleep.button.label')),
+          )
+          : null,
       )
     }
 
     /**
-     * A small sketch of the workspace with the standby button in its
-     * top-left corner: the arrow points at the place the button appears.
+     * A small sketch of the workspace with the shutdown button at the foot of
+     * the left sidebar: the arrow points at the place the button appears.
      *
      * It carries no copy of its own: the words around it come from the
      * locale files.
@@ -2144,22 +2224,68 @@ if (moduleLoader) moduleLoader.load({
           y2: '24',
           stroke: 'var(--dsw-alias-border-l1)',
         }),
-        // The button in the top-left corner.
+        // The left sidebar.
+        h('line', {
+          x1: '78',
+          y1: '24',
+          x2: '78',
+          y2: '114',
+          stroke: 'var(--dsw-alias-border-l1)',
+        }),
+        // Two session rows in the sidebar.
         h('rect', {
           x: '16',
-          y: '32',
-          width: '58',
+          y: '36',
+          width: '46',
+          height: '7',
+          rx: '3.5',
+          fill: 'var(--dsw-alias-border-l2,var(--dsw-alias-border-l1))',
+        }),
+        h('rect', {
+          x: '16',
+          y: '50',
+          width: '52',
+          height: '7',
+          rx: '3.5',
+          fill: 'var(--dsw-alias-border-l2,var(--dsw-alias-border-l1))',
+        }),
+        // The button at the foot of the sidebar, right above the Settings row.
+        h('rect', {
+          x: '14',
+          y: '80',
+          width: '52',
           height: '18',
           rx: '6',
           fill: 'var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe))',
         }),
-        h('path', {
-          d: 'M28 44a6 6 0 0 1 8-8 6 6 0 1 0 7 7 6 6 0 0 1-8 8 6 6 0 0 1-7-7z',
-          fill: 'var(--dsw-alias-bg-layer-1,#fff)',
+        h(
+          'g',
+          { transform: 'translate(-4 45)' },
+          h('path', {
+            d: 'M28 44a6 6 0 0 1 8-8 6 6 0 1 0 7 7 6 6 0 0 1-8 8 6 6 0 0 1-7-7z',
+            fill: 'var(--dsw-alias-bg-layer-1,#fff)',
+          }),
+        ),
+        // The Settings row underneath it.
+        h('circle', {
+          cx: '20',
+          cy: '107',
+          r: '4.5',
+          fill: 'none',
+          stroke: 'var(--dsw-alias-label-secondary)',
+          'stroke-width': '1.5',
         }),
-        // The arrow that points at it.
+        h('rect', {
+          x: '30',
+          y: '103',
+          width: '34',
+          height: '7',
+          rx: '3.5',
+          fill: 'var(--dsw-alias-border-l2,var(--dsw-alias-border-l1))',
+        }),
+        // The arrow that points at the bottom-left corner.
         h('path', {
-          d: 'M152 98 L76 58',
+          d: 'M186 100 L74 92',
           fill: 'none',
           stroke: 'var(--dsw-alias-label-secondary)',
           'stroke-width': '2',
@@ -2167,7 +2293,7 @@ if (moduleLoader) moduleLoader.load({
           'stroke-dasharray': '5 4',
         }),
         h('path', {
-          d: 'M74 56 l12-1 -5 10 z',
+          d: 'M74 92 l12-1 -5 10 z',
           fill: 'var(--dsw-alias-label-secondary)',
         }),
       )
@@ -2314,7 +2440,7 @@ if (moduleLoader) moduleLoader.load({
       const seconds = formatRemainingMs(Math.max(0, remainingMs - elapsed))
 
       /**
-       * Cancel the standby.
+       * Cancel the shutdown.
        *
        * The layer folds away only when the Host CONFIRMS the cancellation
        * (`phase === 'cancelled'`): a request that fails leaves the countdown
@@ -2355,6 +2481,8 @@ if (moduleLoader) moduleLoader.load({
             role: 'status',
             'aria-live': 'polite',
             'data-dsh-autorestart-sleep-waiting': 'true',
+            // The card never eats a click: only its cancel button does.
+            style: { pointerEvents: 'none' },
           },
           h('p', { className: 'dsh-autorestart-sleep-waiting__title' }, t('sleep.waiting.title')),
           h('p', { className: 'dsh-autorestart-sleep-waiting__body' }, t('sleep.waiting.body')),
@@ -2384,6 +2512,7 @@ if (moduleLoader) moduleLoader.load({
               className: 'dsh-autorestart-sleep-waiting__cancel',
               onClick: cancel,
               disabled: busy,
+              style: { pointerEvents: 'auto' },
             },
             t('sleep.waiting.cancel'),
           ),
@@ -2402,6 +2531,9 @@ if (moduleLoader) moduleLoader.load({
             'aria-live': 'assertive',
             'aria-label': t('sleep.countdown.hint'),
             'data-dsh-autorestart-sleep-countdown': 'true',
+            // The card is a FLOATING card: it never covers the interface and
+            // it never eats a click — only its cancel button does.
+            style: { pointerEvents: 'none' },
           },
           // The key changes every second, so the number restarts its pulse
           // on every tick.
@@ -2423,6 +2555,7 @@ if (moduleLoader) moduleLoader.load({
               className: 'dsh-autorestart-sleep-overlay__cancel',
               onClick: cancel,
               disabled: busy,
+              style: { pointerEvents: 'auto' },
             },
             t('sleep.countdown.cancel'),
           ),
@@ -2452,6 +2585,7 @@ if (moduleLoader) moduleLoader.load({
               type: 'button',
               className: 'dsh-autorestart-sleep-overlay__cancel',
               onClick: () => setDismissed(true),
+              style: { pointerEvents: 'auto' },
             },
             t('sleep.shuttingDown.dismiss'),
           )
@@ -2464,6 +2598,9 @@ if (moduleLoader) moduleLoader.load({
             'aria-live': 'assertive',
             'data-dsh-autorestart-sleep-shutdown': 'true',
             'data-dsh-autorestart-sleep-dry-run': dryRun ? 'true' : 'false',
+            // The good-night card is a floating card too: it never covers the
+            // interface, only its dismiss button takes clicks.
+            style: { pointerEvents: 'none' },
           },
           whaleArt(false),
           h(
@@ -2493,10 +2630,12 @@ if (moduleLoader) moduleLoader.load({
         ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'autorestart-restart-pill', order: 0 }, RestartPill))
         ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'autorestart-restart-dot', order: 20 }, RestartDot))
         ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'autorestart-backup-choice', order: 7, locale: NS }, BackupChoicePanel))
-        // The graceful-standby button: a SINGLE slot (no id, no order), so it
-        // lands in the leading corner of the conversation header — left of
-        // the session title, at the top-left of the main area.
-        ctx.slots.inject('conversation.header.leading', () => ctx.slots.register({ name: 'conversation.header.leading' }, SleepButton))
+        // The graceful-shutdown button: a LIST slot at the foot of the left
+        // sidebar, beside the Settings row. The slot is a ROOT slot, so the
+        // button is there even when no conversation is open — and the
+        // sidebar hands the column state to it, so the collapsed rail shows
+        // the icon only.
+        ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'autorestart-sleep-button', order: 10, locale: NS }, SleepButton))
         // The countdown overlay: a frame-wide floating layer above every
         // column.
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-sleep-overlay', order: 60 }, SleepOverlay))

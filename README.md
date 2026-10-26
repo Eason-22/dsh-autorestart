@@ -38,10 +38,11 @@ Before every restart the plugin snapshots the profile, so a restart that leaves 
 boot is rolled back automatically — see
 [Pre-restart backup and automatic rollback](#pre-restart-backup-and-automatic-rollback).
 
-The same "wait until everything is quiet" idea is also available as a **graceful standby**: a moon
-button in the top-left corner of the main area waits for every conversation to be idle, counts down
-on screen for ten seconds (a huge number and a small whale) and then switches the **real host
-machine** off — see [Graceful standby](#graceful-standby-优雅挂机).
+The same "wait until everything is quiet" idea is also available as a **graceful shutdown**: a moon
+button at the very bottom of the left sidebar (right next to Settings) waits for every conversation
+to be idle, counts down on screen for twenty seconds (a floating card with a huge number and a
+small whale) and then switches the **real host machine** off — see
+[Graceful shutdown](#graceful-shutdown-优雅关机).
 
 Two safety gates protect the restart. The host checks that no conversation is busy, and the detached
 helper checks the same gate over loopback immediately before it kills the process, so a turn that
@@ -55,8 +56,8 @@ what it adds before you install it.
 | Kind | What it adds |
 | --- | --- |
 | Agent tools (6) | `continuum_restart`, `continuum_status`, `continuum_cancel_restart`, `continuum_park_goal`, `continuum_recover_now`, `continuum_handoff` |
-| HTTP routes (6) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`, `GET /sleep` and `POST /sleep` (the graceful standby). Loopback or an authenticated browser only |
-| Client slots (4) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`); `conversation.header.leading` — the moon button of the graceful standby; `shell.overlay` — its countdown overlay |
+| HTTP routes (6) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`, `GET /sleep` and `POST /sleep` (the graceful shutdown). Loopback or an authenticated browser only |
+| Client slots (4) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`); `sidebar.footer.action` — the moon button of the graceful shutdown (`autorestart-sleep-button`); `shell.overlay` — its countdown card |
 | System prompt | One "Restart policy" section that tells the agent how to ask for a restart and what the plugin will do |
 | Harness hooks | `agent/status` (tracks which conversations are busy), `tools/pre-execute` (blocks a shell command that would kill or relaunch DSH by hand), and the boot pass that resumes interrupted sessions |
 | Profile row | One bundle row, `dsh-autorestart` |
@@ -146,9 +147,9 @@ show up in the Plugin Manager and in the config editor.
 | `backupIncludePlugins` | `true` | Include the installed plugin tree in that snapshot (about 117 MB here, ~3 s). `false` keeps only the configuration files. |
 | `maxBackups` | `2` | How many snapshots are kept; older ones are deleted when a new one is written. |
 | `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the relaunched host before it restores the snapshot and launches the host again. |
-| `showSleepButton` | `true` | Whether the moon button of the graceful standby is shown in the main area. |
-| `sleepCountdownSeconds` | `10` | How many seconds the graceful standby counts down before the machine goes down (3–120). |
-| `sleepCommand` | `''` | A custom shutdown command for the graceful standby. Empty = the host is detected automatically; a value replaces the detected command (`cmd.exe /c …` on Windows, `/bin/sh -c …` everywhere else). |
+| `showSleepButton` | `true` | Whether the moon button of the graceful shutdown is shown at the foot of the left sidebar, next to Settings. |
+| `sleepCountdownSeconds` | `20` | How many seconds the graceful shutdown counts down before the machine goes down (3–120). |
+| `sleepCommand` | `''` | A custom shutdown command for the graceful shutdown. Empty = the host is detected automatically; a value replaces the detected command (`cmd.exe /c …` on Windows, `/bin/sh -c …` everywhere else). |
 
 The two waits are independent of each other, and both default to two seconds:
 
@@ -236,19 +237,27 @@ addition to it, never a rival of it.
   `continuum_status` always reports the value that is in effect right now
   (`backupIncludePlugins: true | false`).
 
-## Graceful standby (优雅挂机)
+## Graceful shutdown (优雅关机)
 
-**What it does.** One moon button in the top-left corner of the main area: press it and the plugin
-waits until **every** conversation is idle, the screen counts down for ten seconds (a huge number
+**What it does.** One moon button at the very bottom of the left sidebar: press it and the plugin
+waits until **every** conversation is idle, the screen counts down for twenty seconds (a huge number
 and a small blue whale, one line of text per second), and then the machine is switched off. The
-countdown can always be cancelled — the overlay has a button, and the moon button itself becomes a
-toggle while the standby is armed. If a conversation starts working again during the countdown, the
+countdown can always be cancelled — the card has a button, and the moon button itself becomes a
+toggle while the shutdown is armed. If a conversation starts working again during the countdown, the
 countdown goes back to "waiting" and nothing is switched off.
 
-**Where the button is.** The moon button sits in the **top-left corner of the main area, left of the
-session title** (`conversation.header.leading`). The very top row of the window is Electron's own
-menu bar (「文件 / 编辑」 on Windows, 「应用 / 编辑」 on macOS) — a plugin cannot put anything there —
-so the button lives in the web layout right below it.
+**Where the button is.** The moon button sits at the **very bottom of the left sidebar, right next
+to the Settings row** (`sidebar.footer.action`). That seat is a **root** slot, so the button is
+there even when no conversation is open — on any page. When the sidebar is collapsed into its narrow
+rail, the button shows its icon only (the tooltip and the accessible name still say what it does),
+so the rail keeps its width.
+
+**The countdown does not cover the interface.** The countdown is a **floating card** in the corner,
+not a full-screen mask: it never dims the page, never locks the scrolling and never swallows a
+click. You can keep reading the conversation, keep scrolling and keep switching conversations while
+it counts down; only the card's own cancel button takes clicks. Switching a conversation or a page
+does not interrupt the countdown either — the seconds come from the host, not from the view that
+happens to be open.
 
 **What gets switched off: the real host.** Not a subsystem — the whole machine:
 
@@ -265,7 +274,7 @@ Microsoft, or the mounted Windows binary. The countdown belongs to the plugin, s
 system is asked to shut down immediately (`/t 0`) instead of counting down a second time.
 
 **Configuration.** `showSleepButton` (default `true`) decides whether the button is shown,
-`sleepCountdownSeconds` (default `10`, 3–120) how long the countdown runs, and `sleepCommand`
+`sleepCountdownSeconds` (default `20`, 3–120) how long the countdown runs, and `sleepCommand`
 (default `''`) replaces the detected command with one of your own — empty means "detect the host
 automatically".
 
@@ -286,11 +295,11 @@ was only recognised as WSL because the Windows drive is mounted — a hint, not 
 `lastRun.dryRun` marks the last run as a rehearsal that switched nothing off.
 
 **When the shutdown command does not start.** The host waits for the real answer of the process. If
-the command cannot start (missing binary, denied permission), the standby does **not** pretend it
+the command cannot start (missing binary, denied permission), the shutdown does **not** pretend it
 worked: the phase goes back to `idle`, the reason is reported ("the shutdown command did not start
 (…), the computer is still on, press the moon button again"), and the machine stays on. On screen
-the "shutting down" view never locks the interface: after at most eight seconds it offers a button
-that closes the overlay.
+the "shutting down" card never locks the interface: after at most eight seconds it offers a button
+that closes the card.
 
 ## Requirements and limits
 
@@ -365,11 +374,11 @@ curl http://127.0.0.1:<gui port>/__dsh_autorestart/health
   anything.
 - `POST /__dsh_autorestart/park` disarms a goal, `POST /__dsh_autorestart/recover` re-runs the
   recovery immediately. Both use the same authentication rules as the health route.
-- `GET /__dsh_autorestart/sleep` reports the state of the graceful standby, `POST
+- `GET /__dsh_autorestart/sleep` reports the state of the graceful shutdown, `POST
   /__dsh_autorestart/sleep` arms (`{ "action": "arm" }`) or cancels (`{ "action": "cancel" }`) it.
 - Inside a session, `continuum_status` reports the same lifecycle.
 
-The plugin ships its own test suite: **236 test cases** in `plugins/dsh-autorestart/test/`, all
+The plugin ships its own test suite: **242 test cases** in `plugins/dsh-autorestart/test/`, all
 green. Run it with the bundled Node, from the workspace root:
 
 ```sh

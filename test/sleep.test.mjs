@@ -1,5 +1,5 @@
 /**
- * Tests for the graceful sleep ("优雅挂机") — the host half.
+ * Tests for the graceful shutdown ("优雅关机") — the host half.
  *
  * The feature waits until every conversation is idle, counts down and then
  * switches the REAL machine off. The dangerous part is the host detection: a
@@ -302,7 +302,7 @@ test('a plan without a command never runs anything', async () => {
 function createController({
   busy = [],
   allow = true,
-  countdownSeconds = 10,
+  countdownSeconds = 20,
   titles = {},
 } = {}) {
   let clock = 1000
@@ -342,8 +342,8 @@ test('arming with nothing to do starts the countdown', () => {
   const status = harness.controller.arm()
   assert.equal(status.phase, 'countdown')
   assert.equal(status.armed, true)
-  assert.equal(status.countdownSeconds, 10)
-  assert.equal(status.remainingMs, 10000)
+  assert.equal(status.countdownSeconds, 20)
+  assert.equal(status.remainingMs, 20000)
   assert.deepEqual(status.blockers, [])
   assert.equal(harness.timers.length, 1, 'exactly one timer may run')
   assert.equal(harness.timers[0].disposed, false)
@@ -371,7 +371,7 @@ test('a blocker without a title falls back to its session id', () => {
 test('the countdown runs down and closes the machine', () => {
   const harness = createController()
   harness.controller.arm()
-  for (let step = 0; step < 10; step += 1) {
+  for (let step = 0; step < 20; step += 1) {
     harness.advance(1000)
     harness.controller.tick()
   }
@@ -410,8 +410,8 @@ test('the gate is asked once more before the machine is closed', () => {
   const harness = createController()
   harness.controller.arm()
   harness.state.allow = false
-  // Ten ticks: the countdown reaches zero and the gate is asked.
-  for (let step = 0; step < 10; step += 1) {
+  // Twenty ticks: the countdown reaches zero and the gate is asked.
+  for (let step = 0; step < 20; step += 1) {
     harness.advance(1000)
     harness.controller.tick()
   }
@@ -420,7 +420,7 @@ test('the gate is asked once more before the machine is closed', () => {
   assert.equal(harness.shutdowns.length, 0, 'a denied gate must not close the machine')
 
   // The machine stays alive while the gate keeps denying.
-  for (let step = 0; step < 10; step += 1) {
+  for (let step = 0; step < 20; step += 1) {
     harness.advance(1000)
     harness.controller.tick()
   }
@@ -455,7 +455,7 @@ test('the countdown length is clamped into the supported range', () => {
   assert.equal(normalizeCountdownSeconds(0), 3)
   assert.equal(normalizeCountdownSeconds(999), 120)
   assert.equal(normalizeCountdownSeconds(10), 10)
-  assert.equal(normalizeCountdownSeconds('nonsense'), 10)
+  assert.equal(normalizeCountdownSeconds('nonsense'), 20)
 })
 
 test('the shortest and the longest countdown show every second', () => {
@@ -635,7 +635,7 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(payload.phase, 'idle')
   assert.equal(payload.armed, false)
   assert.equal(payload.showSleepButton, true)
-  assert.equal(payload.countdownSeconds, 10)
+  assert.equal(payload.countdownSeconds, 20)
   assert.equal(payload.remainingMs, 0)
   assert.deepEqual(payload.blockers, [])
   assert.deepEqual(Object.keys(payload.host).sort(), ['kind', 'label', 'platform', 'source', 'suspect'])
@@ -791,7 +791,7 @@ test('a machine that was not quiet long enough is not reported as busy', () => {
     clearInterval: () => {},
   })
   controller.arm()
-  for (let step = 0; step < 10; step += 1) {
+  for (let step = 0; step < 20; step += 1) {
     clock += 1000
     controller.tick()
   }
@@ -809,7 +809,7 @@ test('a shutdown command that does not start leaves the machine idle, not "shutt
     clearInterval: () => {},
   })
   controller.arm()
-  for (let step = 0; step < 10; step += 1) controller.tick()
+  for (let step = 0; step < 20; step += 1) controller.tick()
   await new Promise((resolve) => setTimeout(resolve, 5))
   const status = controller.status()
   assert.equal(status.phase, 'idle', 'the state must not keep saying "shutting down"')
@@ -837,7 +837,7 @@ test('a dry run goes back to idle and says what it WOULD have run', async () => 
     clearInterval: () => {},
   })
   controller.arm()
-  for (let step = 0; step < 10; step += 1) controller.tick()
+  for (let step = 0; step < 20; step += 1) controller.tick()
   await new Promise((resolve) => setTimeout(resolve, 5))
   const status = controller.status()
   assert.equal(status.phase, 'idle', 'a dry run must not leave the state at "shutting down"')
@@ -870,7 +870,7 @@ test('the last gate keeps the busy conversations in the waiting card', async () 
     clearInterval: () => {},
   })
   controller.arm()
-  for (let step = 0; step < 10; step += 1) controller.tick()
+  for (let step = 0; step < 20; step += 1) controller.tick()
   await new Promise((resolve) => setTimeout(resolve, 5))
   const status = controller.status()
   assert.equal(status.phase, 'waiting', 'the machine must not be closed')
@@ -1063,18 +1063,19 @@ function mountClient({ status = null, storage = createStorage(), language = 'zh'
   return {
     fetches,
     dictionaries,
+    slots,
     setStatus: (next) => { state.status = next },
     // Deliver the new status the way the shared poll would.
     poll: async () => {
       for (const fn of polls) fn()
       await settleClient()
     },
-    render: (name) => harness.render(componentOf(name).Component, {}),
+    render: (name, props) => harness.render(componentOf(name).Component, props || {}),
     // Render, let the shared poll deliver the status, render again.
-    settled: async (name) => {
-      harness.render(componentOf(name).Component, {})
+    settled: async (name, props) => {
+      harness.render(componentOf(name).Component, props || {})
       await settleClient()
-      return harness.render(componentOf(name).Component, {})
+      return harness.render(componentOf(name).Component, props || {})
     },
   }
 }
@@ -1107,7 +1108,7 @@ test('the countdown overlay comes back after a cancellation', async () => {
 })
 
 test('the second install question is reachable on its own', async () => {
-  // The backup question was answered (on an earlier install), the standby
+  // The backup question was answered (on an earlier install), the shutdown
   // button question was not: the second question must still be asked.
   const storage = createStorage({ 'dsh-autorestart:backup-choice-v1': 'plugins' })
   const mounted = mountClient({ storage })
@@ -1120,35 +1121,122 @@ test('the second install question is reachable on its own', async () => {
 test('the button waits for the first poll before it appears', async () => {
   // The Host has not answered yet: the button must not flash.
   const mounted = mountClient({ status: { ok: true, phase: 'idle' } })
-  assert.equal(mounted.render('conversation.header.leading'), null, 'an unknown answer renders nothing')
+  assert.equal(mounted.render('sidebar.footer.action'), null, 'an unknown answer renders nothing')
   // The first poll has to arrive before the Host changes its mind.
   await settleClient()
 
   mounted.setStatus({ ok: true, phase: 'idle', showSleepButton: true })
   await mounted.poll()
-  const button = await mounted.settled('conversation.header.leading')
+  const button = await mounted.settled('sidebar.footer.action')
   assert.ok(button, 'the button appears once the Host answered')
   assert.equal(button.type, 'button')
 
   mounted.setStatus({ ok: true, phase: 'idle', showSleepButton: false })
   await mounted.poll()
   assert.equal(
-    await mounted.settled('conversation.header.leading'),
+    await mounted.settled('sidebar.footer.action'),
     null,
     'a hidden button leaves no placeholder',
   )
 })
 
-test('the moon button is a toggle: an armed standby is cancelled by the same click', async () => {
+test('the button lives at the foot of the sidebar, not in the conversation header', async () => {
+  const mounted = mountClient({ status: { ok: true, phase: 'idle', showSleepButton: true } })
+  await mounted.poll()
+
+  // The new seat: the list slot at the foot of the left sidebar.
+  assert.ok(
+    mounted.slots.has('sidebar.footer.action'),
+    'the button must be registered in sidebar.footer.action',
+  )
+  const registration = mounted.slots.get('sidebar.footer.action')().registration
+  assert.equal(registration.name, 'sidebar.footer.action')
+  assert.equal(registration.id, 'autorestart-sleep-button', 'the list slot needs its own id')
+  assert.equal(typeof registration.order, 'number', 'the list slot needs an order')
+
+  // The old seat is gone for good: nothing may register there any more.
+  assert.equal(
+    mounted.slots.has('conversation.header.leading'),
+    false,
+    'the button must not be registered in the conversation header any more',
+  )
+})
+
+test('the collapsed sidebar shows the icon only, the wide one the label', async () => {
+  const mounted = mountClient({ status: { ok: true, phase: 'idle', showSleepButton: true } })
+  await mounted.poll()
+
+  const wide = await mounted.settled('sidebar.footer.action', { wide: true })
+  assert.ok(wide, 'the wide column shows the button')
+  assert.ok(textOf(wide).includes('优雅关机'), 'the wide column shows the label')
+  assert.ok(!wide.props.className.includes('--rail'), 'the wide column is not the rail')
+  assert.ok(wide.props.title, 'the button always has a title')
+  assert.ok(wide.props['aria-label'], 'the button always has an aria-label')
+
+  const rail = await mounted.settled('sidebar.footer.action', { wide: false })
+  assert.ok(rail, 'the narrow rail shows the button too')
+  assert.ok(!textOf(rail).includes('优雅关机'), 'the narrow rail shows the icon only')
+  assert.ok(rail.props.className.includes('--rail'), 'the narrow rail uses the rail style')
+  assert.ok(rail.props.title, 'the rail button still has a title')
+  assert.ok(rail.props['aria-label'], 'the rail button still has an aria-label')
+})
+
+test('the moon button is a toggle: an armed shutdown is cancelled by the same click', async () => {
   const mounted = mountClient({
     status: { ok: true, phase: 'countdown', armed: true, showSleepButton: true, remainingMs: 8000, blockers: [] },
   })
-  const button = await mounted.settled('conversation.header.leading')
+  const button = await mounted.settled('sidebar.footer.action')
   assert.ok(button, 'the button must be rendered')
   assert.equal(button.props['data-armed'], 'true')
   button.props.onClick()
   await settleClient()
   const posts = mounted.fetches.filter((call) => String(call.url).includes('/sleep') && call.init)
   assert.ok(posts.length >= 1)
-  assert.deepEqual(JSON.parse(posts[posts.length - 1].init.body), { action: 'cancel' }, 'an armed standby is cancelled')
+  assert.deepEqual(JSON.parse(posts[posts.length - 1].init.body), { action: 'cancel' }, 'an armed shutdown is cancelled')
+})
+
+test('the countdown is a floating card: it never covers the interface', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'countdown', showSleepButton: true, remainingMs: 8000, blockers: [] },
+  })
+  const card = await mounted.settled('shell.overlay')
+  assert.ok(card, 'the countdown card must be on screen')
+
+  // No full-screen mask: the card is a corner card, not a cover.
+  assert.ok(
+    !card.props.className.includes('mask'),
+    'the countdown must not be a full-screen mask',
+  )
+  assert.equal(
+    card.props.style && card.props.style.pointerEvents,
+    'none',
+    'the card lets every click through',
+  )
+  // Only the cancel button takes clicks.
+  const cancel = walk(card).find((node) => node.type === 'button')
+  assert.ok(cancel, 'the card still offers a way out')
+  assert.equal(cancel.props.style && cancel.props.style.pointerEvents, 'auto')
+
+  // The big number is still big: at least 72px.
+  const number = walk(card).find((node) => String(node.props && node.props.className || '').includes('__number'))
+  assert.ok(number, 'the big number must be on screen')
+})
+
+test('switching the conversation does not interrupt the countdown', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'countdown', showSleepButton: true, remainingMs: 20000, blockers: [] },
+  })
+  const first = await mounted.settled('shell.overlay')
+  assert.ok(first, 'the countdown must be on screen')
+  assert.ok(textOf(first).includes('20'), 'the countdown starts at 20 seconds')
+
+  // A session switch re-renders the surfaces: the countdown keeps running.
+  const again = mounted.render('shell.overlay')
+  assert.ok(again, 'the countdown survives a re-render')
+  assert.ok(textOf(again).includes('20'), 'the countdown is not reset by a re-render')
+  assert.equal(
+    again.props['data-dsh-autorestart-sleep-countdown'],
+    'true',
+    'the countdown card is still the countdown card',
+  )
 })

@@ -247,12 +247,12 @@ function buildConfigSchema() {
         .description('How many snapshots are kept; older ones are deleted automatically.'),
       rollbackTimeoutMs: schemastery.number().min(1000).default(90000)
         .description('Milliseconds the detached watcher waits for the relaunched host before it restores the snapshot.'),
-      // graceful sleep ("优雅挂机"): wait for every conversation, count down, then
+      // graceful shutdown ("优雅关机"): wait for every conversation, count down, then
       // switch the REAL host machine off (a WSL host shuts Windows down, not the distro)
       showSleepButton: schemastery.boolean().default(true)
-        .description('是否在主界面左上方显示「优雅挂机」按钮：关掉之后界面上不再有这个按钮，挂机接口也不再被界面调用。'),
-      sleepCountdownSeconds: schemastery.number().min(3).max(120).default(10)
-        .description('所有会话都收工之后、真正关机之前的倒计时秒数（3 到 120 秒，默认 10 秒）。'),
+        .description('是否在左侧栏最底部、设置按钮旁边显示「优雅关机」按钮：关掉之后界面上不再有这个按钮，关机接口也不再被界面调用。'),
+      sleepCountdownSeconds: schemastery.number().min(3).max(120).default(20)
+        .description('所有会话都收工之后、真正关机之前的倒计时秒数（3 到 120 秒，默认 20 秒）。'),
       sleepCommand: schemastery.string().default('')
         .description('自定义关机命令：留空表示按系统自动识别（Windows / WSL / Linux / macOS），填了就用这条命令代替自动识别。'),
     })
@@ -294,11 +294,11 @@ const DEFAULTS = {
   backupIncludePlugins: true,
   maxBackups: 2,
   rollbackTimeoutMs: 90000,
-  // Graceful sleep ("优雅挂机"): the button in the top-left of the main UI, the
-  // countdown before the machine is switched off and the optional custom
+  // Graceful shutdown ("优雅关机"): the button at the foot of the left sidebar,
+  // the countdown before the machine is switched off and the optional custom
   // shutdown command (empty = the host is detected automatically).
   showSleepButton: true,
-  sleepCountdownSeconds: 10,
+  sleepCountdownSeconds: 20,
   sleepCommand: '',
 }
 

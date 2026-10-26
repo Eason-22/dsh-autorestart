@@ -20,7 +20,7 @@
 - 重启前有两道检查：宿主侧查一次，独立 helper 在杀进程前再查一次；
 - 界面上能看到状态：输入框工具行左侧的"待重启 · 被 N 个会话占用"小胶囊、左侧栏会话标题旁的圆点；快重启时圆点呼吸，点胶囊看详情；
 - 可配置：静默窗口（默认 2 秒）、杀进程前等待（默认 2 秒）、忙碌时是否允许强制重启等。
-- 同一套"等到大家都安静"的想法还做成了**优雅挂机**：主界面左上角一个月亮按钮 → 等所有会话收工 → 屏幕上倒数 10 秒（大字 + 鲸鱼娘）→ **关掉整台电脑**（见「优雅挂机」）。
+- 同一套"等到大家都安静"的想法还做成了**优雅关机**：左侧栏最底部（设置按钮旁边）一个月亮按钮 → 等所有会话收工 → 屏幕上倒数 20 秒（一张浮动卡片：大字 + 鲸鱼娘）→ **关掉整台电脑**（见「优雅关机」）。
 
 场景对照：
 
@@ -56,8 +56,8 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 | 类型 | 具体占用 |
 | --- | --- |
 | Agent 工具（6 个） | `continuum_restart`、`continuum_status`、`continuum_cancel_restart`、`continuum_park_goal`、`continuum_recover_now`、`continuum_handoff` |
-| HTTP 路由（6 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`、`GET /sleep`、`POST /sleep`（优雅挂机）；只接受本机回环或已认证的浏览器 |
-| 前端槽位（4 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`）、`conversation.header.leading`（优雅挂机的月亮按钮）、`shell.overlay`（倒数覆盖层） |
+| HTTP 路由（6 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`、`GET /sleep`、`POST /sleep`（优雅关机）；只接受本机回环或已认证的浏览器 |
+| 前端槽位（4 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`）、`sidebar.footer.action`（优雅关机的月亮按钮，id `autorestart-sleep-button`）、`shell.overlay`（倒数浮动卡片） |
 | 系统提示词 | 一段「重启政策」说明，告诉 agent 怎么请求重启、插件会做什么 |
 | 宿主事件 | `agent/status`（跟踪哪些会话在忙）、`tools/pre-execute`（拦下"手动杀/重启 DSH"的 shell 命令）、启动时的恢复流程 |
 | profile 行 | 一条 bundle 行：`dsh-autorestart` |
@@ -155,9 +155,9 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 | `blockManualRestart` | `true` | 硬拦截 agent 用 shell 命令手动杀掉/重启 DSH，并引导到 `continuum_restart` |
 | `healthPath` | `/__dsh_autorestart/health` | 健康检查路由（返回 bootId/pid/phase/自检标志） |
 | `continuationText` | `''` | 覆盖默认续接提示文本 |
-| `showSleepButton` | `true` | 优雅挂机的月亮按钮是否显示在主界面左上角 |
-| `sleepCountdownSeconds` | `10` | 优雅挂机在真正关机前倒数几秒（3–120） |
-| `sleepCommand` | `''` | 优雅挂机的自定义关机命令；留空 = 自动识别宿主（Windows 用 `cmd.exe /c …`，其它平台用 `/bin/sh -c …`） |
+| `showSleepButton` | `true` | 优雅关机的月亮按钮是否显示在左侧栏最底部、设置按钮旁边 |
+| `sleepCountdownSeconds` | `20` | 优雅关机在真正关机前倒数几秒（3–120） |
+| `sleepCommand` | `''` | 优雅关机的自定义关机命令；留空 = 自动识别宿主（Windows 用 `cmd.exe /c …`，其它平台用 `/bin/sh -c …`） |
 
 ## Agent 工具与"它怎么知道该用插件"
 
@@ -194,11 +194,13 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 所以**不需要改 AGENTS.md**——这是 Host 插件钩子（工具注册 + system prompt section + tools.guard），对 profile 内所有 agent 生效；
 你当然也可以额外在 AGENTS.md 里写一条团队规范，但它只是重复。
 
-## 优雅挂机（Graceful standby）
+## 优雅关机（Graceful shutdown）
 
-**它干什么。** 主界面左上角一个月亮按钮：点一下 → 等**所有**会话都收工 → 屏幕上倒数 10 秒（一个巨大的数字 + 一只蓝色小鲸鱼，每秒换一句中文）→ **关掉整台电脑**。倒数期间随时可以取消：覆盖层上有按钮，月亮按钮本身在挂机期间也变成了"再点一下 = 取消"。倒数期间要是有会话又开始干活，倒计时会退回"等待"，**绝不关机**。
+**它干什么。** 左侧栏最底部一个月亮按钮：点一下 → 等**所有**会话都收工 → 屏幕上倒数 20 秒（一个巨大的数字 + 一只蓝色小鲸鱼，每秒换一句中文）→ **关掉整台电脑**。倒数期间随时可以取消：卡片上有按钮，月亮按钮本身在关机期间也变成了"再点一下 = 取消"。倒数期间要是有会话又开始干活，倒计时会退回"等待"，**绝不关机**。
 
-**按钮在哪。** 月亮按钮在**主界面左上角、会话标题左边**（`conversation.header.leading` 槽位）。窗口最顶上那一排是 Electron 的原生菜单栏（Windows 上是「文件 / 编辑」，macOS 上是「应用 / 编辑」），**插件加不进去**，所以按钮放在它正下方的 Web 布局左上角。
+**按钮在哪。** 月亮按钮在**左侧栏最底部、设置按钮旁边**（`sidebar.footer.action` 槽位）。这个槽位是 **root 作用域**的，所以**没有会话、切换任何页面时它也都在**。侧栏收成窄轨（折叠态）时按钮只显示月亮图标（`title` 和 `aria-label` 仍然说明它是干什么的），不会把窄轨撑变形。
+
+**倒计时不遮界面。** 倒数是角落里的一张**浮动卡片**，不是全屏遮罩：它不压暗页面、不锁滚动、也不吃掉任何点击——卡片外面照常能读正文、能滚动、能点侧栏切会话，卡片自己**只有那个「算了，别关」按钮能点**。切换会话或切换页面也**不会打断或重置**倒数：秒数来自宿主的轮询，不是来自当前打开的那个视图。
 
 **关的是真宿主机。** 不是关子系统，是关**整台机器**：
 
@@ -216,8 +218,8 @@ WSL 的判定依据：`WSL_DISTRO_NAME`、`WSL_INTEROP`、`/proc/version` 里出
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `showSleepButton` | `true` | 左上角的月亮按钮是否显示 |
-| `sleepCountdownSeconds` | `10` | 真正关机前倒数几秒（3–120） |
+| `showSleepButton` | `true` | 左侧栏最底部（设置按钮旁边）的月亮按钮是否显示 |
+| `sleepCountdownSeconds` | `20` | 真正关机前倒数几秒（3–120） |
 | `sleepCommand` | `''` | 自定义关机命令；留空 = 自动识别宿主，填了就用这条命令代替（Windows 走 `cmd.exe /c …`，其它平台走 `/bin/sh -c …`） |
 
 **首次安装会问一次「按钮要不要留着」。** 答完写进 profile 配置的 `showSleepButton` 键（用官方 `configEditor` Service，和备份范围那次问询同一条路），所以设置页和问询看到的永远是同一个值。
@@ -226,7 +228,7 @@ WSL 的判定依据：`WSL_DISTRO_NAME`、`WSL_INTEROP`、`/proc/version` 里出
 
 **给代码看的状态字段。** `GET <healthPath 前缀>/sleep`（默认 `/__dsh_autorestart/sleep`）会回答阶段、倒数和"要关的是哪台机器"。其中三个字段是给**程序**看的、不是给人看的：`host.kind` 是机器类别（`windows` / `wsl` / `linux` / `macos` / `unsupported`；如果平台没认出来、但你配了 `sleepCommand`，则是 `custom`）；`host.suspect` 为 `true` 表示这台机器**只凭挂着 Windows 盘**才被认成 WSL（是佐证，不是铁证）；`lastRun.dryRun` 表示上一次是**试运行**，什么都没真关。
 
-**关机命令起不来时的退路。** 宿主会等命令的**真实结果**（进程有没有真的起来）。命令起不来（找不到程序、权限不够）时，挂机**不会假装成功**：状态回到 `idle`，并给出原因（"关机命令没跑起来（…），电脑还开着，可以再点一次月亮按钮。"），电脑保持开机。界面上那个「正在关机」的视图也**不会把界面锁死**：最多停留 8 秒就会给出一个"关掉这个提示"的按钮。
+**关机命令起不来时的退路。** 宿主会等命令的**真实结果**（进程有没有真的起来）。命令起不来（找不到程序、权限不够）时，关机**不会假装成功**：状态回到 `idle`，并给出原因（"关机命令没跑起来（…），电脑还开着，可以再点一次月亮按钮。"），电脑保持开机。界面上那个「正在关机」的卡片也**不会把界面锁死**：最多停留 8 秒就会给出一个"关掉这个提示"的按钮。
 
 ## 需要 goal 吗？
 
@@ -389,8 +391,8 @@ curl -X POST http://127.0.0.1:<端口>/__dsh_autorestart/recover \
   `<dsh 安装目录>/app.asar/dsh/node_modules/@deepseek-ai/schemastery/lib/index.mjs` 加载。健康路由的
   `schemastery` 字段只报告粗粒度来源 `bare` / `asar-fallback` / `unresolved`；schema 缺失时降级为"配置照常可用、
   只是没有可视化 schema"，并在日志里给出警告，**不会**因此让插件激活失败。）
-- 测试：**236 个插件用例全绿**（`plugins/dsh-autorestart/test/*.test.mjs`，其中 goal 解除 / 自述式恢复 /
-  `continuum_recover_now` / `/recover` 路由 / 优雅挂机（宿主侧状态机 + 前端纯函数）是新增的用例）。运行：
+- 测试：**242 个插件用例全绿**（`plugins/dsh-autorestart/test/*.test.mjs`，其中 goal 解除 / 自述式恢复 /
+  `continuum_recover_now` / `/recover` 路由 / 优雅关机（宿主侧状态机 + 前端纯函数）是新增的用例）。运行：
   `<bundled node> --test "plugins/dsh-autorestart/test/*.test.mjs"`
   （Node 24 把位置参数当 glob，务必加引号）。
   注意：仓库外的 `verification/adversarial.test.mjs` 里仍是"只注册一条/两条路由"的旧断言（插件现在注册
@@ -413,7 +415,7 @@ index.js             插件入口：apply / 事件跟踪 / 工具 / 健康路由
 lib/checkpoint.js    原子 JSON 检查点，容错读取，boot/restart/session/解除记录（含旧 parked 记录）变更函数
 lib/lifecycle.js     纯决策：bootPlan / restartDecision / selectGoalDisarms / continuationPrompt / describeState
 lib/restart.js       Windows 脱离重启（WMI 主、schtasks 兜底、dryRun、自定义命令）
-lib/sleep.js         优雅挂机：识别真宿主机（含 WSL）、关机命令、等待→倒数→关机的状态机
+lib/sleep.js         优雅关机：识别真宿主机（含 WSL）、关机命令、等待→倒数→关机的状态机
 locale/{en,zh}.json  Plugin Manager 显示用标题/描述
 icon.svg             插件图标
 LICENSE              MIT 许可（发布到插件市场需要）

@@ -675,6 +675,76 @@ function resolveProfileDir() {
   return resolveProfileDirDetailed().dir
 }
 
+/**
+ * The pre-restart snapshot: copy the profile into `<stateDir>/backups/<stamp>/`
+ * and clear the rollback report an older boot may have left behind.
+ *
+ * This is the ONE backup entry of the plugin. EVERY restart mode takes its
+ * snapshot through this function — the desktop app relaunch AND the custom
+ * restart command — so a hosted host that is restarted by a command is just as
+ * recoverable as the desktop app. The configuration files decide whether every
+ * bundle loads, so a snapshot is what makes a "the host does not come back"
+ * rollback possible at all.
+ *
+ * A failing backup never blocks the restart: the reason is logged and the
+ * caller continues without a rollback point.
+ *
+ * @param {{
+ *   config?: object,
+ *   stateDir?: string,
+ *   log?: { warn: Function },
+ *   profile?: { dir?: string|null, source?: string },
+ *   createBackup?: Function,
+ * }} [options]
+ * @returns {{ backup: object|null, profileDir: string|null, profile: { dir: string|null, source: string } }}
+ */
+export function takePreRestartSnapshot({
+  config = {},
+  stateDir = '',
+  log = console,
+  profile = null,
+  createBackup: createBackupFn = createBackup,
+} = {}) {
+  const info = profile && typeof profile === 'object'
+    ? { dir: profile.dir ?? null, source: profile.source ?? 'unknown' }
+    : { dir: null, source: 'unknown' }
+  const profileDir = typeof info.dir === 'string' && info.dir.trim() !== '' ? info.dir : null
+  // The snapshot is optional: the operator can turn it off entirely.
+  if (config.backupOnRestart !== true) return { backup: null, profileDir, profile: info }
+  if (profileDir === null) {
+    log.warn('no profile directory is known; skipping the pre-restart backup', { source: info.source })
+    return { backup: null, profileDir: null, profile: info }
+  }
+  let backup = null
+  try {
+    backup = createBackupFn({
+      profileDir,
+      backupsDir: backupsRoot(stateDir),
+      includePlugins: config.backupIncludePlugins !== false,
+      maxBackups: config.maxBackups,
+    })
+  } catch (error) {
+    // A backup that throws must not take the restart down with it.
+    backup = { ok: false, error: String(error) }
+  }
+  if (backup && backup.ok === true) {
+    log.warn('pre-restart backup written', {
+      dir: backup.dir,
+      bytes: backup.bytes,
+      includePlugins: backup.includePlugins,
+      pruned: backup.pruned,
+      profileDirSource: info.source,
+    })
+    // A report from an older boot must not be mistaken for this one.
+    clearRollbackReport(stateDir)
+  } else {
+    log.warn('the pre-restart backup failed; continuing without a rollback point', {
+      error: backup && backup.error ? backup.error : 'unknown error',
+    })
+  }
+  return { backup, profileDir, profile: info }
+}
+
 /** A logger that never throws and never requires a particular Cordis logger shape. */
 function createLogger(ctx) {
   const logger = ctx.logger
@@ -775,10 +845,34 @@ function findOwnEntry(editor) {
   return null
 }
 
-/** The plugin's whole runtime state. */
-function createRuntime(ctx, config, options = {}) {
+/**
+ * The plugin's whole runtime state.
+ *
+ * @param {object} ctx
+ * @param {object} config the normalized config
+ * @param {{
+ *   backupChoiceSource?: string,
+ *   env?: object,
+ *   snapshot?: Function,
+ *   runCommand?: Function,
+ *   scheduleDetached?: Function,
+ * }} [options] `env` replaces parts of the detected environment and the three
+ *   functions replace the side-effecting primitives of the restart path. They
+ *   exist so a restart can be exercised without spawning a process or touching
+ *   the real profile; production never passes them.
+ */
+export function createRuntime(ctx, config, options = {}) {
   const log = createLogger(ctx)
-  const env = detectEnvironment()
+  const env = {
+    ...detectEnvironment(),
+    ...(options.env && typeof options.env === 'object' ? options.env : {}),
+  }
+  // The ONE pre-restart snapshot entry: every restart mode uses it.
+  const snapshotFn = typeof options.snapshot === 'function' ? options.snapshot : takePreRestartSnapshot
+  const runCommandFn = typeof options.runCommand === 'function' ? options.runCommand : runCommandNow
+  const scheduleDetachedFn = typeof options.scheduleDetached === 'function'
+    ? options.scheduleDetached
+    : scheduleDetachedRestart
   const stateFile = resolveStateFile(config)
 
   const loaded = readState(stateFile, Date.now())
@@ -1425,7 +1519,32 @@ function createRuntime(ctx, config, options = {}) {
     persist()
     log.warn('executing graceful restart', { generation: state.generation, pid: process.pid })
     try {
-      if (config.restartMode === 'command' && config.restartCommand.trim() !== '') {
+      // How the host is restarted: the custom command, or the desktop app.
+      const useCustomCommand = config.restartMode === 'command' && config.restartCommand.trim() !== ''
+      const canRelaunchDesktop = Boolean(env.isDesktopApp && env.appExePath)
+      if (!useCustomCommand && !canRelaunchDesktop) {
+        // No restart method at all (the host is not the desktop app and there is
+        // no custom command): nothing is restarted, so nothing is snapshotted
+        // either — there is no rollback point for a restart that never happens.
+        log.warn('no restart method available (not the desktop app and restartCommand is empty); leaving the checkpoint in place')
+        rollbackRestart('no restart method available')
+        return
+      }
+
+      // ONE snapshot for EVERY restart mode: the profile is copied BEFORE
+      // anything is killed, no matter how the host is restarted. The desktop
+      // app relaunch and the custom restart command share this single entry, so
+      // a hosted host that is restarted by a command is just as recoverable as
+      // the desktop app.
+      const stateDir = path.dirname(stateFile)
+      const snapshot = snapshotFn({
+        config,
+        stateDir,
+        log,
+        profile: resolveProfileDirDetailed(),
+      })
+
+      if (useCustomCommand) {
         const command = buildCustomCommand({
           template: config.restartCommand,
           pid: process.pid,
@@ -1433,9 +1552,10 @@ function createRuntime(ctx, config, options = {}) {
           appExePath: env.appExePath || '',
         })
         log.warn('running custom restart command:', command)
-        const outcome = runCommandNow({ command })
+        // A failed snapshot never blocks the restart: the command runs anyway.
+        const outcome = runCommandFn({ command })
         if (outcome && outcome.ok === false) rollbackRestart(outcome.error || 'custom command failed')
-      } else if (env.isDesktopApp && env.appExePath) {
+      } else {
         const aborts = Number(state.restart.gateAborts) || 0
         const url = aborts > 20 ? null : restartGateUrl()
         if (aborts > 20) {
@@ -1443,37 +1563,9 @@ function createRuntime(ctx, config, options = {}) {
         } else if (url === null) {
           log.warn('the web server port is unknown; scheduling an UNGATED restart (the helper cannot re-check the idle gate)')
         }
-        // Snapshot the profile BEFORE anything is killed: the configuration files
-        // decide whether every bundle loads, so a snapshot is what makes a
-        // "the host does not come back" rollback possible at all.
-        const stateDir = path.dirname(stateFile)
-        const profileInfo = resolveProfileDirDetailed()
-        const profileDir = profileInfo.dir
-        let backup = null
-        if (config.backupOnRestart === true && profileDir !== null) {
-          backup = createBackup({
-            profileDir,
-            backupsDir: backupsRoot(stateDir),
-            includePlugins: config.backupIncludePlugins !== false,
-            maxBackups: config.maxBackups,
-          })
-          if (backup.ok === true) {
-            log.warn('pre-restart backup written', {
-              dir: backup.dir,
-              bytes: backup.bytes,
-              includePlugins: backup.includePlugins,
-              pruned: backup.pruned,
-              profileDirSource: profileInfo.source,
-            })
-            // A report from an older boot must not be mistaken for this one.
-            clearRollbackReport(stateDir)
-          } else {
-            log.warn('the pre-restart backup failed; continuing without a rollback point', { error: backup.error })
-          }
-        } else if (config.backupOnRestart === true) {
-          log.warn('no profile directory is known; skipping the pre-restart backup', { source: profileInfo.source })
-        }
-
+        // The snapshot was already taken above (the shared entry).
+        const backup = snapshot && snapshot.backup ? snapshot.backup : null
+        const profileDir = snapshot && snapshot.profileDir ? snapshot.profileDir : null
         const healthUrl = restartHealthUrl()
         const watchScriptPath = backup && backup.ok === true && healthUrl !== null && profileDir !== null
           ? path.join(stateDir, 'restart-' + state.generation + '-watch.ps1')
@@ -1490,7 +1582,7 @@ function createRuntime(ctx, config, options = {}) {
             // Only a crash log written after this point belongs to this restart.
             since: new Date().toISOString(),
           })
-        const result = scheduleDetachedRestart({
+        const result = scheduleDetachedFn({
           appExePath: env.appExePath,
           relaunchDelaySeconds: config.relaunchDelaySeconds,
           gateUrl: url,
@@ -1501,9 +1593,6 @@ function createRuntime(ctx, config, options = {}) {
         log.warn('scheduled detached restart:', result)
         if (!result || result.ok !== true) rollbackRestart((result && result.error) || 'detached restart refused')
         else armGateWatchdog()
-      } else {
-        log.warn('no restart method available (not the desktop app and restartCommand is empty); leaving the checkpoint in place')
-        rollbackRestart('no restart method available')
       }
     } catch (error) {
       rollbackRestart(String(error))

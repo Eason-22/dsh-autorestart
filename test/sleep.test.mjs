@@ -17,6 +17,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import vm from 'node:vm'
 
 import {
   createSleepController,
@@ -78,7 +79,7 @@ test('a WSL host shuts WINDOWS down, never the distribution', () => {
   assert.match(plan.label, /Windows/)
 })
 
-test('every WSL evidence is enough on its own', () => {
+test('the WSL environment markers are proof, the mounted drive is only a hint', () => {
   const byInterop = detectShutdownPlan({
     platform: 'linux',
     env: { WSL_INTEROP: '/run/WSL/8_interop' },
@@ -108,8 +109,11 @@ test('every WSL evidence is enough on its own', () => {
     exists: (file) => file === WSL_SHUTDOWN_EXE,
   })
   assert.equal(byMount.kind, 'wsl')
-  assert.equal(byMount.source, WSL_SHUTDOWN_EXE)
   assert.equal(byMount.command, WSL_SHUTDOWN_EXE)
+  // The mounted drive alone is only a HINT: the plan says so out loud.
+  assert.equal(byMount.suspect, true)
+  assert.match(byMount.source, /疑似 WSL/)
+  assert.match(byMount.label, /疑似 WSL/)
 })
 
 test('a real Linux host shuts itself down', () => {
@@ -228,10 +232,10 @@ test('an empty custom command leaves the detected plan alone', () => {
  * The execution.
  * ------------------------------------------------------------------ */
 
-test('a dry run reports the command and spawns nothing', () => {
+test('a dry run reports the command and spawns nothing', async () => {
   const calls = []
   const plan = detectShutdownPlan({ platform: 'win32', env: {} })
-  const result = runShutdown(plan, {
+  const result = await runShutdown(plan, {
     spawn: (...args) => { calls.push(args); return { pid: 1, unref() {} } },
     dryRun: true,
   })
@@ -242,11 +246,11 @@ test('a dry run reports the command and spawns nothing', () => {
   assert.equal(result.error, null)
 })
 
-test('the shutdown is spawned detached and unreferenced', () => {
+test('the shutdown is spawned detached and unreferenced', async () => {
   const calls = []
   let unrefed = 0
   const plan = detectShutdownPlan({ platform: 'win32', env: {} })
-  const result = runShutdown(plan, {
+  const result = await runShutdown(plan, {
     spawn: (command, args, options) => {
       calls.push({ command, args, options })
       return { pid: 4321, unref: () => { unrefed += 1 } }
@@ -261,10 +265,10 @@ test('the shutdown is spawned detached and unreferenced', () => {
   assert.equal(result.pid, 4321)
 })
 
-test('the gate is checked again right before the machine is closed', () => {
+test('the gate is checked again right before the machine is closed', async () => {
   const calls = []
   const plan = detectShutdownPlan({ platform: 'win32', env: {} })
-  const blocked = runShutdown(plan, {
+  const blocked = await runShutdown(plan, {
     spawn: (...args) => { calls.push(args); return { pid: 1, unref() {} } },
     gate: () => ({ allow: false, reason: 'conversation-active' }),
   })
@@ -272,7 +276,7 @@ test('the gate is checked again right before the machine is closed', () => {
   assert.equal(blocked.executed, false)
   assert.equal(blocked.error, 'gate-blocked')
 
-  const allowed = runShutdown(plan, {
+  const allowed = await runShutdown(plan, {
     spawn: (...args) => { calls.push(args); return { pid: 2, unref() {} } },
     gate: () => ({ allow: true }),
   })
@@ -280,9 +284,9 @@ test('the gate is checked again right before the machine is closed', () => {
   assert.equal(allowed.executed, true)
 })
 
-test('a plan without a command never runs anything', () => {
+test('a plan without a command never runs anything', async () => {
   const calls = []
-  const result = runShutdown(detectShutdownPlan({ platform: 'freebsd', env: {} }), {
+  const result = await runShutdown(detectShutdownPlan({ platform: 'freebsd', env: {} }), {
     spawn: (...args) => { calls.push(args); return { pid: 1, unref() {} } },
   })
   assert.equal(calls.length, 0)
@@ -504,10 +508,10 @@ test('a disposed controller never touches the host again', () => {
   assert.equal(harness.shutdowns.length, 0, 'the machine must stay alive')
 })
 
-test('a dry run reports the command it WOULD run', () => {
+test('a dry run reports the command it WOULD run', async () => {
   const plan = detectShutdownPlan({ platform: 'win32', env: {} })
   let spawned = 0
-  const result = runShutdown(plan, {
+  const result = await runShutdown(plan, {
     spawn: () => { spawned += 1; return { pid: 1, unref() {} } },
     dryRun: true,
   })
@@ -691,4 +695,395 @@ test('an unknown action is refused', async () => {
   await settle()
   assert.equal(res.statusCode, 400)
   assert.equal(JSON.parse(res.body).ok, false)
+})
+
+/* ------------------------------------------------------------------ *
+ * The new cases: a command that does not start, the fallbacks, the
+ * WSL hint, and the client half (the button, the overlay, the second
+ * install question).
+ * ------------------------------------------------------------------ */
+
+test('a command that does not start is a failure, not a success', async () => {
+  const plan = detectShutdownPlan({ platform: 'win32', env: {} })
+  const result = await runShutdown(plan, {
+    spawn: () => ({
+      on(event, handler) {
+        if (event === 'error') setTimeout(() => handler(new Error('spawn shutdown.exe ENOENT')), 0)
+      },
+      unref() {},
+    }),
+  })
+  assert.equal(result.executed, false, 'a command that did not start is never "executed"')
+  assert.equal(result.ok, false)
+  assert.match(result.error, /spawn-failed/)
+  assert.match(result.error, /ENOENT/)
+})
+
+test('the fallbacks are tried one after another when the main command does not start', async () => {
+  const attempts = []
+  const plan = detectShutdownPlan({
+    platform: 'linux',
+    env: { WSL_DISTRO_NAME: 'Ubuntu' },
+    ...plainLinux(),
+  })
+  const result = await runShutdown(plan, {
+    spawn: (command) => {
+      attempts.push(command)
+      const fails = attempts.length === 1
+      return {
+        pid: 99,
+        on(event, handler) {
+          if (event === 'error' && fails) setTimeout(() => handler(new Error(`spawn ${command} ENOENT`)), 0)
+          if (event === 'spawn' && !fails) setTimeout(() => handler(), 0)
+        },
+        unref() {},
+      }
+    },
+  })
+  assert.equal(attempts.length, 2, 'the main command and the first fallback are tried')
+  assert.equal(attempts[0], WSL_SHUTDOWN_EXE)
+  assert.equal(attempts[1], 'powershell.exe')
+  assert.equal(result.executed, true, 'the fallback that started counts')
+  assert.equal(result.command, 'powershell.exe', 'the command that really started is reported')
+})
+
+test('every command failing is reported with the last error', async () => {
+  const plan = detectShutdownPlan({
+    platform: 'linux',
+    env: { WSL_DISTRO_NAME: 'Ubuntu' },
+    ...plainLinux(),
+  })
+  const result = await runShutdown(plan, {
+    spawn: (command) => ({
+      on(event, handler) {
+        if (event === 'error') setTimeout(() => handler(new Error(`nope ${command}`)), 0)
+      },
+      unref() {},
+    }),
+  })
+  assert.equal(result.executed, false)
+  assert.equal(result.ok, false)
+  assert.match(result.error, /nope cmd\.exe/, 'the LAST error is the one that is reported')
+})
+
+test('the mounted Windows drive alone is only a hint, not proof', () => {
+  const plan = detectShutdownPlan({
+    platform: 'linux',
+    env: {},
+    readFile: () => LINUX_PROC_VERSION,
+    exists: (file) => file === WSL_SHUTDOWN_EXE,
+  })
+  assert.equal(plan.kind, 'wsl')
+  assert.equal(plan.suspect, true, 'the plan must say that it only guesses')
+  assert.match(plan.source, /疑似 WSL/)
+  assert.match(plan.label, /疑似 WSL/)
+})
+
+test('a machine that was not quiet long enough is not reported as busy', () => {
+  let clock = 1000
+  const controller = createSleepController({
+    now: () => clock,
+    busyAgents: () => [],
+    gate: () => ({ allow: false, reason: 'settling', blockedBy: [] }),
+    shutdown: () => { throw new Error('the machine must not be closed') },
+    setInterval: () => 0,
+    clearInterval: () => {},
+  })
+  controller.arm()
+  for (let step = 0; step < 10; step += 1) {
+    clock += 1000
+    controller.tick()
+  }
+  const status = controller.status()
+  assert.equal(status.phase, 'waiting')
+  assert.match(status.message, /还没安静够久/)
+  assert.doesNotMatch(status.message, /有人开始干活/, 'nobody started working: the copy must not say so')
+})
+
+test('a shutdown command that does not start leaves the machine idle, not "shutting down"', async () => {
+  const controller = createSleepController({
+    busyAgents: () => [],
+    shutdown: () => Promise.resolve({ ok: false, executed: false, error: 'spawn-failed: ENOENT' }),
+    setInterval: () => 0,
+    clearInterval: () => {},
+  })
+  controller.arm()
+  for (let step = 0; step < 10; step += 1) controller.tick()
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const status = controller.status()
+  assert.equal(status.phase, 'idle', 'the state must not keep saying "shutting down"')
+  assert.equal(status.armed, false)
+  assert.equal(status.lastRun.executed, false)
+  assert.match(status.lastRun.error, /spawn-failed/)
+  assert.match(status.message, /没跑起来/)
+})
+
+/* ------------------------------------------------------------------ *
+ * The client half.
+ * ------------------------------------------------------------------ */
+
+/** A fake browser localStorage. */
+function createStorage(initial = {}) {
+  const map = new Map(Object.entries(initial))
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => { map.set(key, String(value)) },
+    removeItem: (key) => { map.delete(key) },
+    clear: () => { map.clear() },
+    has: (key) => map.has(key),
+  }
+}
+
+/** Compare two dependency lists the way React does. */
+function sameDeps(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false
+  if (a.length !== b.length) return false
+  return a.every((value, index) => Object.is(value, b[index]))
+}
+
+/** A tiny React stand-in: enough for the classic client script. */
+function createReactHarness() {
+  const hooks = []
+  let cursor = 0
+  let pendingEffects = []
+  const slotAt = (index) => {
+    while (hooks.length <= index) {
+      hooks.push({ value: undefined, deps: undefined, cleanup: undefined, initialized: false, effectInit: false })
+    }
+    return hooks[index]
+  }
+  const React = {
+    createElement(type, props, ...children) {
+      const flat = []
+      const push = (child) => {
+        if (Array.isArray(child)) child.forEach(push)
+        else if (child !== null && child !== undefined && child !== false && child !== true) flat.push(child)
+      }
+      children.forEach(push)
+      return { type, props: props || {}, children: flat }
+    },
+    useState(initial) {
+      const index = cursor
+      cursor += 1
+      const slot = slotAt(index)
+      if (!slot.initialized) {
+        slot.initialized = true
+        slot.value = typeof initial === 'function' ? initial() : initial
+      }
+      const setState = (next) => {
+        const value = typeof next === 'function' ? next(slot.value) : next
+        if (Object.is(value, slot.value)) return
+        slot.value = value
+      }
+      return [slot.value, setState]
+    },
+    useRef(initial) {
+      const index = cursor
+      cursor += 1
+      return { current: initial }
+    },
+    useEffect(fn, deps) {
+      const index = cursor
+      cursor += 1
+      const slot = slotAt(index)
+      const changed = !slot.effectInit || !sameDeps(slot.deps, deps)
+      slot.deps = deps
+      slot.effectInit = true
+      if (changed) pendingEffects.push({ slot, fn })
+    },
+  }
+  const render = (Component, props) => {
+    cursor = 0
+    pendingEffects = []
+    const tree = Component(props)
+    const effects = pendingEffects
+    pendingEffects = []
+    for (const { slot, fn } of effects) {
+      if (typeof slot.cleanup === 'function') slot.cleanup()
+      slot.cleanup = fn()
+    }
+    return tree
+  }
+  return { React, render }
+}
+
+/** Every node of a rendered tree, depth first. */
+function walk(node, out = []) {
+  if (!node || typeof node !== 'object') return out
+  out.push(node)
+  for (const child of node.children || []) walk(child, out)
+  return out
+}
+
+/** The concatenated text of a rendered subtree. */
+function textOf(node) {
+  if (node === null || node === undefined) return ''
+  if (typeof node === 'string') return node
+  if (Array.isArray(node)) return node.map(textOf).join('')
+  return (node.children || []).map(textOf).join('')
+}
+
+/** Let the pending promises settle. */
+const settleClient = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+/**
+ * Load the classic client script in a sandbox and mount its surfaces.
+ *
+ * @param {{ status?: object, storage?: object, language?: string }} options
+ */
+function mountClient({ status = null, storage = createStorage(), language = 'zh' } = {}) {
+  const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  let definition = null
+  const fetches = []
+  const polls = []
+  const state = { status }
+  const sandbox = {
+    window: {
+      __ModuleLoader__: { load: (value) => { definition = value } },
+      localStorage: storage,
+      matchMedia: () => ({ matches: false }),
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    },
+    document: {
+      getElementById: () => null,
+      createElement: (tag) => ({ tag, id: '', textContent: '', parentNode: null, setAttribute: () => {}, appendChild: () => {} }),
+      head: { appendChild: (node) => { node.parentNode = sandbox.document.head; return node }, removeChild: () => {} },
+    },
+    fetch: (url, init) => {
+      fetches.push({ url: String(url), init })
+      const action = init && init.body ? JSON.parse(init.body).action : null
+      const body = String(url).includes('/sleep')
+        ? (action === 'cancel'
+          ? { ...(state.status || {}), phase: 'cancelled', armed: false }
+          : (state.status || {}))
+        : { ok: true, pendingRestart: false, choiceUrl: '/__dsh_autorestart/choice' }
+      return Promise.resolve({ ok: true, status: 200, json: async () => body })
+    },
+    console,
+    setTimeout,
+    clearTimeout,
+    // The shared poll: the callback is kept, so a test can deliver a new
+    // status without waiting for the real 2s tick.
+    setInterval: (fn) => { polls.push(fn); return polls.length },
+    clearInterval: () => {},
+    AbortController,
+  }
+  vm.createContext(sandbox)
+  vm.runInContext(source, sandbox, { filename: 'client.js' })
+
+  const harness = createReactHarness()
+  const module = definition.factory(() => harness.React)
+  const dictionaries = {}
+  const slots = new Map()
+  module.apply({
+    effect: (fn) => { fn(); return () => {} },
+    locale: {
+      register: (namespace, value) => { dictionaries[namespace] = value },
+      bind: (namespace) => (key) => {
+        const table = (dictionaries[namespace] || {})[language] || {}
+        return Object.prototype.hasOwnProperty.call(table, key) ? table[key] : key
+      },
+    },
+    slots: {
+      inject: (name, thunk) => { slots.set(name, thunk) },
+      register: (registration, Component) => ({ registration, Component }),
+    },
+  })
+  const componentOf = (name) => {
+    const thunk = slots.get(name)
+    assert.ok(thunk, `the slot ${name} must be registered`)
+    return thunk()
+  }
+  return {
+    fetches,
+    dictionaries,
+    setStatus: (next) => { state.status = next },
+    // Deliver the new status the way the shared poll would.
+    poll: async () => {
+      for (const fn of polls) fn()
+      await settleClient()
+    },
+    render: (name) => harness.render(componentOf(name).Component, {}),
+    // Render, let the shared poll deliver the status, render again.
+    settled: async (name) => {
+      harness.render(componentOf(name).Component, {})
+      await settleClient()
+      return harness.render(componentOf(name).Component, {})
+    },
+  }
+}
+
+test('the countdown overlay comes back after a cancellation', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'countdown', showSleepButton: true, remainingMs: 8000, blockers: [] },
+  })
+  const first = await mounted.settled('shell.overlay')
+  assert.ok(first, 'the countdown must be on screen')
+  const cancel = walk(first).find(
+    (node) => node.type === 'button' && textOf(node).includes('算了，别关'),
+  )
+  assert.ok(cancel, 'the countdown offers a cancel button')
+
+  cancel.props.onClick()
+  await settleClient()
+  const posts = mounted.fetches.filter((call) => String(call.url).includes('/sleep') && call.init)
+  assert.ok(posts.length >= 1, 'the cancel must reach the Host')
+  assert.deepEqual(JSON.parse(posts[posts.length - 1].init.body), { action: 'cancel' })
+  assert.equal(mounted.render('shell.overlay'), null, 'the overlay folds away once the Host confirms')
+
+  // The NEXT countdown must show the overlay again: a cancellation may never
+  // leave the layer folded away for good.
+  mounted.setStatus({ ok: true, phase: 'countdown', showSleepButton: true, remainingMs: 8000, blockers: [] })
+  await mounted.poll()
+  const again = await mounted.settled('shell.overlay')
+  assert.ok(again, 'the overlay must come back for the next countdown')
+  assert.ok(textOf(again).includes('8'), 'the big number must be on screen again')
+})
+
+test('the second install question is reachable on its own', async () => {
+  // The backup question was answered (on an earlier install), the standby
+  // button question was not: the second question must still be asked.
+  const storage = createStorage({ 'dsh-autorestart:backup-choice-v1': 'plugins' })
+  const mounted = mountClient({ storage })
+  const tree = await mounted.settled('conversation.input.dock')
+  assert.ok(tree, 'the panel must be rendered')
+  assert.equal(tree.props['data-dsh-autorestart-choice-step'], 'sleep', 'the second question must be the one on screen')
+  assert.ok(walk(tree).some((node) => node.props && node.props['data-sleep-choice']), 'the sleep options must be there')
+})
+
+test('the button waits for the first poll before it appears', async () => {
+  // The Host has not answered yet: the button must not flash.
+  const mounted = mountClient({ status: { ok: true, phase: 'idle' } })
+  assert.equal(mounted.render('conversation.header.leading'), null, 'an unknown answer renders nothing')
+  // The first poll has to arrive before the Host changes its mind.
+  await settleClient()
+
+  mounted.setStatus({ ok: true, phase: 'idle', showSleepButton: true })
+  await mounted.poll()
+  const button = await mounted.settled('conversation.header.leading')
+  assert.ok(button, 'the button appears once the Host answered')
+  assert.equal(button.type, 'button')
+
+  mounted.setStatus({ ok: true, phase: 'idle', showSleepButton: false })
+  await mounted.poll()
+  assert.equal(
+    await mounted.settled('conversation.header.leading'),
+    null,
+    'a hidden button leaves no placeholder',
+  )
+})
+
+test('the moon button is a toggle: an armed standby is cancelled by the same click', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'countdown', armed: true, showSleepButton: true, remainingMs: 8000, blockers: [] },
+  })
+  const button = await mounted.settled('conversation.header.leading')
+  assert.ok(button, 'the button must be rendered')
+  assert.equal(button.props['data-armed'], 'true')
+  button.props.onClick()
+  await settleClient()
+  const posts = mounted.fetches.filter((call) => String(call.url).includes('/sleep') && call.init)
+  assert.ok(posts.length >= 1)
+  assert.deepEqual(JSON.parse(posts[posts.length - 1].init.body), { action: 'cancel' }, 'an armed standby is cancelled')
 })

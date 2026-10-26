@@ -515,17 +515,29 @@ function mountBackupChoicePanel({ storage, fetches, language = 'zh' }) {
   }
 }
 
-test('the one-time prompt is rendered only while the localStorage key is missing', () => {
+test('the one-time prompt asks the two questions once each', () => {
   const unanswered = createStorage()
   const fetches = []
   const mounted = mountBackupChoicePanel({ storage: unanswered, fetches })
   const tree = mounted.render()
   assert.ok(tree, 'the prompt must be rendered when no answer was recorded')
   assert.equal(tree.props.role, 'status', 'the prompt must be a status panel')
+  assert.equal(tree.props['data-dsh-autorestart-choice-step'], 'backup', 'the first question comes first')
 
+  // The backup question was answered, but the standby-button question was
+  // NOT: the panel continues with the second question (it is asked once, on
+  // its own — an installation that answered the backup question before that
+  // question existed still has to be asked).
   const answered = createStorage({ [CHOICE_KEY]: 'plugins' })
   const second = mountBackupChoicePanel({ storage: answered, fetches: [] })
-  assert.equal(second.render(), null, 'the prompt must not be rendered once an answer was recorded')
+  const sleepStep = second.render()
+  assert.ok(sleepStep, 'the second question must still be reachable')
+  assert.equal(sleepStep.props['data-dsh-autorestart-choice-step'], 'sleep')
+
+  // Every question answered: the prompt is gone for good.
+  const both = createStorage({ [CHOICE_KEY]: 'plugins', 'dsh-autorestart:sleep-button-v1': 'keep' })
+  const third = mountBackupChoicePanel({ storage: both, fetches: [] })
+  assert.equal(third.render(), null, 'the prompt must not be rendered once every answer was recorded')
 })
 
 test('clicking an option records the answer, calls the Host and hides the prompt', () => {

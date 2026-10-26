@@ -19,6 +19,7 @@
   "sleep": {
     "button": {
       "label": "Stand by",
+      "cancel": "Cancel the standby",
       "aria": "Stand by: wait for every session to finish, then power off",
       "title": "Waits for every session to finish, counts down 10 seconds, then powers off",
       "busy": "Getting ready…"

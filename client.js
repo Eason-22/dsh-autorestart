@@ -143,6 +143,7 @@ const ZH = {
   // full-screen countdown, the waiting card and the second install
   // question.
   'sleep.button.label': '优雅挂机',
+  'sleep.button.cancel': '取消挂机',
   'sleep.button.aria': '优雅挂机：等所有会话收工后关机',
   'sleep.button.title': '等所有会话收工，再倒数 10 秒关机',
   'sleep.button.busy': '准备中…',
@@ -236,6 +237,7 @@ const EN = {
   // full-screen countdown, the waiting card and the second install
   // question.
   'sleep.button.label': 'Stand by',
+  'sleep.button.cancel': 'Cancel the standby',
   'sleep.button.aria': 'Stand by: wait for every session to finish, then power off',
   'sleep.button.title': 'Waits for every session to finish, counts down 10 seconds, then powers off',
   'sleep.button.busy': 'Getting ready…',
@@ -1259,7 +1261,14 @@ if (moduleLoader) moduleLoader.load({
       // 'backup' is the first question, 'sleep' the second one, 'persisting'
       // the short moment in between (the first answer is on its way to the
       // Host) and 'done' when there is nothing left to ask.
-      const [step, setStep] = useState(backupChoicePending() ? 'backup' : 'done')
+      //
+      // The two questions are judged SEPARATELY: an installation that already
+      // answered the backup question still has to be asked about the standby
+      // button (that is how the arrow sketch ever reaches a user who
+      // installed the plugin before this question existed).
+      const [step, setStep] = useState(
+        backupChoicePending() ? 'backup' : (sleepChoicePending() ? 'sleep' : 'done'),
+      )
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
       const t = translate ?? ((name) => name)
@@ -1648,8 +1657,45 @@ if (moduleLoader) moduleLoader.load({
             sleepStore.controller.abort()
             sleepStore.controller = null
           }
+          // The last sleep surface left: its stylesheet goes away with it, so
+          // the document does not keep the CSS of a plugin that is gone.
+          removeSleepStyle()
         }
       }
+    }
+
+    /**
+     * Ask the Host to arm or to cancel the standby.
+     *
+     * The answer carries the new status, so the surfaces do not have to wait
+     * for the next poll. A refused request throws, and the caller shows the
+     * reason.
+     *
+     * @param {'arm'|'cancel'} action
+     * @returns {Promise<object>} the new sleep status
+     */
+    async function requestSleep(action) {
+      const response = await fetch(DEFAULT_SLEEP_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      let body = null
+      try {
+        body = await response.json()
+      } catch {
+        body = null
+      }
+      if (!response.ok) {
+        const message = body && typeof body === 'object'
+          ? (body.error || body.message || '')
+          : ''
+        const failure = new Error(message || String(response.status))
+        failure.sleepStatus = response.status
+        throw failure
+      }
+      if (body && typeof body === 'object') setSleepInfo(body)
+      return body
     }
 
     /** The current sleep status, re-rendered whenever the shared poll lands. */
@@ -1738,6 +1784,10 @@ if (moduleLoader) moduleLoader.load({
       '  outline-offset:2px;',
       '}',
       '.dsh-autorestart-sleep-button:disabled{cursor:default;opacity:.65;}',
+      '.dsh-autorestart-sleep-button--armed{',
+      '  color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '}',
       '.dsh-autorestart-sleep-button__icon{width:16px;height:16px;flex:none;display:block;}',
       '.dsh-autorestart-sleep-button__spinner{',
       '  width:12px;',
@@ -1791,6 +1841,12 @@ if (moduleLoader) moduleLoader.load({
       '  font-size:13px;',
       '  line-height:1.5;',
       '  color:var(--dsw-alias-label-secondary);',
+      '}',
+      '.dsh-autorestart-sleep-overlay__error{',
+      '  margin:10px 0 0;',
+      '  font-size:12.5px;',
+      '  line-height:1.5;',
+      '  color:var(--dsw-alias-danger,#d14343);',
       '}',
       '.dsh-autorestart-sleep-overlay__cancel{',
       '  margin-top:14px;',
@@ -1955,6 +2011,23 @@ if (moduleLoader) moduleLoader.load({
       }
     }
 
+    /**
+     * Remove the sleep styles again.
+     *
+     * The stylesheet belongs to the sleep surfaces: when the last one leaves
+     * (the plugin is unloaded, the conversation is closed), the CSS goes with
+     * it instead of staying in the document forever.
+     */
+    function removeSleepStyle() {
+      if (typeof document === 'undefined') return
+      try {
+        const node = document.getElementById(SLEEP_STYLE_ID)
+        if (node && node.parentNode) node.parentNode.removeChild(node)
+      } catch {
+        // Nothing to clean up.
+      }
+    }
+
     /** The moon of the header button: an inline SVG, no external image. */
     function moonIcon() {
       return h(
@@ -1987,12 +2060,25 @@ if (moduleLoader) moduleLoader.load({
       const [error, setError] = useState('')
       const t = translate ?? ((name) => name)
 
-      // The Host's truth wins over the browser's record.
+      // The Host's truth decides, and an UNKNOWN truth decides NOTHING: before
+      // the first poll the button renders nothing at all, so a host that has
+      // the button switched off never sees it flash for two seconds.
       const remoteKnown = Boolean(
         status && typeof status === 'object' && typeof status.showSleepButton === 'boolean',
       )
-      const visible = shouldShowSleepButton(status)
-        && (remoteKnown ? true : localSleepButtonVisible())
+      const visible = remoteKnown && shouldShowSleepButton(status)
+
+      // The button is a TOGGLE: a click arms the standby, and a click while
+      // the standby is armed cancels it. That way there is ALWAYS a way out,
+      // even when the countdown screen is not (or no longer) on top.
+      const armed = Boolean(
+        status && typeof status === 'object' && (
+          status.armed === true
+          || status.phase === 'waiting'
+          || status.phase === 'countdown'
+          || status.phase === 'shutting-down'
+        ),
+      )
 
       /**
        * Ask the Host to stand by: it waits for every session to finish and
@@ -2003,25 +2089,21 @@ if (moduleLoader) moduleLoader.load({
         setArming(true)
         setError('')
         try {
-          const response = await fetch(DEFAULT_SLEEP_URL, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ action: 'arm' }),
-          })
-          let body = null
-          try {
-            body = await response.json()
-          } catch {
-            body = null
-          }
-          if (!response.ok) {
-            const message = body && typeof body === 'object'
-              ? (body.error || body.message || '')
-              : ''
-            setError(fill(t('sleep.error'), { message: message || String(response.status) }))
-            return
-          }
-          if (body && typeof body === 'object') setSleepInfo(body)
+          await requestSleep('arm')
+        } catch (failure) {
+          setError(fill(t('sleep.error'), { message: describeError(failure) }))
+        } finally {
+          setArming(false)
+        }
+      }
+
+      /** Take the standby back: the countdown stops and the machine stays on. */
+      const cancel = async () => {
+        if (arming) return
+        setArming(true)
+        setError('')
+        try {
+          await requestSleep('cancel')
         } catch (failure) {
           setError(fill(t('sleep.error'), { message: describeError(failure) }))
         } finally {
@@ -2036,17 +2118,21 @@ if (moduleLoader) moduleLoader.load({
         'button',
         {
           type: 'button',
-          className: 'dsh-autorestart-sleep-button',
-          'aria-label': t('sleep.button.aria'),
-          title: error || t('sleep.button.title'),
+          className: 'dsh-autorestart-sleep-button'
+            + (armed ? ' dsh-autorestart-sleep-button--armed' : ''),
+          'aria-label': armed ? t('sleep.button.cancel') : t('sleep.button.aria'),
+          title: error || (armed ? t('sleep.button.cancel') : t('sleep.button.title')),
           disabled: arming,
-          onClick: arm,
+          onClick: armed ? cancel : arm,
           'data-dsh-autorestart-sleep-button': 'true',
+          'data-armed': armed ? 'true' : 'false',
         },
         arming
           ? h('span', { className: 'dsh-autorestart-sleep-button__spinner', 'aria-hidden': 'true' })
           : moonIcon(),
-        h('span', null, arming ? t('sleep.button.busy') : t('sleep.button.label')),
+        h('span', null, arming
+          ? t('sleep.button.busy')
+          : (armed ? t('sleep.button.cancel') : t('sleep.button.label'))),
       )
     }
 
@@ -2217,6 +2303,13 @@ if (moduleLoader) moduleLoader.load({
         return () => clearInterval(timer)
       }, [phase])
 
+      // A NEW countdown always shows the overlay again: a cancellation that
+      // happened earlier must never leave the layer folded away, or the next
+      // countdown would run without the user being able to see (or stop) it.
+      useEffect(() => {
+        if (phase === 'countdown') setHidden(false)
+      }, [phase])
+
       // The remaining time is measured from the moment the status arrived,
       // so the number keeps ticking between two polls.
       const remainingMs = status && typeof status.remainingMs === 'number' && Number.isFinite(status.remainingMs)
@@ -2226,48 +2319,36 @@ if (moduleLoader) moduleLoader.load({
       const seconds = formatRemainingMs(Math.max(0, remainingMs - elapsed))
 
       /**
-       * Cancel the standby: the request goes out at once and the overlay
-       * folds away locally, so the user is never stuck behind it.
+       * Cancel the standby.
+       *
+       * The layer folds away only when the Host CONFIRMS the cancellation
+       * (`phase === 'cancelled'`): a request that fails leaves the countdown
+       * on screen, so the user can simply try again instead of being stuck
+       * behind a machine that is still counting down.
        */
       const cancel = async () => {
         if (busy) return
         setBusy(true)
         setError('')
-        setHidden(true)
         try {
-          const response = await fetch(DEFAULT_SLEEP_URL, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ action: 'cancel' }),
-          })
-          let body = null
-          try {
-            body = await response.json()
-          } catch {
-            body = null
-          }
-          if (!response.ok) {
-            const message = body && typeof body === 'object'
-              ? (body.error || body.message || '')
-              : ''
-            setError(fill(t('sleep.error'), { message: message || String(response.status) }))
-            return
-          }
-          if (body && typeof body === 'object') setSleepInfo(body)
+          const body = await requestSleep('cancel')
+          if (body && typeof body === 'object' && body.phase === 'cancelled') setHidden(true)
         } catch (failure) {
+          // The countdown keeps running: the button can be pressed again.
+          setHidden(false)
           setError(fill(t('sleep.error'), { message: describeError(failure) }))
         } finally {
           setBusy(false)
         }
       }
 
-      // A request that failed still says something: the overlay is gone,
-      // but the reason stays on screen.
-      if (hidden) {
-        if (error === '') return null
-        ensureSleepStyle()
-        return h('div', { className: 'dsh-autorestart-sleep-toast', role: 'alert' }, error)
-      }
+      // The line that tells the user WHY the last request failed.
+      const errorLine = () => (error === ''
+        ? null
+        : h('p', { className: 'dsh-autorestart-sleep-overlay__error', role: 'alert' }, error))
+
+      // The Host confirmed the cancellation: the layer is gone.
+      if (hidden) return null
 
       if (phase === 'waiting') {
         ensureSleepStyle()
@@ -2297,7 +2378,10 @@ if (moduleLoader) moduleLoader.load({
                 }),
               )),
             ),
-          h('p', { className: 'dsh-autorestart-sleep-waiting__count' }, fill(t('sleep.waiting.count'), { n: blockers.length })),
+          h('p', { className: 'dsh-autorestart-sleep-waiting__count' }, blockers.length === 0
+            ? null
+            : fill(t('sleep.waiting.count'), { n: blockers.length })),
+          errorLine(),
           h(
             'button',
             {
@@ -2348,6 +2432,7 @@ if (moduleLoader) moduleLoader.load({
             t('sleep.countdown.cancel'),
           ),
           h('p', { className: 'dsh-autorestart-sleep-overlay__hint' }, t('sleep.countdown.hint')),
+          errorLine(),
         )
       }
 

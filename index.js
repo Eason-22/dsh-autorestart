@@ -3467,35 +3467,115 @@ function sleepDryRun() {
 }
 
 /**
+ * The gate of the graceful sleep: the ONE question is "is any conversation
+ * still working?".
+ *
+ * It is deliberately NOT the restart gate: that one also demands a quiet
+ * settle window, and a settle window longer than the countdown would push the
+ * power-off back by whole countdown periods (every restart of the countdown
+ * would also claim that somebody started working again, which is not what
+ * happened). The sleep feature counts down on screen itself, so it only needs
+ * the busy check — and it keeps `settleMs` out of the picture entirely.
+ *
+ * The restart gate itself is untouched: the restart feature keeps its quiet
+ * window exactly as it was.
+ *
+ * @param {object} runtime
+ * @returns {{ allow: boolean, reason: 'busy'|'quiet', blockedBy: any[] }}
+ */
+function sleepGate(runtime) {
+  let busy = []
+  try {
+    busy = runtime.busyAgents()
+  } catch {
+    busy = []
+  }
+  const list = Array.isArray(busy) ? busy : []
+  if (list.length > 0) return { allow: false, reason: 'busy', blockedBy: list }
+  return { allow: true, reason: 'quiet', blockedBy: [] }
+}
+
+/**
+ * The FINAL plan of the graceful sleep: what will really be executed, and how
+ * the host describes itself in the status JSON.
+ *
+ * Two rules:
+ *   1. `supported` follows the plan that will be executed, NOT the detected
+ *      one: a machine whose platform could not be detected is still perfectly
+ *      usable when the operator configured a command of their own.
+ *   2. the reported `kind`/`label` belong to that same plan, so the status
+ *      never says "this machine has no reliable way to switch off" while a
+ *      command is about to run.
+ *
+ * @param {object} plan the detected plan
+ * @param {object} config
+ * @returns {object} the effective plan
+ */
+function effectiveSleepPlan(plan, config) {
+  const invocation = planInvocation(plan, {
+    sleepCommand: config.sleepCommand,
+    platform: plan.platform,
+  })
+  const custom = invocation.source === 'sleepCommand'
+  const detectedKind = typeof plan.kind === 'string' ? plan.kind : 'unsupported'
+  const detected = detectedKind !== 'unsupported'
+  const command = typeof invocation.command === 'string' && invocation.command !== '' ? invocation.command : null
+  const label = custom
+    ? (detected ? `执行你指定的关机命令（${plan.label}）` : '执行你指定的关机命令')
+    : plan.label
+  const kind = custom
+    // A custom command on a platform we could not classify: the machine is
+    // real, the mechanism is the operator's own — it is NOT "unsupported".
+    ? (detected ? detectedKind : 'custom')
+    : detectedKind
+  return {
+    ...invocation,
+    kind,
+    label,
+    // The short phrase the countdown message talks about.
+    shortLabel: custom ? '执行你指定的关机命令' : plan.label,
+    // The final plan decides whether the feature may run at all.
+    supported: command !== null,
+  }
+}
+
+/**
  * Build the graceful-sleep service: the detected host plan plus the state
  * machine that waits for the conversations, counts down and switches the
  * machine off.
  *
- * The gate is NOT re-implemented here: the sleep feature asks the very same
- * `busyAgents()` and `gate()` the restart feature uses, so both agree on what
- * "every conversation is idle" means.
+ * The busy check is the runtime's own `busyAgents()`, so the sleep feature and
+ * the restart feature agree on what "every conversation is idle" means. The
+ * gate itself is the sleep-specific one (no settle window): the sleep feature
+ * counts down on screen itself.
+ *
+ * `options.sleepNow` and `options.sleepSpawn` replace the clock and the
+ * process spawner, so the whole flow can be driven without waiting and
+ * without ever touching the machine. Production never passes them.
  *
  * @param {object} ctx
  * @param {object} runtime
  * @param {object} config
+ * @param {{ sleepNow?: () => number, sleepSpawn?: Function }} [options]
  * @returns {{ plan: object, controller: object, invocation: () => object }}
  */
-function createSleepService(ctx, runtime, config) {
+function createSleepService(ctx, runtime, config, options = {}) {
   const plan = detectShutdownPlan({ platform: process.platform, env: process.env })
-  // The configured command (if any) replaces the detected one; the plan keeps
-  // the host kind, so the UI still shows WHICH machine is going to be closed.
-  const invocation = () => planInvocation(plan, {
-    sleepCommand: config.sleepCommand,
-    platform: plan.platform,
-  })
+  // The configured command (if any) replaces the detected one; the final plan
+  // is what decides whether the feature may run and what the UI is told.
+  const invocation = () => effectiveSleepPlan(plan, config)
+  const gate = () => sleepGate(runtime)
+  const final = invocation()
+  const now = typeof options.sleepNow === 'function' ? options.sleepNow : () => Date.now()
+  const spawn = typeof options.sleepSpawn === 'function' ? options.sleepSpawn : undefined
   const controller = createSleepController({
-    now: () => Date.now(),
+    now,
     busyAgents: () => runtime.busyAgents(),
-    gate: () => runtime.gate(),
+    gate,
     titleOf: (sessionId) => runtime.sessionTitle(sessionId),
     countdownSeconds: config.sleepCountdownSeconds,
-    hostLabel: plan.label,
-    supported: plan.kind !== 'unsupported',
+    hostLabel: final.shortLabel,
+    supported: final.supported,
     log: runtime.log,
     // The timer belongs to the plugin: `ctx.interval` is disposed with it.
     setInterval: (fn, ms) => ctx.interval(fn, ms),
@@ -3505,10 +3585,12 @@ function createSleepService(ctx, runtime, config) {
       } catch {}
     },
     shutdown: () => runShutdown(invocation(), {
+      spawn,
       dryRun: sleepDryRun(),
       log: runtime.log,
-      // The gate is checked ONE more time right before the machine is closed.
-      gate: () => runtime.gate(),
+      // The gate is checked ONE more time right before the machine is closed —
+      // with the SAME sleep gate (a busy conversation still stops it).
+      gate,
     }),
   })
   return { plan, controller, invocation }
@@ -3966,8 +4048,14 @@ function trackAgents(ctx, runtime, config) {
  * Plugin entry point.
  * @param ctx - Cordis plugin context.
  * @param rawConfig - the loader row config (merged over the built-in defaults).
+ * @param {{
+ *   sleepNow?: () => number,
+ *   sleepSpawn?: Function,
+ * }} [options] - the injectable primitives of the graceful sleep: they replace
+ *   the clock and the process spawner, so the whole flow can be driven without
+ *   waiting and without ever touching the machine. Production never passes them.
  */
-export function apply(ctx, rawConfig) {
+export function apply(ctx, rawConfig, options = {}) {
   const config = normalizeConfig(rawConfig)
   // The one-time install choice lives in the profile row config (the single
   // source of truth). Only when the row does not set the key at all does the
@@ -3983,7 +4071,7 @@ export function apply(ctx, rawConfig) {
   const log = runtime.log
   // The graceful sleep: the host plan and the state machine that waits for the
   // conversations, counts down and switches the machine off.
-  const sleep = createSleepService(ctx, runtime, config)
+  const sleep = createSleepService(ctx, runtime, config, options)
 
   log.info('activated', {
     stateFile: runtime.stateFile,
@@ -3997,7 +4085,10 @@ export function apply(ctx, rawConfig) {
     backupChoiceSource: choice.source,
     showSleepButton: config.showSleepButton,
     sleepChoiceSource: sleepChoice.source,
-    sleepHost: sleep.plan.kind,
+    // The FINAL plan: what the sleep feature would really do.
+    sleepHost: sleep.invocation().kind,
+    sleepSource: sleep.invocation().source,
+    sleepSupported: sleep.invocation().supported,
   })
   if (Config === undefined) {
     log.warn('Config schema is unavailable in this build (schemastery could not be loaded); configuration still works through cordis.patch.yml and the built-in defaults')

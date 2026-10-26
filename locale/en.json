@@ -15,5 +15,57 @@
     "pickSecondary": "Configuration only",
     "recommended": "Recommended",
     "dismissAria": "Close this one-time prompt"
+  },
+  "sleep": {
+    "button": {
+      "label": "Stand by",
+      "aria": "Stand by: wait for every session to finish, then power off",
+      "title": "Waits for every session to finish, counts down 10 seconds, then powers off",
+      "busy": "Getting ready…"
+    },
+    "error": "Could not reach the sleep service: {message}",
+    "countdown": {
+      "caption": {
+        "10": "The whale is casting her net",
+        "9": "Your backup is already packed",
+        "8": "One unfinished thought, one more",
+        "7": "Everyone is quieting down",
+        "6": "One last lap around the room",
+        "5": "The sea is going dark",
+        "4": "One light at a time goes out",
+        "3": "Three seconds, really",
+        "2": "Time for one last goodbye",
+        "1": "Good night 🌙",
+        "default": "Good night 🌙"
+      },
+      "cancel": "Never mind, keep it on",
+      "goodNight": "Good night 🌙",
+      "hint": "Powering off in 10 seconds — pick \"Never mind, keep it on\" to stay."
+    },
+    "waiting": {
+      "title": "Waiting for everyone to finish",
+      "body": "Once these sessions are done, the machine powers off:",
+      "count": "{n} session(s) still working",
+      "blocker": "· {title}",
+      "none": "(checking who is still busy)",
+      "cancel": "Keep it on"
+    },
+    "shuttingDown": {
+      "title": "Good night 🌙",
+      "body": "Powering off — the whale turned off the lights."
+    },
+    "choice": {
+      "title": "Keep the graceful standby button?",
+      "body": "It lives in the top-left corner of the workspace: one click waits for every session to finish, counts down 10 seconds and powers the machine off.",
+      "keep": "Keep it (recommended)",
+      "keepCta": "Keep it",
+      "keepHint": "One moon button in the top-left corner: one click to stand by.",
+      "hide": "No button, thanks",
+      "hideCta": "No button",
+      "hideHint": "The interface stays as it is; turn it on again in the settings whenever you want it.",
+      "footnote": "You can change this later in Settings → Plugins → dsh-autorestart",
+      "diagramLabel": "The button sits in the top-left corner of the workspace",
+      "error": "Could not save the choice: {message}"
+    }
   }
 }

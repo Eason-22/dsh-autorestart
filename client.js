@@ -44,8 +44,381 @@
  *
  * Everything here is side-effect free until `apply(ctx)` runs: no timers, no
  * fetches, no DOM access at module scope.
+ *
+ * The graceful-standby ("sleep") half adds three more surfaces:
+ *
+ *   - the standby BUTTON in the conversation header (`conversation.header.leading`
+ *     slot): a moon icon and the label "优雅挂机". It renders NOTHING at all
+ *     when the Host says the button must not be shown, so no empty space is
+ *     left behind;
+ *   - the COUNTDOWN OVERLAY in the shell's overlay layer (`shell.overlay`
+ *     slot): a full-screen frosted surface with a very big number, a hand
+ *     drawn whale (inline SVG + CSS keyframes, no image and no other plugin)
+ *     and one funny line per second — plus a "算了，别关" button that cancels
+ *     the standby. While the sessions are still working, a small corner card
+ *     takes the place of the full screen, so nothing is covered up;
+ *   - the SECOND install question: the first install asks about the backup
+ *     scope, and only after that answer was persisted does it ask whether the
+ *     standby button should stay.
+ *
+ * All of them read the Host's `GET/POST {prefix}/sleep` route and share ONE
+ * poller with the same 2s cadence as the pending-restart store.
  */
-window.__ModuleLoader__.load({
+
+/* ------------------------------------------------------------------ *
+ * The pure half of the graceful-standby ("sleep") feature.
+ *
+ * This file is a CLASSIC script: the client module loader evaluates a
+ * plugin bundle as a same-origin external classic script, so the ESM
+ * `export` keyword is NOT available here. The four pure helpers are
+ * therefore published in the two places a test can reach them:
+ *
+ *   1. as NAMED properties of this module's exports — the client module
+ *      system materializes `factory(require) -> exports`, so the exports
+ *      object carries `pickSleepCaption`, `shouldShowSleepButton`,
+ *      `buildChoiceBody` and `formatRemainingMs`;
+ *   2. on the global namespace `globalThis.__dshAutorestartClient`, which
+ *      exists as soon as this file is evaluated (no factory call needed).
+ *
+ * The copy lives in the two dictionaries below and is mirrored verbatim in
+ * locale/zh.json + locale/en.json (same words, same keys).
+ * ------------------------------------------------------------------ */
+
+/**
+ * The browser-side record of the "keep the sleep button?" answer.
+ *
+ * The question is asked exactly once (on the first install), so the key is
+ * written as soon as the user answers — or closes the prompt.
+ */
+const SLEEP_BUTTON_KEY = 'dsh-autorestart:sleep-button-v1'
+
+const ZH = {
+  label: '待重启',
+  busyPrefix: ' · 被 ',
+  busySuffix: ' 个会话占用',
+  idle: ' · 空闲后自动重启',
+  goalActive: ' · 被某个会话自动续跑的 goal 占着',
+  goalExhausted: ' · 某个会话的 goal 轮次额度已用完，无法续跑',
+  parkedGoals: ' · 已停泊 {n} 个 goal，重启后自动继续',
+  parkButton: '停泊并重启',
+  parkButtonAria: '停泊该会话的 goal，并立即请求重启',
+  parkBusy: '停泊中…',
+  parkError: '停泊失败：{message}',
+  tooltip: '等待其他会话空闲后自动重启；重启后会自动继续本会话进度',
+  tooltipBusy: '等待其他会话空闲后自动重启（计数含“排队但还没开始”的任务）；重启后本会话会自动继续进度',
+  tooltipWithError: '等待其他会话空闲后自动重启；重启后本会话会自动继续进度。{message}',
+  dotAria: '待重启',
+  panelHeading: '待重启',
+  panelStateBusy: '等待其他会话空闲后重启',
+  panelStateIdle: '等待空闲窗口后重启',
+  panelStateGoalActive: '等待其他会话停泊它自动续跑的 goal',
+  panelStateGoalExhausted: '等待其他会话的 goal（轮次额度已用完）',
+  panelBlockedTitle: '占用会话：{title}',
+  panelBlockedGeneric: '有一个会话正在运行',
+  panelGoalActiveLine: '占用会话「{title}」：goal 正在自动续跑（goal-active）',
+  panelGoalExhaustedLine: '占用会话「{title}」：goal 轮次额度已用完，无法继续（goal-exhausted）',
+  panelParkedTitle: '已停泊的 goal（重启后自动继续）：',
+  panelParkedGoal: '会话 {session} · {goal}',
+  panelWaiting: '已等待 {duration}',
+  panelResume: '重启后本会话会自动继续进度',
+  durationSeconds: '{n} 秒',
+  durationMinutes: '{n} 分 {m} 秒',
+  durationHours: '{n} 小时 {m} 分',
+  // The one-time install prompt (the choice is asked exactly once).
+  // "Backup" is the verb and BOTH options share the "configuration" base:
+  // the plugins are an ADDITION to the configuration, never a rival of it.
+  backupChoiceTitle: '重启前自动备份：要不要把已安装的插件也一起备份？',
+  backupChoiceBody: '每次重启前会快照当前配置，万一重启后起不来就能自动回退。',
+  backupChoiceWithPlugins: '配置 + 已安装插件',
+  backupChoiceWithPluginsHint: '多约 3 秒、约 117 MB；插件把启动搞坏时也能回退。',
+  backupChoiceConfigOnly: '只备份配置',
+  backupChoiceConfigOnlyHint: '瞬间完成、约 66 KB；插件问题无法回退，需要手动重装。',
+  backupChoiceFootnote: '以后可在 设置 → 插件 → dsh-autorestart 修改',
+  backupChoicePickPrimary: '用这个',
+  backupChoicePickSecondary: '只备份配置',
+  backupChoiceRecommended: '推荐',
+  backupChoiceDismissAria: '关闭这个一次性提示',
+  backupChoiceError: '保存失败：{message}',
+  // The graceful-standby (sleep) surfaces: the button in the header, the
+  // full-screen countdown, the waiting card and the second install
+  // question.
+  'sleep.button.label': '优雅挂机',
+  'sleep.button.aria': '优雅挂机：等所有会话收工后关机',
+  'sleep.button.title': '等所有会话收工，再倒数 10 秒关机',
+  'sleep.button.busy': '准备中…',
+  'sleep.error': '没能联系上关机服务：{message}',
+  'sleep.countdown.caption.10': '鲸鱼娘开始收网了',
+  'sleep.countdown.caption.9': '备份已经替你打包好',
+  'sleep.countdown.caption.8': '没说完的话，再讲一句',
+  'sleep.countdown.caption.7': '大家都在慢慢安静下来',
+  'sleep.countdown.caption.6': '最后再巡一圈房间',
+  'sleep.countdown.caption.5': '海面开始变暗了',
+  'sleep.countdown.caption.4': '灯一盏一盏熄了',
+  'sleep.countdown.caption.3': '真的只剩三秒啦',
+  'sleep.countdown.caption.2': '还来得及说声再见',
+  'sleep.countdown.caption.1': '晚安 🌙',
+  'sleep.countdown.caption.default': '晚安 🌙',
+  'sleep.countdown.cancel': '算了，别关',
+  'sleep.countdown.goodNight': '晚安 🌙',
+  'sleep.countdown.hint': '10 秒后关机，点「算了，别关」可以留下。',
+  'sleep.waiting.title': '还在等大家收工',
+  'sleep.waiting.body': '等这些会话忙完，就轮到关机啦：',
+  'sleep.waiting.count': '还有 {n} 个会话在干活',
+  'sleep.waiting.blocker': '· {title}',
+  'sleep.waiting.none': '（正在确认还有谁在忙）',
+  'sleep.waiting.cancel': '不关了',
+  'sleep.shuttingDown.title': '晚安 🌙',
+  'sleep.shuttingDown.body': '正在关机，鲸鱼娘把灯关好了。',
+  'sleep.choice.title': '优雅挂机按钮要不要留着？',
+  'sleep.choice.body': '它待在工作区左上方：点一下就等所有会话收工，倒计时 10 秒后关机。',
+  'sleep.choice.keep': '留着（推荐）',
+  'sleep.choice.keepCta': '留着',
+  'sleep.choice.keepHint': '左上方多一个月亮按钮，一键收工关机。',
+  'sleep.choice.hide': '不要这个按钮',
+  'sleep.choice.hideCta': '不要',
+  'sleep.choice.hideHint': '界面保持原样；以后想用，再从设置里打开。',
+  'sleep.choice.footnote': '以后可在 设置 → 插件 → dsh-autorestart 修改',
+  'sleep.choice.diagramLabel': '按钮出现在工作区的左上角',
+  'sleep.choice.error': '保存失败：{message}',
+}
+
+const EN = {
+  label: 'Pending restart',
+  busyPrefix: ' · blocked by ',
+  busySuffix: ' session(s)',
+  idle: ' · restarts once idle',
+  goalActive: ' · held by a self-continuing goal',
+  goalExhausted: ' · a goal ran out of rounds',
+  parkedGoals: ' · {n} goal(s) parked, they continue after the restart',
+  parkButton: 'Park & restart',
+  parkButtonAria: 'Park that session goal and request the restart now',
+  parkBusy: 'Parking…',
+  parkError: 'Park failed: {message}',
+  tooltip:
+    'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart.',
+  tooltipBusy:
+    'Waits for the other sessions to become idle, then restarts automatically (the count includes work that is queued but not started yet); this session resumes its progress after the restart.',
+  tooltipWithError:
+    'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart. {message}',
+  dotAria: 'Pending restart',
+  panelHeading: 'Pending restart',
+  panelStateBusy: 'Waiting for the other sessions to become idle',
+  panelStateIdle: 'Waiting for the idle window',
+  panelStateGoalActive: 'Waiting for the other sessions to park their self-continuing goal',
+  panelStateGoalExhausted: 'Waiting for the other sessions\' goal (its round budget is used up)',
+  panelBlockedTitle: 'Blocking session: {title}',
+  panelBlockedGeneric: 'One session is running',
+  panelGoalActiveLine: 'Blocking session "{title}": the goal keeps driving rounds by itself (goal-active)',
+  panelGoalExhaustedLine: 'Blocking session "{title}": the goal ran out of rounds and cannot continue (goal-exhausted)',
+  panelParkedTitle: 'Parked goals (they continue after the restart):',
+  panelParkedGoal: 'session {session} · {goal}',
+  panelWaiting: 'Waiting for {duration}',
+  panelResume: 'This session resumes its progress automatically after the restart.',
+  durationSeconds: '{n}s',
+  durationMinutes: '{n}m {m}s',
+  durationHours: '{n}h {m}m',
+  // The one-time install prompt (the choice is asked exactly once).
+  // "Backup" is the verb and BOTH options share the "configuration" base:
+  // the plugins are an ADDITION to the configuration, never a rival of it.
+  backupChoiceTitle: 'Automatic pre-restart backup: include the installed plugins too?',
+  backupChoiceBody: 'A snapshot of the current configuration is taken before every restart, so a host that fails to come back can be rolled back automatically.',
+  backupChoiceWithPlugins: 'Configuration + installed plugins',
+  backupChoiceWithPluginsHint: 'About 3 seconds and 117 MB more; a plugin that breaks the boot can be rolled back too.',
+  backupChoiceConfigOnly: 'Configuration only',
+  backupChoiceConfigOnlyHint: 'Instant, about 66 KB; plugin problems cannot be rolled back and need a manual reinstall.',
+  backupChoiceFootnote: 'You can change this later in Settings → Plugins → dsh-autorestart',
+  backupChoicePickPrimary: 'Use this',
+  backupChoicePickSecondary: 'Configuration only',
+  backupChoiceRecommended: 'Recommended',
+  backupChoiceDismissAria: 'Close this one-time prompt',
+  backupChoiceError: 'Could not save the choice: {message}',
+  // The graceful-standby (sleep) surfaces: the button in the header, the
+  // full-screen countdown, the waiting card and the second install
+  // question.
+  'sleep.button.label': 'Stand by',
+  'sleep.button.aria': 'Stand by: wait for every session to finish, then power off',
+  'sleep.button.title': 'Waits for every session to finish, counts down 10 seconds, then powers off',
+  'sleep.button.busy': 'Getting ready…',
+  'sleep.error': 'Could not reach the sleep service: {message}',
+  'sleep.countdown.caption.10': 'The whale is casting her net',
+  'sleep.countdown.caption.9': 'Your backup is already packed',
+  'sleep.countdown.caption.8': 'One unfinished thought, one more',
+  'sleep.countdown.caption.7': 'Everyone is quieting down',
+  'sleep.countdown.caption.6': 'One last lap around the room',
+  'sleep.countdown.caption.5': 'The sea is going dark',
+  'sleep.countdown.caption.4': 'One light at a time goes out',
+  'sleep.countdown.caption.3': 'Three seconds, really',
+  'sleep.countdown.caption.2': 'Time for one last goodbye',
+  'sleep.countdown.caption.1': 'Good night 🌙',
+  'sleep.countdown.caption.default': 'Good night 🌙',
+  'sleep.countdown.cancel': 'Never mind, keep it on',
+  'sleep.countdown.goodNight': 'Good night 🌙',
+  'sleep.countdown.hint': 'Powering off in 10 seconds — pick "Never mind, keep it on" to stay.',
+  'sleep.waiting.title': 'Waiting for everyone to finish',
+  'sleep.waiting.body': 'Once these sessions are done, the machine powers off:',
+  'sleep.waiting.count': '{n} session(s) still working',
+  'sleep.waiting.blocker': '· {title}',
+  'sleep.waiting.none': '(checking who is still busy)',
+  'sleep.waiting.cancel': 'Keep it on',
+  'sleep.shuttingDown.title': 'Good night 🌙',
+  'sleep.shuttingDown.body': 'Powering off — the whale turned off the lights.',
+  'sleep.choice.title': 'Keep the graceful standby button?',
+  'sleep.choice.body': 'It lives in the top-left corner of the workspace: one click waits for every session to finish, counts down 10 seconds and powers the machine off.',
+  'sleep.choice.keep': 'Keep it (recommended)',
+  'sleep.choice.keepCta': 'Keep it',
+  'sleep.choice.keepHint': 'One moon button in the top-left corner: one click to stand by.',
+  'sleep.choice.hide': 'No button, thanks',
+  'sleep.choice.hideCta': 'No button',
+  'sleep.choice.hideHint': 'The interface stays as it is; turn it on again in the settings whenever you want it.',
+  'sleep.choice.footnote': 'You can change this later in Settings → Plugins → dsh-autorestart',
+  'sleep.choice.diagramLabel': 'The button sits in the top-left corner of the workspace',
+  'sleep.choice.error': 'Could not save the choice: {message}',
+}
+
+/**
+ * Read one translated string out of whatever the caller handed over.
+ *
+ * The caller may pass a translator function (the DSH locale binding), a
+ * dictionary table (flat or nested) or a language code ('zh' / 'en'). A
+ * translator that answers with the key itself has no entry: the built-in
+ * dictionary is the fallback, so the copy is never hard-coded in a
+ * component.
+ *
+ * @param {Function|object|string} locale
+ * @param {string} key
+ * @returns {string}
+ */
+function lookupSleepText(locale, key) {
+  if (typeof locale === 'function') {
+    try {
+      const value = locale(key)
+      if (typeof value === 'string' && value !== '' && value !== key) return value
+    } catch {
+      // A broken translator must not break the surface.
+    }
+  }
+  if (locale && typeof locale === 'object') {
+    const direct = locale[key]
+    if (typeof direct === 'string' && direct !== '') return direct
+    const path = key.split('.')
+    let node = locale
+    for (const part of path) {
+      if (!node || typeof node !== 'object') {
+        node = undefined
+        break
+      }
+      node = node[part]
+    }
+    if (typeof node === 'string' && node !== '') return node
+  }
+  if (typeof locale === 'string' && locale.toLowerCase().startsWith('en')) {
+    const english = EN[key]
+    if (typeof english === 'string' && english !== '') return english
+  }
+  const chinese = ZH[key]
+  if (typeof chinese === 'string' && chinese !== '') return chinese
+  return key
+}
+
+/**
+ * The countdown caption of one second.
+ *
+ * Every second has its own line, so the caption rotates while the number
+ * counts down. Seconds outside the countdown (0, or more than the ten
+ * seconds the Host announced) use the "good night" line.
+ *
+ * @param {number} remainingSeconds
+ * @param {Function|object|string} [locale] a translator, a dictionary or a language code
+ * @returns {string}
+ */
+function pickSleepCaption(remainingSeconds, locale) {
+  const raw = Number(remainingSeconds)
+  const seconds = Number.isFinite(raw) ? Math.ceil(raw) : 0
+  const key = seconds >= 1 && seconds <= 10
+    ? 'sleep.countdown.caption.' + seconds
+    : 'sleep.countdown.caption.default'
+  return lookupSleepText(locale, key)
+}
+
+/**
+ * Whether the graceful-standby button may be shown.
+ *
+ * The Host's truth wins: an explicit `showSleepButton: false` or an
+ * unsupported host hides the button (no placeholder, no space). An unknown
+ * status does not forbid it — the caller decides with the local record
+ * then.
+ *
+ * @param {object|null|undefined} status the Host's sleep status
+ * @returns {boolean}
+ */
+function shouldShowSleepButton(status) {
+  if (!status || typeof status !== 'object') return true
+  if (status.showSleepButton === false) return false
+  if (status.phase === 'unsupported') return false
+  const host = status.host
+  if (host && typeof host === 'object' && host.kind === 'unsupported') return false
+  return true
+}
+
+/**
+ * The body of the `POST {prefix}/choice` request.
+ *
+ * Only the answers that were really given are sent, so the two questions
+ * can also be answered one at a time.
+ *
+ * @param {{ includePlugins?: boolean, showSleepButton?: boolean }} [options]
+ * @returns {{ includePlugins?: boolean, showSleepButton?: boolean }}
+ */
+function buildChoiceBody(options) {
+  const source = options && typeof options === 'object' ? options : {}
+  const body = {}
+  if (typeof source.includePlugins === 'boolean') body.includePlugins = source.includePlugins
+  if (typeof source.showSleepButton === 'boolean') body.showSleepButton = source.showSleepButton
+  return body
+}
+
+/**
+ * The whole seconds a countdown still has to run.
+ *
+ * Rounded UP, so a countdown that has 400 ms left still shows "1" and the
+ * number never skips a second.
+ *
+ * @param {number} ms
+ * @returns {number}
+ */
+function formatRemainingMs(ms) {
+  const raw = Number(ms)
+  if (!Number.isFinite(raw) || raw <= 0) return 0
+  return Math.ceil(raw / 1000)
+}
+
+/**
+ * The named exports of this module.
+ *
+ * The client module system materializes `factory(require) -> exports`, so
+ * these four helpers ARE the module's exports; they are mirrored on
+ * `globalThis.__dshAutorestartClient` for the tests that evaluate the file
+ * without a loader.
+ */
+const SLEEP_EXPORTS = {
+  pickSleepCaption,
+  shouldShowSleepButton,
+  buildChoiceBody,
+  formatRemainingMs,
+}
+
+if (typeof globalThis !== 'undefined' && globalThis !== null) {
+  try {
+    globalThis.__dshAutorestartClient = Object.assign(globalThis.__dshAutorestartClient || {}, SLEEP_EXPORTS)
+  } catch {
+    // A frozen global must not break the plugin.
+  }
+}
+
+// The loader call is guarded so this file can also be evaluated outside a
+// browser (the tests read the exports above without a loader).
+const moduleLoader = typeof window !== 'undefined' && window.__ModuleLoader__ ? window.__ModuleLoader__ : null
+if (moduleLoader) moduleLoader.load({
   id: 'dsh-autorestart',
   factory: function (require) {
     const React = require('react')
@@ -84,107 +457,6 @@ window.__ModuleLoader__.load({
       '  50% { transform: scale(1.5); opacity: 0.55; }',
       '}',
     ].join('\n')
-
-    const ZH = {
-      label: '待重启',
-      busyPrefix: ' · 被 ',
-      busySuffix: ' 个会话占用',
-      idle: ' · 空闲后自动重启',
-      goalActive: ' · 被某个会话自动续跑的 goal 占着',
-      goalExhausted: ' · 某个会话的 goal 轮次额度已用完，无法续跑',
-      parkedGoals: ' · 已停泊 {n} 个 goal，重启后自动继续',
-      parkButton: '停泊并重启',
-      parkButtonAria: '停泊该会话的 goal，并立即请求重启',
-      parkBusy: '停泊中…',
-      parkError: '停泊失败：{message}',
-      tooltip: '等待其他会话空闲后自动重启；重启后会自动继续本会话进度',
-      tooltipBusy: '等待其他会话空闲后自动重启（计数含“排队但还没开始”的任务）；重启后本会话会自动继续进度',
-      tooltipWithError: '等待其他会话空闲后自动重启；重启后会自动继续本会话进度。{message}',
-      dotAria: '待重启',
-      panelHeading: '待重启',
-      panelStateBusy: '等待其他会话空闲后重启',
-      panelStateIdle: '等待空闲窗口后重启',
-      panelStateGoalActive: '等待其他会话停泊它自动续跑的 goal',
-      panelStateGoalExhausted: '等待其他会话的 goal（轮次额度已用完）',
-      panelBlockedTitle: '占用会话：{title}',
-      panelBlockedGeneric: '有一个会话正在运行',
-      panelGoalActiveLine: '占用会话「{title}」：goal 正在自动续跑（goal-active）',
-      panelGoalExhaustedLine: '占用会话「{title}」：goal 轮次额度已用完，无法继续（goal-exhausted）',
-      panelParkedTitle: '已停泊的 goal（重启后自动继续）：',
-      panelParkedGoal: '会话 {session} · {goal}',
-      panelWaiting: '已等待 {duration}',
-      panelResume: '重启后本会话会自动继续进度',
-      durationSeconds: '{n} 秒',
-      durationMinutes: '{n} 分 {m} 秒',
-      durationHours: '{n} 小时 {m} 分',
-      // The one-time install prompt (the choice is asked exactly once).
-      // "Backup" is the verb and BOTH options share the "configuration" base:
-      // the plugins are an ADDITION to the configuration, never a rival of it.
-      backupChoiceTitle: '重启前自动备份：要不要把已安装的插件也一起备份？',
-      backupChoiceBody: '每次重启前会快照当前配置，万一重启后起不来就能自动回退。',
-      backupChoiceWithPlugins: '配置 + 已安装插件',
-      backupChoiceWithPluginsHint: '多约 3 秒、约 117 MB；插件把启动搞坏时也能回退。',
-      backupChoiceConfigOnly: '只备份配置',
-      backupChoiceConfigOnlyHint: '瞬间完成、约 66 KB；插件问题无法回退，需要手动重装。',
-      backupChoiceFootnote: '以后可在 设置 → 插件 → dsh-autorestart 修改',
-      backupChoicePickPrimary: '用这个',
-      backupChoicePickSecondary: '只备份配置',
-      backupChoiceRecommended: '推荐',
-      backupChoiceDismissAria: '关闭这个一次性提示',
-      backupChoiceError: '保存失败：{message}',
-    }
-
-    const EN = {
-      label: 'Pending restart',
-      busyPrefix: ' · blocked by ',
-      busySuffix: ' session(s)',
-      idle: ' · restarts once idle',
-      goalActive: ' · held by a self-continuing goal',
-      goalExhausted: ' · a goal ran out of rounds',
-      parkedGoals: ' · {n} goal(s) parked, they continue after the restart',
-      parkButton: 'Park & restart',
-      parkButtonAria: 'Park that session goal and request the restart now',
-      parkBusy: 'Parking…',
-      parkError: 'Park failed: {message}',
-      tooltip:
-        'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart.',
-      tooltipBusy:
-        'Waits for the other sessions to become idle, then restarts automatically (the count includes work that is queued but not started yet); this session resumes its progress after the restart.',
-      tooltipWithError:
-        'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart. {message}',
-      dotAria: 'Pending restart',
-      panelHeading: 'Pending restart',
-      panelStateBusy: 'Waiting for the other sessions to become idle',
-      panelStateIdle: 'Waiting for the idle window',
-      panelStateGoalActive: 'Waiting for the other sessions to park their self-continuing goal',
-      panelStateGoalExhausted: 'Waiting for the other sessions\' goal (its round budget is used up)',
-      panelBlockedTitle: 'Blocking session: {title}',
-      panelBlockedGeneric: 'One session is running',
-      panelGoalActiveLine: 'Blocking session "{title}": the goal keeps driving rounds by itself (goal-active)',
-      panelGoalExhaustedLine: 'Blocking session "{title}": the goal ran out of rounds and cannot continue (goal-exhausted)',
-      panelParkedTitle: 'Parked goals (they continue after the restart):',
-      panelParkedGoal: 'session {session} · {goal}',
-      panelWaiting: 'Waiting for {duration}',
-      panelResume: 'This session resumes its progress automatically after the restart.',
-      durationSeconds: '{n}s',
-      durationMinutes: '{n}m {m}s',
-      durationHours: '{n}h {m}m',
-      // The one-time install prompt (the choice is asked exactly once).
-      // "Backup" is the verb and BOTH options share the "configuration" base:
-      // the plugins are an ADDITION to the configuration, never a rival of it.
-      backupChoiceTitle: 'Automatic pre-restart backup: include the installed plugins too?',
-      backupChoiceBody: 'A snapshot of the current configuration is taken before every restart, so a host that fails to come back can be rolled back automatically.',
-      backupChoiceWithPlugins: 'Configuration + installed plugins',
-      backupChoiceWithPluginsHint: 'About 3 seconds and 117 MB more; a plugin that breaks the boot can be rolled back too.',
-      backupChoiceConfigOnly: 'Configuration only',
-      backupChoiceConfigOnlyHint: 'Instant, about 66 KB; plugin problems cannot be rolled back and need a manual reinstall.',
-      backupChoiceFootnote: 'You can change this later in Settings → Plugins → dsh-autorestart',
-      backupChoicePickPrimary: 'Use this',
-      backupChoicePickSecondary: 'Configuration only',
-      backupChoiceRecommended: 'Recommended',
-      backupChoiceDismissAria: 'Close this one-time prompt',
-      backupChoiceError: 'Could not save the choice: {message}',
-    }
 
     // Bound during `apply`. The slots are registered without a locale
     // namespace, so the components read the translator through this
@@ -729,6 +1001,13 @@ window.__ModuleLoader__.load({
       '  line-height:16px;',
       '  color:var(--dsw-alias-label-secondary);',
       '}',
+      '.dsh-autorestart-choice__diagram{margin:2px 0 10px;}',
+      '.dsh-autorestart-choice__diagram__art{',
+      '  width:100%;',
+      '  max-width:260px;',
+      '  height:auto;',
+      '  display:block;',
+      '}',
       '@media (max-width:1023px){',
       '  .dsh-autorestart-choice{width:calc(100vw - 32px);}',
       '}',
@@ -953,10 +1232,15 @@ window.__ModuleLoader__.load({
     /**
      * The one-time install prompt.
      *
-     * It asks ONE question — should the pre-restart backup also snapshot the
-     * installed plugin tree? — and it is asked exactly once: the panel is
-     * rendered only while `localStorage['dsh-autorestart:backup-choice-v1']`
-     * is missing.
+     * It asks TWO questions, one after the other:
+     *
+     *   1. should the pre-restart backup also snapshot the installed plugin
+     *      tree? (the first question — its behaviour is unchanged);
+     *   2. should the graceful-standby button stay in the header?
+     *
+     * The first answer is persisted BEFORE the second question appears: the
+     * two questions are never stacked on top of each other, and the second
+     * one only shows up after the first one really reached the Host.
      *
      * "Backup" is the verb and BOTH options share the "configuration" base:
      * the plugins are an addition to the configuration, never a rival of it.
@@ -972,61 +1256,121 @@ window.__ModuleLoader__.load({
      */
     function BackupChoicePanel() {
       const info = useSharedInfo(true)
-      // The prompt is rendered only while the browser has no record yet.
-      const [visible, setVisible] = useState(backupChoicePending)
+      // 'backup' is the first question, 'sleep' the second one, 'persisting'
+      // the short moment in between (the first answer is on its way to the
+      // Host) and 'done' when there is nothing left to ask.
+      const [step, setStep] = useState(backupChoicePending() ? 'backup' : 'done')
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
       const t = translate ?? ((name) => name)
 
       /**
-       * Hand the choice to the Host.
+       * Hand the FIRST answer to the Host.
        *
        * The browser records the choice FIRST (so the question is never asked
        * twice) and then posts it to the Host, which persists it in the
-       * profile configuration.
+       * profile configuration. The SECOND question only appears once that
+       * answer really left the browser.
        */
       const choose = (includePlugins) => {
         if (busy) return
         setBusy(true)
         setError('')
         writeBackupChoice(includePlugins ? 'plugins' : 'config-only')
-        setVisible(false)
+        setStep('persisting')
         void (async () => {
+          let failed = false
           try {
             const response = await fetch(choiceUrlFor(info), {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ includePlugins }),
+              body: JSON.stringify(buildChoiceBody({ includePlugins })),
             })
             if (!response.ok) {
+              failed = true
               setError(fill(t('backupChoiceError'), { message: String(response.status) }))
             }
           } catch (failure) {
+            failed = true
             setError(fill(t('backupChoiceError'), { message: describeError(failure) }))
           } finally {
             setBusy(false)
+            if (failed) {
+              // The answer did not reach the Host: the first question stays
+              // on screen with the reason, so it can be answered again.
+              setStep('backup')
+              return
+            }
+            // The first answer is persisted: the second question may follow.
+            setStep(sleepChoicePending() ? 'sleep' : 'done')
           }
         })()
       }
 
       /**
-       * Close the prompt without answering: the default (the configuration
-       * AND the installed plugins) stays in place, and the question is not
-       * asked again.
+       * Hand the SECOND answer to the Host: should the standby button stay?
        */
-      const dismiss = () => {
+      const chooseSleep = (showSleepButton) => {
+        if (busy) return
+        setBusy(true)
+        setError('')
+        writeSleepChoice(showSleepButton ? 'keep' : 'hide')
+        void (async () => {
+          try {
+            const response = await fetch(choiceUrlFor(info), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(buildChoiceBody({ showSleepButton })),
+            })
+            if (!response.ok) {
+              setError(fill(t('sleep.choice.error'), { message: String(response.status) }))
+              setStep('sleep')
+              return
+            }
+          } catch (failure) {
+            setError(fill(t('sleep.choice.error'), { message: describeError(failure) }))
+            setStep('sleep')
+            return
+          } finally {
+            setBusy(false)
+          }
+          setStep('done')
+        })()
+      }
+
+      /**
+       * Close the FIRST question without answering: the default (the
+       * configuration AND the installed plugins) stays in place, the question
+       * is not asked again — and the second one is not asked either, because
+       * closing the prompt means "do not ask me again".
+       */
+      const dismissBackup = () => {
         if (busy) return
         writeBackupChoice('dismissed')
-        setVisible(false)
+        writeSleepChoice('dismissed')
+        setStep('done')
+      }
+
+      /**
+       * Close the SECOND question without answering: the button stays (the
+       * default) and the question is not asked again.
+       */
+      const dismissSleep = () => {
+        if (busy) return
+        writeSleepChoice('dismissed')
+        setStep('done')
       }
 
       /** Esc closes the prompt (the panel itself is focusable). */
       const onKeyDown = (event) => {
         if (!event) return
-        if (event.key === 'Escape' || event.key === 'Esc') dismiss()
+        if (event.key === 'Escape' || event.key === 'Esc') {
+          if (step === 'sleep') dismissSleep()
+          else dismissBackup()
+        }
       }
 
-      if (!visible) return null
+      if (step === 'done' || step === 'persisting') return null
       ensureChoiceStyle()
 
       /**
@@ -1037,8 +1381,7 @@ window.__ModuleLoader__.load({
        * the concrete action. The primary row wears a "recommended" pill and a
        * solid button; the secondary one an outlined button.
        */
-      const optionRow = (key, name, hint, cta, variant, recommended) => {
-        const pick = () => choose(key === 'plugins')
+      const optionRow = (key, name, hint, cta, variant, recommended, pick, dataAttribute) => {
         const onRowClick = () => pick()
         const onRowKeyDown = (event) => {
           if (!event) return
@@ -1061,7 +1404,7 @@ window.__ModuleLoader__.load({
             'aria-checked': 'false',
             'aria-label': name,
             tabIndex: busy ? -1 : 0,
-            'data-backup-choice': key,
+            [dataAttribute]: key,
             onClick: onRowClick,
             onKeyDown: onRowKeyDown,
           },
@@ -1083,7 +1426,7 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               className: 'dsh-autorestart-choice__cta dsh-autorestart-choice__cta--' + variant,
-              'data-backup-choice': key,
+              [dataAttribute]: key,
               'aria-label': cta,
               title: cta,
               disabled: busy,
@@ -1094,6 +1437,67 @@ window.__ModuleLoader__.load({
         )
       }
 
+      // The FIRST question: the backup scope (its behaviour is unchanged).
+      if (step === 'backup') {
+        return h(
+          'div',
+          {
+            className: 'dsh-autorestart-choice',
+            role: 'status',
+            'aria-live': 'polite',
+            tabIndex: 0,
+            onKeyDown,
+            'data-dsh-autorestart-backup-choice': 'true',
+            'data-dsh-autorestart-choice-step': 'backup',
+          },
+          h(
+            'div',
+            { className: 'dsh-autorestart-choice__head' },
+            h('h3', null, t('backupChoiceTitle')),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-autorestart-choice__close',
+                'aria-label': t('backupChoiceDismissAria'),
+                title: t('backupChoiceDismissAria'),
+                disabled: busy,
+                onClick: dismissBackup,
+              },
+              '×',
+            ),
+          ),
+          h('p', { className: 'dsh-autorestart-choice__subtitle' }, t('backupChoiceBody')),
+          h(
+            'div',
+            { className: 'dsh-autorestart-choice__options' },
+            optionRow(
+              'plugins',
+              t('backupChoiceWithPlugins'),
+              t('backupChoiceWithPluginsHint'),
+              t('backupChoicePickPrimary'),
+              'primary',
+              true,
+              () => choose(true),
+              'data-backup-choice',
+            ),
+            optionRow(
+              'config-only',
+              t('backupChoiceConfigOnly'),
+              t('backupChoiceConfigOnlyHint'),
+              t('backupChoicePickSecondary'),
+              'secondary',
+              false,
+              () => choose(false),
+              'data-backup-choice',
+            ),
+          ),
+          h('p', { className: 'dsh-autorestart-choice__footnote' }, t('backupChoiceFootnote')),
+          error === '' ? null : h('p', { role: 'alert' }, error),
+        )
+      }
+
+      // The SECOND question: should the graceful-standby button stay?
       return h(
         'div',
         {
@@ -1103,11 +1507,12 @@ window.__ModuleLoader__.load({
           tabIndex: 0,
           onKeyDown,
           'data-dsh-autorestart-backup-choice': 'true',
+          'data-dsh-autorestart-choice-step': 'sleep',
         },
         h(
           'div',
           { className: 'dsh-autorestart-choice__head' },
-          h('h3', null, t('backupChoiceTitle')),
+          h('h3', null, t('sleep.choice.title')),
           h(
             'button',
             {
@@ -1116,35 +1521,853 @@ window.__ModuleLoader__.load({
               'aria-label': t('backupChoiceDismissAria'),
               title: t('backupChoiceDismissAria'),
               disabled: busy,
-              onClick: dismiss,
+              onClick: dismissSleep,
             },
             '×',
           ),
         ),
-        h('p', { className: 'dsh-autorestart-choice__subtitle' }, t('backupChoiceBody')),
+        h(
+          'div',
+          {
+            className: 'dsh-autorestart-choice__diagram',
+            role: 'img',
+            'aria-label': t('sleep.choice.diagramLabel'),
+          },
+          sleepDiagram(),
+        ),
+        h('p', { className: 'dsh-autorestart-choice__subtitle' }, t('sleep.choice.body')),
         h(
           'div',
           { className: 'dsh-autorestart-choice__options' },
           optionRow(
-            'plugins',
-            t('backupChoiceWithPlugins'),
-            t('backupChoiceWithPluginsHint'),
-            t('backupChoicePickPrimary'),
+            'keep',
+            t('sleep.choice.keep'),
+            t('sleep.choice.keepHint'),
+            t('sleep.choice.keepCta'),
             'primary',
             true,
+            () => chooseSleep(true),
+            'data-sleep-choice',
           ),
           optionRow(
-            'config-only',
-            t('backupChoiceConfigOnly'),
-            t('backupChoiceConfigOnlyHint'),
-            t('backupChoicePickSecondary'),
+            'hide',
+            t('sleep.choice.hide'),
+            t('sleep.choice.hideHint'),
+            t('sleep.choice.hideCta'),
             'secondary',
             false,
+            () => chooseSleep(false),
+            'data-sleep-choice',
           ),
         ),
-        h('p', { className: 'dsh-autorestart-choice__footnote' }, t('backupChoiceFootnote')),
+        h('p', { className: 'dsh-autorestart-choice__footnote' }, t('sleep.choice.footnote')),
         error === '' ? null : h('p', { role: 'alert' }, error),
       )
+    }
+
+    /* ------------------------------------------------------------------ *
+     * The graceful-standby (sleep) half.
+     * ------------------------------------------------------------------ */
+
+    // The route that arms and cancels the standby. It is a sibling of the
+    // health route and shares its prefix, so it is derived the very same way.
+    const DEFAULT_SLEEP_URL = ROUTE_PREFIX + '/sleep'
+
+    /**
+     * ONE shared poller for the sleep status, shared by the header button
+     * and the overlay.
+     *
+     * It follows the pattern of the pending-restart store: the first
+     * subscriber starts ONE interval (the same POLL_MS cadence) plus an
+     * immediate fetch, and the last one to leave clears the interval and
+     * aborts the in-flight request. A failed fetch keeps the last known
+     * status, so a transient error never blanks a live countdown.
+     */
+    const sleepStore = {
+      info: null,
+      listeners: new Set(),
+      timer: null,
+      inFlight: false,
+      controller: null,
+      // When the current status was received: the countdown runs on this
+      // clock, so the big number keeps moving between two polls.
+      at: 0,
+    }
+
+    /** Publish a new sleep status to every surface. */
+    function setSleepInfo(body) {
+      sleepStore.info = body
+      sleepStore.at = Date.now()
+      sleepStore.listeners.forEach((listener) => {
+        try {
+          listener(body)
+        } catch {
+          // One broken listener must not stop the others.
+        }
+      })
+    }
+
+    async function pollSleepOnce() {
+      if (sleepStore.inFlight) return
+      sleepStore.inFlight = true
+      try {
+        const response = await fetch(DEFAULT_SLEEP_URL, {
+          cache: 'no-store',
+          signal: sleepStore.controller ? sleepStore.controller.signal : undefined,
+        })
+        if (!response.ok) return
+        const body = await response.json()
+        if (!body || typeof body !== 'object') return
+        setSleepInfo(body)
+      } catch {
+        // Ignored on purpose: the last known status stays.
+      } finally {
+        sleepStore.inFlight = false
+      }
+    }
+
+    /**
+     * Adds a listener and starts the shared poll when it is the first one.
+     * The returned callback stops the poll when the last listener leaves.
+     */
+    function subscribeSleep(listener) {
+      sleepStore.listeners.add(listener)
+      if (sleepStore.listeners.size === 1) {
+        sleepStore.controller = new AbortController()
+        pollSleepOnce()
+        sleepStore.timer = setInterval(pollSleepOnce, POLL_MS)
+      }
+      return () => {
+        sleepStore.listeners.delete(listener)
+        if (sleepStore.listeners.size === 0) {
+          if (sleepStore.timer !== null) {
+            clearInterval(sleepStore.timer)
+            sleepStore.timer = null
+          }
+          if (sleepStore.controller) {
+            sleepStore.controller.abort()
+            sleepStore.controller = null
+          }
+        }
+      }
+    }
+
+    /** The current sleep status, re-rendered whenever the shared poll lands. */
+    function useSleepStatus() {
+      const [status, setStatus] = useState(sleepStore.info)
+      useEffect(() => {
+        setStatus(sleepStore.info)
+        return subscribeSleep(setStatus)
+      }, [])
+      return status
+    }
+
+    /**
+     * Whether the browser has no record of the sleep-button answer yet.
+     *
+     * The question is asked exactly once, so the key is written as soon as
+     * the user answers — or closes the prompt.
+     */
+    function sleepChoicePending() {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return false
+        return window.localStorage.getItem(SLEEP_BUTTON_KEY) === null
+      } catch {
+        return false
+      }
+    }
+
+    /** Record the sleep-button answer in the browser. */
+    function writeSleepChoice(value) {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return false
+        window.localStorage.setItem(SLEEP_BUTTON_KEY, String(value))
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    /**
+     * Whether the browser's own record wants the button.
+     *
+     * This is only the FALLBACK: the Host's truth always wins.
+     */
+    function localSleepButtonVisible() {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return true
+        const raw = window.localStorage.getItem(SLEEP_BUTTON_KEY)
+        if (raw === null) return true
+        return raw !== 'hide' && raw !== 'false'
+      } catch {
+        return true
+      }
+    }
+
+    // The styles of the sleep surfaces. They live in ONE <style> element so
+    // the button and the overlay never disagree, and every colour comes from
+    // a theme token: light and dark themes both work.
+    const SLEEP_STYLE_ID = 'dsh-autorestart-sleep'
+    const SLEEP_CSS = [
+      // The header button.
+      '.dsh-autorestart-sleep-button{',
+      '  display:inline-flex;',
+      '  align-items:center;',
+      '  gap:6px;',
+      '  height:28px;',
+      '  padding:0 10px;',
+      '  box-sizing:border-box;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:8px;',
+      '  background:transparent;',
+      '  color:var(--dsw-alias-label-secondary);',
+      '  font:inherit;',
+      '  font-size:12.5px;',
+      '  line-height:18px;',
+      '  white-space:nowrap;',
+      '  cursor:pointer;',
+      '  transition:background-color .14s,color .14s,border-color .14s;',
+      '}',
+      '.dsh-autorestart-sleep-button:hover{',
+      '  color:var(--dsw-alias-label-primary);',
+      '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  background:var(--dsw-alias-bg-layer-2,color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent));',
+      '}',
+      '.dsh-autorestart-sleep-button:focus-visible{',
+      '  outline:2px solid var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  outline-offset:2px;',
+      '}',
+      '.dsh-autorestart-sleep-button:disabled{cursor:default;opacity:.65;}',
+      '.dsh-autorestart-sleep-button__icon{width:16px;height:16px;flex:none;display:block;}',
+      '.dsh-autorestart-sleep-button__spinner{',
+      '  width:12px;',
+      '  height:12px;',
+      '  flex:none;',
+      '  border-radius:50%;',
+      '  border:2px solid var(--dsw-alias-border-l1);',
+      '  border-top-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  animation:dsh-autorestart-sleep-spin .8s linear infinite;',
+      '}',
+      // The full-screen countdown.
+      '.dsh-autorestart-sleep-overlay{',
+      '  position:fixed;',
+      '  inset:0;',
+      '  z-index:9999;',
+      '  display:flex;',
+      '  flex-direction:column;',
+      '  align-items:center;',
+      '  justify-content:center;',
+      '  gap:6px;',
+      '  box-sizing:border-box;',
+      '  padding:24px;',
+      '  background:color-mix(in srgb, var(--dsw-alias-bg-layer-1,#fff) 88%, transparent);',
+      '  backdrop-filter:blur(10px);',
+      '  color:var(--dsw-alias-label-primary);',
+      '  text-align:center;',
+      '}',
+      '.dsh-autorestart-sleep-overlay__number{',
+      '  font-size:clamp(120px,26vmin,320px);',
+      '  font-weight:700;',
+      '  line-height:1;',
+      '  letter-spacing:-.02em;',
+      '  color:var(--dsw-alias-label-primary);',
+      '  animation:dsh-autorestart-sleep-tick 1s ease-out;',
+      '}',
+      '.dsh-autorestart-sleep-overlay--urgent .dsh-autorestart-sleep-overlay__number{',
+      '  font-size:clamp(140px,31vmin,380px);',
+      '  color:var(--dsw-alias-danger,#d14343);',
+      '  animation:dsh-autorestart-sleep-tick .7s ease-out;',
+      '}',
+      '.dsh-autorestart-sleep-overlay__caption{',
+      '  margin:4px 0 0;',
+      '  font-size:clamp(15px,2.4vmin,22px);',
+      '  font-weight:600;',
+      '  line-height:1.4;',
+      '  color:var(--dsw-alias-label-primary);',
+      '  animation:dsh-autorestart-sleep-fade .5s ease-out;',
+      '}',
+      '.dsh-autorestart-sleep-overlay__hint{',
+      '  margin:2px 0 0;',
+      '  font-size:13px;',
+      '  line-height:1.5;',
+      '  color:var(--dsw-alias-label-secondary);',
+      '}',
+      '.dsh-autorestart-sleep-overlay__cancel{',
+      '  margin-top:14px;',
+      '  min-height:34px;',
+      '  padding:6px 18px;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:9px;',
+      '  background:transparent;',
+      '  color:var(--dsw-alias-label-primary);',
+      '  font:inherit;',
+      '  font-size:13.5px;',
+      '  font-weight:600;',
+      '  line-height:20px;',
+      '  cursor:pointer;',
+      '  transition:background-color .14s,border-color .14s,color .14s;',
+      '}',
+      '.dsh-autorestart-sleep-overlay__cancel:hover{',
+      '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  background:var(--dsw-alias-bg-layer-2,color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent));',
+      '}',
+      '.dsh-autorestart-sleep-overlay__cancel:focus-visible{',
+      '  outline:2px solid var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  outline-offset:2px;',
+      '}',
+      '.dsh-autorestart-sleep-overlay__cancel:disabled{cursor:default;opacity:.65;}',
+      // The waiting card: a soft corner card that never covers the reading.
+      '.dsh-autorestart-sleep-waiting{',
+      '  position:fixed;',
+      '  right:16px;',
+      '  bottom:16px;',
+      '  z-index:9998;',
+      '  box-sizing:border-box;',
+      '  max-width:min(320px,calc(100vw - 32px));',
+      '  padding:12px 14px;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:12px;',
+      '  background:var(--dsw-alias-bg-layer-1);',
+      '  box-shadow:0 8px 24px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 18%, transparent);',
+      '  color:var(--dsw-alias-label-secondary);',
+      '  font-size:12.5px;',
+      '  line-height:18px;',
+      '  text-align:left;',
+      '}',
+      '.dsh-autorestart-sleep-waiting__title{',
+      '  margin:0 0 2px;',
+      '  font-size:13.5px;',
+      '  font-weight:600;',
+      '  line-height:19px;',
+      '  color:var(--dsw-alias-label-primary);',
+      '}',
+      '.dsh-autorestart-sleep-waiting__body{margin:0 0 6px;}',
+      '.dsh-autorestart-sleep-waiting__list{margin:0 0 6px;padding-left:2px;list-style:none;}',
+      '.dsh-autorestart-sleep-waiting__list li{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      '.dsh-autorestart-sleep-waiting__none{margin:0 0 6px;opacity:.8;}',
+      '.dsh-autorestart-sleep-waiting__count{margin:0 0 8px;opacity:.8;}',
+      '.dsh-autorestart-sleep-waiting__cancel{',
+      '  min-height:28px;',
+      '  padding:4px 12px;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:8px;',
+      '  background:transparent;',
+      '  color:var(--dsw-alias-label-primary);',
+      '  font:inherit;',
+      '  font-size:12.5px;',
+      '  font-weight:600;',
+      '  line-height:18px;',
+      '  cursor:pointer;',
+      '}',
+      '.dsh-autorestart-sleep-waiting__cancel:hover{',
+      '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '}',
+      // The fallback notice (a request that failed).
+      '.dsh-autorestart-sleep-toast{',
+      '  position:fixed;',
+      '  right:16px;',
+      '  bottom:16px;',
+      '  z-index:9999;',
+      '  max-width:min(360px,calc(100vw - 32px));',
+      '  padding:10px 14px;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:10px;',
+      '  background:var(--dsw-alias-bg-layer-1);',
+      '  color:var(--dsw-alias-danger,#d14343);',
+      '  font-size:12.5px;',
+      '  line-height:18px;',
+      '}',
+      // The whale.
+      '.dsh-autorestart-whale{width:min(44vmin,240px);height:auto;display:block;overflow:visible;}',
+      '.dsh-autorestart-whale__float{',
+      '  animation:dsh-autorestart-whale-float 3.2s ease-in-out infinite;',
+      '  transform-origin:90px 90px;',
+      '}',
+      '.dsh-autorestart-whale__eye{',
+      '  animation:dsh-autorestart-whale-blink 4.6s ease-in-out infinite;',
+      '  transform-origin:48px 74px;',
+      '}',
+      '.dsh-autorestart-whale__spout{animation:dsh-autorestart-whale-spout 3.6s ease-in-out infinite;}',
+      '.dsh-autorestart-whale__z{',
+      '  font-family:inherit;',
+      '  font-size:15px;',
+      '  font-weight:600;',
+      '  fill:var(--dsw-alias-label-secondary);',
+      '  animation:dsh-autorestart-whale-z 2.8s ease-out infinite;',
+      '}',
+      '.dsh-autorestart-whale__z--2{animation-delay:.9s;}',
+      '.dsh-autorestart-whale__z--3{animation-delay:1.8s;}',
+      '.dsh-autorestart-whale--urgent .dsh-autorestart-whale__float{animation-duration:1.1s;}',
+      '.dsh-autorestart-whale--urgent .dsh-autorestart-whale__body,',
+      '.dsh-autorestart-whale--urgent .dsh-autorestart-whale__tail,',
+      '.dsh-autorestart-whale--urgent .dsh-autorestart-whale__fin{fill:var(--dsw-alias-danger,#d14343);}',
+      // The keyframes.
+      '@keyframes dsh-autorestart-sleep-spin{to{transform:rotate(360deg);}}',
+      '@keyframes dsh-autorestart-sleep-tick{',
+      '  0%{transform:scale(.86);opacity:.55;}',
+      '  40%{transform:scale(1.04);opacity:1;}',
+      '  100%{transform:scale(1);opacity:1;}',
+      '}',
+      '@keyframes dsh-autorestart-sleep-fade{from{opacity:0;transform:translateY(6px);}to{opacity:1;transform:none;}}',
+      '@keyframes dsh-autorestart-whale-float{',
+      '  0%,100%{transform:translateY(0) rotate(0deg);}',
+      '  50%{transform:translateY(-10px) rotate(-1.5deg);}',
+      '}',
+      '@keyframes dsh-autorestart-whale-blink{',
+      '  0%,88%,100%{transform:scaleY(1);}',
+      '  93%{transform:scaleY(.08);}',
+      '  97%{transform:scaleY(1);}',
+      '}',
+      '@keyframes dsh-autorestart-whale-spout{',
+      '  0%,70%,100%{opacity:.35;}',
+      '  35%{opacity:1;}',
+      '}',
+      '@keyframes dsh-autorestart-whale-z{',
+      '  0%{opacity:0;transform:translate(0,0) scale(.7);}',
+      '  25%{opacity:.9;}',
+      '  100%{opacity:0;transform:translate(12px,-26px) scale(1.15);}',
+      '}',
+      // A user who asked for less motion gets a still whale.
+      '@media (prefers-reduced-motion: reduce){',
+      '  .dsh-autorestart-whale__float,',
+      '  .dsh-autorestart-whale__eye,',
+      '  .dsh-autorestart-whale__spout,',
+      '  .dsh-autorestart-whale__z,',
+      '  .dsh-autorestart-sleep-overlay__number,',
+      '  .dsh-autorestart-sleep-overlay__caption,',
+      '  .dsh-autorestart-sleep-button__spinner{animation:none !important;}',
+      '}',
+    ].join('\n')
+
+    /** Inject the sleep styles exactly once. */
+    function ensureSleepStyle() {
+      if (typeof document === 'undefined' || !document.head) return
+      try {
+        if (document.getElementById(SLEEP_STYLE_ID)) return
+        const style = document.createElement('style')
+        style.id = SLEEP_STYLE_ID
+        style.textContent = SLEEP_CSS
+        document.head.appendChild(style)
+      } catch {
+        // Without the stylesheet the surfaces are still readable.
+      }
+    }
+
+    /** The moon of the header button: an inline SVG, no external image. */
+    function moonIcon() {
+      return h(
+        'svg',
+        {
+          className: 'dsh-autorestart-sleep-button__icon',
+          viewBox: '0 0 24 24',
+          width: '16',
+          height: '16',
+          'aria-hidden': 'true',
+          focusable: 'false',
+        },
+        h('path', {
+          d: 'M20.5 14.6A8.6 8.6 0 0 1 9.4 3.5a8.6 8.6 0 1 0 11.1 11.1z',
+          fill: 'currentColor',
+        }),
+        h('circle', { cx: '16.5', cy: '6.5', r: '1.3', fill: 'var(--dsw-alias-brand-primary,#4d6bfe)' }),
+      )
+    }
+
+    /**
+     * The graceful-standby button, in the header's leading slot.
+     *
+     * It renders NOTHING at all when the Host says the button must not be
+     * shown: no placeholder, no empty space.
+     */
+    function SleepButton() {
+      const status = useSleepStatus()
+      const [arming, setArming] = useState(false)
+      const [error, setError] = useState('')
+      const t = translate ?? ((name) => name)
+
+      // The Host's truth wins over the browser's record.
+      const remoteKnown = Boolean(
+        status && typeof status === 'object' && typeof status.showSleepButton === 'boolean',
+      )
+      const visible = shouldShowSleepButton(status)
+        && (remoteKnown ? true : localSleepButtonVisible())
+
+      /**
+       * Ask the Host to stand by: it waits for every session to finish and
+       * then counts down.
+       */
+      const arm = async () => {
+        if (arming) return
+        setArming(true)
+        setError('')
+        try {
+          const response = await fetch(DEFAULT_SLEEP_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'arm' }),
+          })
+          let body = null
+          try {
+            body = await response.json()
+          } catch {
+            body = null
+          }
+          if (!response.ok) {
+            const message = body && typeof body === 'object'
+              ? (body.error || body.message || '')
+              : ''
+            setError(fill(t('sleep.error'), { message: message || String(response.status) }))
+            return
+          }
+          if (body && typeof body === 'object') setSleepInfo(body)
+        } catch (failure) {
+          setError(fill(t('sleep.error'), { message: describeError(failure) }))
+        } finally {
+          setArming(false)
+        }
+      }
+
+      if (!visible) return null
+      ensureSleepStyle()
+
+      return h(
+        'button',
+        {
+          type: 'button',
+          className: 'dsh-autorestart-sleep-button',
+          'aria-label': t('sleep.button.aria'),
+          title: error || t('sleep.button.title'),
+          disabled: arming,
+          onClick: arm,
+          'data-dsh-autorestart-sleep-button': 'true',
+        },
+        arming
+          ? h('span', { className: 'dsh-autorestart-sleep-button__spinner', 'aria-hidden': 'true' })
+          : moonIcon(),
+        h('span', null, arming ? t('sleep.button.busy') : t('sleep.button.label')),
+      )
+    }
+
+    /**
+     * A small sketch of the workspace with the standby button in its
+     * top-left corner: the arrow points at the place the button appears.
+     *
+     * It carries no copy of its own: the words around it come from the
+     * locale files.
+     */
+    function sleepDiagram() {
+      return h(
+        'svg',
+        {
+          className: 'dsh-autorestart-choice__diagram__art',
+          viewBox: '0 0 260 120',
+          width: '260',
+          height: '120',
+          'aria-hidden': 'true',
+          focusable: 'false',
+        },
+        // The window.
+        h('rect', {
+          x: '6',
+          y: '6',
+          width: '248',
+          height: '108',
+          rx: '10',
+          fill: 'var(--dsw-alias-bg-layer-2,transparent)',
+          stroke: 'var(--dsw-alias-border-l1)',
+        }),
+        h('line', {
+          x1: '6',
+          y1: '24',
+          x2: '254',
+          y2: '24',
+          stroke: 'var(--dsw-alias-border-l1)',
+        }),
+        // The button in the top-left corner.
+        h('rect', {
+          x: '16',
+          y: '32',
+          width: '58',
+          height: '18',
+          rx: '6',
+          fill: 'var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe))',
+        }),
+        h('path', {
+          d: 'M28 44a6 6 0 0 1 8-8 6 6 0 1 0 7 7 6 6 0 0 1-8 8 6 6 0 0 1-7-7z',
+          fill: 'var(--dsw-alias-bg-layer-1,#fff)',
+        }),
+        // The arrow that points at it.
+        h('path', {
+          d: 'M152 98 L76 58',
+          fill: 'none',
+          stroke: 'var(--dsw-alias-label-secondary)',
+          'stroke-width': '2',
+          'stroke-linecap': 'round',
+          'stroke-dasharray': '5 4',
+        }),
+        h('path', {
+          d: 'M74 56 l12-1 -5 10 z',
+          fill: 'var(--dsw-alias-label-secondary)',
+        }),
+      )
+    }
+
+    /**
+     * The whale: an inline SVG animated with CSS only.
+     *
+     * No external image and no dependency on another plugin: the whale is
+     * drawn here, floats, blinks and blows sleepy Zs.
+     */
+    function whaleArt(urgent) {
+      return h(
+        'svg',
+        {
+          className: 'dsh-autorestart-whale' + (urgent ? ' dsh-autorestart-whale--urgent' : ''),
+          viewBox: '0 0 200 140',
+          width: '200',
+          height: '140',
+          'aria-hidden': 'true',
+          focusable: 'false',
+        },
+        h(
+          'g',
+          { className: 'dsh-autorestart-whale__float' },
+          h('path', {
+            className: 'dsh-autorestart-whale__tail',
+            d: 'M142 84c14-16 26-30 44-38-6 12-9 22-9 30 0 8 3 18 9 30-18-8-30-16-44-22z',
+            fill: 'var(--dsw-alias-brand-primary,#4d8bf0)',
+          }),
+          h('ellipse', {
+            className: 'dsh-autorestart-whale__body',
+            cx: '84',
+            cy: '84',
+            rx: '66',
+            ry: '38',
+            fill: 'var(--dsw-alias-brand-primary,#4d8bf0)',
+          }),
+          h('ellipse', {
+            className: 'dsh-autorestart-whale__belly',
+            cx: '90',
+            cy: '97',
+            rx: '50',
+            ry: '23',
+            fill: 'var(--dsw-alias-bg-layer-1,#fff)',
+            opacity: '0.85',
+          }),
+          h('path', {
+            className: 'dsh-autorestart-whale__fin',
+            d: 'M72 110c8 10 18 14 30 12-6 8-16 12-26 10-8-2-12-11-4-22z',
+            fill: 'var(--dsw-alias-brand-primary,#4d8bf0)',
+          }),
+          h(
+            'g',
+            { className: 'dsh-autorestart-whale__eye' },
+            h('circle', { cx: '48', cy: '74', r: '6.5', fill: 'var(--dsw-alias-bg-layer-1,#fff)' }),
+            h('circle', { cx: '47', cy: '75', r: '3', fill: 'var(--dsw-alias-label-primary,#333)' }),
+          ),
+          h('path', {
+            className: 'dsh-autorestart-whale__mouth',
+            d: 'M28 88c6 6 14 8 22 6',
+            fill: 'none',
+            stroke: 'var(--dsw-alias-label-secondary,#888)',
+            'stroke-width': '2',
+            'stroke-linecap': 'round',
+          }),
+          h(
+            'g',
+            { className: 'dsh-autorestart-whale__spout' },
+            h('circle', { cx: '62', cy: '38', r: '5', fill: 'var(--dsw-alias-label-secondary,#888)', opacity: '0.7' }),
+            h('circle', { cx: '74', cy: '28', r: '3.5', fill: 'var(--dsw-alias-label-secondary,#888)', opacity: '0.55' }),
+            h('circle', { cx: '52', cy: '26', r: '3', fill: 'var(--dsw-alias-label-secondary,#888)', opacity: '0.45' }),
+          ),
+        ),
+        h('text', { className: 'dsh-autorestart-whale__z dsh-autorestart-whale__z--1', x: '148', y: '46' }, 'Z'),
+        h('text', { className: 'dsh-autorestart-whale__z dsh-autorestart-whale__z--2', x: '166', y: '30' }, 'Z'),
+        h('text', { className: 'dsh-autorestart-whale__z dsh-autorestart-whale__z--3', x: '182', y: '16' }, 'Z'),
+      )
+    }
+
+    /**
+     * The countdown overlay, in the shell's overlay layer.
+     *
+     * It renders NOTHING unless the Host really is counting down, waiting
+     * for the sessions or already powering off.
+     */
+    function SleepOverlay() {
+      const status = useSleepStatus()
+      const [, setTick] = useState(0)
+      // The overlay folds away locally as soon as the user cancels.
+      const [hidden, setHidden] = useState(false)
+      const [error, setError] = useState('')
+      const [busy, setBusy] = useState(false)
+      const t = translate ?? ((name) => name)
+
+      const phase = status && typeof status === 'object' && typeof status.phase === 'string'
+        ? status.phase
+        : ''
+
+      // The shared poll runs every 2s, but the big number has to move every
+      // second: the countdown owns a local 1s tick. The interval is cleared
+      // when the phase changes and when the component leaves.
+      useEffect(() => {
+        if (phase !== 'countdown') return undefined
+        const timer = setInterval(() => setTick((value) => value + 1), 1000)
+        return () => clearInterval(timer)
+      }, [phase])
+
+      // The remaining time is measured from the moment the status arrived,
+      // so the number keeps ticking between two polls.
+      const remainingMs = status && typeof status.remainingMs === 'number' && Number.isFinite(status.remainingMs)
+        ? status.remainingMs
+        : 0
+      const elapsed = sleepStore.at > 0 ? Date.now() - sleepStore.at : 0
+      const seconds = formatRemainingMs(Math.max(0, remainingMs - elapsed))
+
+      /**
+       * Cancel the standby: the request goes out at once and the overlay
+       * folds away locally, so the user is never stuck behind it.
+       */
+      const cancel = async () => {
+        if (busy) return
+        setBusy(true)
+        setError('')
+        setHidden(true)
+        try {
+          const response = await fetch(DEFAULT_SLEEP_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'cancel' }),
+          })
+          let body = null
+          try {
+            body = await response.json()
+          } catch {
+            body = null
+          }
+          if (!response.ok) {
+            const message = body && typeof body === 'object'
+              ? (body.error || body.message || '')
+              : ''
+            setError(fill(t('sleep.error'), { message: message || String(response.status) }))
+            return
+          }
+          if (body && typeof body === 'object') setSleepInfo(body)
+        } catch (failure) {
+          setError(fill(t('sleep.error'), { message: describeError(failure) }))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      // A request that failed still says something: the overlay is gone,
+      // but the reason stays on screen.
+      if (hidden) {
+        if (error === '') return null
+        ensureSleepStyle()
+        return h('div', { className: 'dsh-autorestart-sleep-toast', role: 'alert' }, error)
+      }
+
+      if (phase === 'waiting') {
+        ensureSleepStyle()
+        const blockers = status && Array.isArray(status.blockers) ? status.blockers : []
+        return h(
+          'div',
+          {
+            className: 'dsh-autorestart-sleep-waiting',
+            role: 'status',
+            'aria-live': 'polite',
+            'data-dsh-autorestart-sleep-waiting': 'true',
+          },
+          h('p', { className: 'dsh-autorestart-sleep-waiting__title' }, t('sleep.waiting.title')),
+          h('p', { className: 'dsh-autorestart-sleep-waiting__body' }, t('sleep.waiting.body')),
+          blockers.length === 0
+            ? h('p', { className: 'dsh-autorestart-sleep-waiting__none' }, t('sleep.waiting.none'))
+            : h(
+              'ul',
+              { className: 'dsh-autorestart-sleep-waiting__list' },
+              blockers.map((entry, index) => h(
+                'li',
+                { key: 'blocker-' + index },
+                fill(t('sleep.waiting.blocker'), {
+                  title: entry && typeof entry.title === 'string' && entry.title !== ''
+                    ? entry.title
+                    : t('panelBlockedGeneric'),
+                }),
+              )),
+            ),
+          h('p', { className: 'dsh-autorestart-sleep-waiting__count' }, fill(t('sleep.waiting.count'), { n: blockers.length })),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-autorestart-sleep-waiting__cancel',
+              onClick: cancel,
+              disabled: busy,
+            },
+            t('sleep.waiting.cancel'),
+          ),
+        )
+      }
+
+      if (phase === 'countdown') {
+        ensureSleepStyle()
+        const urgent = seconds <= 3
+        return h(
+          'div',
+          {
+            className: 'dsh-autorestart-sleep-overlay'
+              + (urgent ? ' dsh-autorestart-sleep-overlay--urgent' : ''),
+            role: 'dialog',
+            'aria-live': 'assertive',
+            'aria-label': t('sleep.countdown.hint'),
+            'data-dsh-autorestart-sleep-countdown': 'true',
+          },
+          // The key changes every second, so the number restarts its pulse
+          // on every tick.
+          h(
+            'div',
+            { className: 'dsh-autorestart-sleep-overlay__number', key: 'number-' + seconds },
+            String(Math.max(0, seconds)),
+          ),
+          whaleArt(urgent),
+          h(
+            'p',
+            { className: 'dsh-autorestart-sleep-overlay__caption', key: 'caption-' + seconds },
+            pickSleepCaption(seconds, t),
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-autorestart-sleep-overlay__cancel',
+              onClick: cancel,
+              disabled: busy,
+            },
+            t('sleep.countdown.cancel'),
+          ),
+          h('p', { className: 'dsh-autorestart-sleep-overlay__hint' }, t('sleep.countdown.hint')),
+        )
+      }
+
+      if (phase === 'shutting-down') {
+        ensureSleepStyle()
+        return h(
+          'div',
+          {
+            className: 'dsh-autorestart-sleep-overlay dsh-autorestart-sleep-overlay--goodnight',
+            role: 'status',
+            'aria-live': 'assertive',
+            'data-dsh-autorestart-sleep-shutdown': 'true',
+          },
+          whaleArt(false),
+          h('p', { className: 'dsh-autorestart-sleep-overlay__caption' }, t('sleep.shuttingDown.title')),
+          h('p', { className: 'dsh-autorestart-sleep-overlay__hint' }, t('sleep.shuttingDown.body')),
+        )
+      }
+
+      return null
     }
 
     return {
@@ -1159,7 +2382,20 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'autorestart-restart-pill', order: 0 }, RestartPill))
         ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'autorestart-restart-dot', order: 20 }, RestartDot))
         ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'autorestart-backup-choice', order: 7, locale: NS }, BackupChoicePanel))
+        // The graceful-standby button: a SINGLE slot (no id, no order), so it
+        // lands in the leading corner of the conversation header — left of
+        // the session title, at the top-left of the main area.
+        ctx.slots.inject('conversation.header.leading', () => ctx.slots.register({ name: 'conversation.header.leading' }, SleepButton))
+        // The countdown overlay: a frame-wide floating layer above every
+        // column.
+        ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-sleep-overlay', order: 60 }, SleepOverlay))
       },
+      // The named exports of this module (the client module system hands
+      // `factory(require) -> exports` to every importer).
+      pickSleepCaption,
+      shouldShowSleepButton,
+      buildChoiceBody,
+      formatRemainingMs,
     }
   },
 })

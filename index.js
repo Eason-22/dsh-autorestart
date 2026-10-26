@@ -3619,6 +3619,10 @@ function sleepStatusPayload(sleep, config) {
       kind: invocation.kind,
       label: invocation.label,
       source: invocation.source,
+      // Machine-readable: the host was only recognized as WSL because the
+      // Windows drive is mounted (a hint, not a proof). The UI and the tests
+      // read this instead of guessing from the Chinese label.
+      suspect: invocation.suspect === true,
     },
     dryRun: sleepDryRun(),
     message: status.message,

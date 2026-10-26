@@ -638,12 +638,13 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(payload.countdownSeconds, 10)
   assert.equal(payload.remainingMs, 0)
   assert.deepEqual(payload.blockers, [])
-  assert.deepEqual(Object.keys(payload.host).sort(), ['kind', 'label', 'platform', 'source'])
+  assert.deepEqual(Object.keys(payload.host).sort(), ['kind', 'label', 'platform', 'source', 'suspect'])
   assert.equal(payload.host.platform, process.platform)
   const expected = detectShutdownPlan({ platform: process.platform, env: process.env })
   assert.equal(payload.host.kind, expected.kind, 'the reported host must be the detected host')
   assert.equal(payload.host.label, expected.label)
   assert.equal(payload.host.source, expected.source)
+  assert.equal(payload.host.suspect, expected.suspect === true, 'the suspect flag must be machine readable')
   assert.equal(payload.dryRun, false)
   assert.equal(typeof payload.message, 'string')
   assert.equal(payload.lastRun, null)
@@ -816,6 +817,70 @@ test('a shutdown command that does not start leaves the machine idle, not "shutt
   assert.equal(status.lastRun.executed, false)
   assert.match(status.lastRun.error, /spawn-failed/)
   assert.match(status.message, /没跑起来/)
+})
+
+test('a dry run goes back to idle and says what it WOULD have run', async () => {
+  const controller = createSleepController({
+    busyAgents: () => [],
+    gate: () => ({ allow: true, blockedBy: [] }),
+    shutdown: () => Promise.resolve({
+      ok: true,
+      at: new Date().toISOString(),
+      command: 'shutdown.exe',
+      args: ['/s', '/f', '/t', '0'],
+      executed: false,
+      pid: null,
+      error: null,
+      dryRun: true,
+    }),
+    setInterval: () => 0,
+    clearInterval: () => {},
+  })
+  controller.arm()
+  for (let step = 0; step < 10; step += 1) controller.tick()
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const status = controller.status()
+  assert.equal(status.phase, 'idle', 'a dry run must not leave the state at "shutting down"')
+  assert.equal(status.armed, false, 'a dry run leaves nothing armed')
+  assert.equal(status.remainingMs, 0)
+  assert.match(status.message, /试运行/, 'the message must say that this was only a rehearsal')
+  assert.match(status.message, /shutdown\.exe/, 'the message must name the command it would have run')
+  assert.match(status.message, /不会真的关机/, 'the message must say that nothing was powered off')
+  assert.equal(status.lastRun.dryRun, true, 'the last run must be marked as a dry run')
+  assert.equal(status.lastRun.executed, false, 'a dry run never executes anything')
+  assert.equal(status.lastRun.command, 'shutdown.exe')
+  assert.deepEqual(status.lastRun.args, ['/s', '/f', '/t', '0'])
+})
+
+test('the last gate keeps the busy conversations in the waiting card', async () => {
+  // The gate allows the countdown to end and denies the very last check, which
+  // is the race a conversation that starts working in that exact moment wins.
+  let gateCalls = 0
+  const controller = createSleepController({
+    busyAgents: () => [],
+    gate: () => {
+      gateCalls += 1
+      return gateCalls === 1
+        ? { allow: true, blockedBy: [] }
+        : { allow: false, reason: 'busy', blockedBy: [{ sessionId: 'sess-late' }] }
+    },
+    titleOf: () => '收尾的会话',
+    shutdown: () => Promise.resolve({ ok: false, executed: false, error: 'gate-blocked' }),
+    setInterval: () => 0,
+    clearInterval: () => {},
+  })
+  controller.arm()
+  for (let step = 0; step < 10; step += 1) controller.tick()
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const status = controller.status()
+  assert.equal(status.phase, 'waiting', 'the machine must not be closed')
+  assert.deepEqual(
+    status.blockers,
+    [{ sessionId: 'sess-late', title: '收尾的会话' }],
+    'the waiting card must still know WHO is busy',
+  )
+  assert.match(status.message, /收尾的会话/)
+  assert.doesNotMatch(status.message, /0 个会话/, 'the copy must never talk about zero busy sessions')
 })
 
 /* ------------------------------------------------------------------ *

@@ -73,6 +73,12 @@ import {
   runCommandNow,
   scheduleDetachedRestart,
 } from './lib/restart.js'
+import {
+  createSleepController,
+  detectShutdownPlan,
+  planInvocation,
+  runShutdown,
+} from './lib/sleep.js'
 
 /**
  * `@deepseek-ai/schemastery` resolves inside modules that live in the dsh installation,
@@ -241,6 +247,14 @@ function buildConfigSchema() {
         .description('How many snapshots are kept; older ones are deleted automatically.'),
       rollbackTimeoutMs: schemastery.number().min(1000).default(90000)
         .description('Milliseconds the detached watcher waits for the relaunched host before it restores the snapshot.'),
+      // graceful sleep ("优雅挂机"): wait for every conversation, count down, then
+      // switch the REAL host machine off (a WSL host shuts Windows down, not the distro)
+      showSleepButton: schemastery.boolean().default(true)
+        .description('是否在主界面左上方显示「优雅挂机」按钮：关掉之后界面上不再有这个按钮，挂机接口也不再被界面调用。'),
+      sleepCountdownSeconds: schemastery.number().min(3).max(120).default(10)
+        .description('所有会话都收工之后、真正关机之前的倒计时秒数（3 到 120 秒，默认 10 秒）。'),
+      sleepCommand: schemastery.string().default('')
+        .description('自定义关机命令：留空表示按系统自动识别（Windows / WSL / Linux / macOS），填了就用这条命令代替自动识别。'),
     })
   } catch (error) {
     schemasterySource = `construction-failed: ${String(error)}`
@@ -280,6 +294,12 @@ const DEFAULTS = {
   backupIncludePlugins: true,
   maxBackups: 2,
   rollbackTimeoutMs: 90000,
+  // Graceful sleep ("优雅挂机"): the button in the top-left of the main UI, the
+  // countdown before the machine is switched off and the optional custom
+  // shutdown command (empty = the host is detected automatically).
+  showSleepButton: true,
+  sleepCountdownSeconds: 10,
+  sleepCommand: '',
 }
 
 /** Merge a loader row config over {@link DEFAULTS}, dropping wrong-typed values. */
@@ -304,6 +324,14 @@ function normalizeConfig(raw) {
   const rollbackTimeout = Number(config.rollbackTimeoutMs)
   config.rollbackTimeoutMs =
     Number.isFinite(rollbackTimeout) && rollbackTimeout >= 1000 ? Math.trunc(rollbackTimeout) : 90000
+  // The countdown of the graceful sleep is clamped: too short and the user
+  // cannot cancel it any more, too long and the machine stays awake forever.
+  const countdown = Number(config.sleepCountdownSeconds)
+  config.sleepCountdownSeconds = Number.isFinite(countdown)
+    ? Math.min(120, Math.max(3, Math.trunc(countdown)))
+    : 10
+  if (typeof config.sleepCommand !== 'string') config.sleepCommand = ''
+  if (typeof config.showSleepButton !== 'boolean') config.showSleepButton = true
   return config
 }
 
@@ -368,6 +396,21 @@ function resolveChoicePath(config) {
   const index = healthPath.lastIndexOf('/')
   const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
   return `${prefix}/choice`
+}
+
+/**
+ * Resolve the sleep-route path: a sibling of the health route, under the same
+ * prefix (`GET /sleep` reports the state of the graceful sleep, `POST /sleep`
+ * arms or cancels it).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveSleepPath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/sleep`
 }
 
 /**
@@ -552,14 +595,17 @@ const INSTALL_CHOICE_FILE = 'install-choice.json'
  * Read the recorded install choice from the fallback file.
  *
  * @param {string} stateDir
- * @returns {boolean|null} the recorded value, or null when there is none
+ * @returns {{ includePlugins: boolean|null, showSleepButton: boolean|null }|null}
  */
 function readInstallChoice(stateDir) {
   try {
     const raw = fs.readFileSync(path.join(stateDir, INSTALL_CHOICE_FILE), 'utf8')
     const parsed = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object') return null
-    return typeof parsed.includePlugins === 'boolean' ? parsed.includePlugins : null
+    return {
+      includePlugins: typeof parsed.includePlugins === 'boolean' ? parsed.includePlugins : null,
+      showSleepButton: typeof parsed.showSleepButton === 'boolean' ? parsed.showSleepButton : null,
+    }
   } catch {
     return null
   }
@@ -568,18 +614,23 @@ function readInstallChoice(stateDir) {
 /**
  * Write the install choice into the fallback file.
  *
+ * The file is written ADDITIVELY: a choice about the sleep button must not
+ * erase the recorded backup scope (and the other way round).
+ *
  * @param {string} stateDir
- * @param {boolean} includePlugins
+ * @param {{ includePlugins?: boolean, showSleepButton?: boolean }} values
  * @returns {string} the file that was written
  */
-function writeInstallChoice(stateDir, includePlugins) {
+function writeInstallChoice(stateDir, values) {
   const file = path.join(stateDir, INSTALL_CHOICE_FILE)
+  const current = readInstallChoice(stateDir) || { includePlugins: null, showSleepButton: null }
+  const payload = {
+    includePlugins: typeof values.includePlugins === 'boolean' ? values.includePlugins : current.includePlugins,
+    showSleepButton: typeof values.showSleepButton === 'boolean' ? values.showSleepButton : current.showSleepButton,
+    at: new Date().toISOString(),
+  }
   fs.mkdirSync(stateDir, { recursive: true })
-  fs.writeFileSync(
-    file,
-    JSON.stringify({ includePlugins: includePlugins === true, at: new Date().toISOString() }, null, 2),
-    'utf8',
-  )
+  fs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf8')
   return file
 }
 
@@ -602,8 +653,34 @@ export function resolveBackupIncludePlugins(rawConfig, stateDir) {
     return { includePlugins: rawConfig.backupIncludePlugins, source: 'config' }
   }
   const fallback = typeof stateDir === 'string' && stateDir !== '' ? readInstallChoice(stateDir) : null
-  if (fallback !== null) return { includePlugins: fallback, source: 'fallback-file' }
+  if (fallback !== null && fallback.includePlugins !== null) {
+    return { includePlugins: fallback.includePlugins, source: 'fallback-file' }
+  }
   return { includePlugins: DEFAULTS.backupIncludePlugins, source: 'default' }
+}
+
+/**
+ * Resolve the effective `showSleepButton` value and where it came from.
+ *
+ * The same rule as the backup scope: the profile row config wins, the degraded
+ * fallback file fills the gap, and the built-in default applies when neither
+ * says anything.
+ *
+ * @param {object|null|undefined} rawConfig the loader row config, as received
+ * @param {string} stateDir
+ * @returns {{ showSleepButton: boolean, source: 'config'|'fallback-file'|'default' }}
+ */
+export function resolveShowSleepButton(rawConfig, stateDir) {
+  if (rawConfig && typeof rawConfig === 'object'
+    && Object.prototype.hasOwnProperty.call(rawConfig, 'showSleepButton')
+    && typeof rawConfig.showSleepButton === 'boolean') {
+    return { showSleepButton: rawConfig.showSleepButton, source: 'config' }
+  }
+  const fallback = typeof stateDir === 'string' && stateDir !== '' ? readInstallChoice(stateDir) : null
+  if (fallback !== null && fallback.showSleepButton !== null) {
+    return { showSleepButton: fallback.showSleepButton, source: 'fallback-file' }
+  }
+  return { showSleepButton: DEFAULTS.showSleepButton, source: 'default' }
 }
 
 /**
@@ -1657,6 +1734,65 @@ export function createRuntime(ctx, config, options = {}) {
     }
   }
 
+  /**
+   * Persist one or more user choices into the profile row of this plugin.
+   *
+   * The official `configEditor` service is the primary path: the choice goes
+   * into the profile row of this plugin, so the settings page and the one-time
+   * prompts read and write the same key (one source of truth). When the service
+   * is unavailable the choice degrades to a file in the plugin's state
+   * directory and a warning is logged, so the choice is never silently lost.
+   *
+   * @param {{ backupIncludePlugins?: boolean, showSleepButton?: boolean }} changes
+   * @returns {Promise<{ applied: 'config'|'fallback-file' }>}
+   */
+  const persistConfigChoice = async (changes) => {
+    // The profile row and the degraded fallback file use different key names for
+    // the backup scope: the row carries the plugin's own key
+    // (`backupIncludePlugins`), the file the short one (`includePlugins`).
+    const wanted = {}
+    const fallback = {}
+    if (typeof changes.backupIncludePlugins === 'boolean') {
+      wanted.backupIncludePlugins = changes.backupIncludePlugins
+      fallback.includePlugins = changes.backupIncludePlugins
+    }
+    if (typeof changes.showSleepButton === 'boolean') {
+      wanted.showSleepButton = changes.showSleepButton
+      fallback.showSleepButton = changes.showSleepButton
+    }
+    const editor = resolveConfigEditor(ctx)
+    if (editor !== null) {
+      try {
+        const entry = findOwnEntry(editor)
+        if (entry !== null) {
+          await editor.edit(entry, (current) => {
+            const base = current && typeof current === 'object' ? { ...current } : {}
+            return { ...base, ...wanted }
+          })
+          // The Loader reconciles the row, but the running instance must not
+          // keep the old value until that happens.
+          for (const [key, value] of Object.entries(wanted)) config[key] = value
+          log.info(`the choice was written into the profile configuration: ${JSON.stringify(wanted)}`)
+          return { applied: 'config' }
+        }
+        log.warn(`the configEditor service has no profile row for ${name}; the choice degrades to ${INSTALL_CHOICE_FILE}`)
+      } catch (error) {
+        log.warn(`could not write the choice into the profile configuration: ${describeError(error)}`)
+      }
+    } else {
+      log.warn(`the configEditor service is unavailable; the choice degrades to ${INSTALL_CHOICE_FILE}`)
+    }
+    const file = path.join(path.dirname(stateFile), INSTALL_CHOICE_FILE)
+    try {
+      writeInstallChoice(path.dirname(stateFile), fallback)
+    } catch (error) {
+      throw new Error(`could not write the choice to ${file}: ${describeError(error)}`)
+    }
+    for (const [key, value] of Object.entries(wanted)) config[key] = value
+    log.warn(`the choice was written to ${file} instead of the profile configuration`)
+    return { applied: 'fallback-file' }
+  }
+
   const runtime = {
     get state() {
       return state
@@ -1707,51 +1843,32 @@ export function createRuntime(ctx, config, options = {}) {
     log,
     persist,
     /**
+     * Persist one or more user choices into the profile row of this plugin.
+     *
+     * @param {{ backupIncludePlugins?: boolean, showSleepButton?: boolean }} changes
+     * @returns {Promise<{ applied: 'config'|'fallback-file' }>}
+     */
+    applyConfigChoice: (changes) => persistConfigChoice(changes),
+    /**
      * Persist the user's one-time install choice: whether the pre-restart
      * backup also snapshots the installed plugin tree.
-     *
-     * The official `configEditor` service is the primary path: the choice goes
-     * into the profile row of this plugin, so the settings page and this prompt
-     * read and write the same key (one source of truth). When the service is
-     * unavailable the choice degrades to a file in the plugin's state directory
-     * and a warning is logged, so the choice is never silently lost.
      *
      * @param {boolean} includePlugins
      * @returns {Promise<{ applied: 'config'|'fallback-file', includePlugins: boolean }>}
      */
     async applyBackupChoice(includePlugins) {
-      const value = includePlugins === true
-      const editor = resolveConfigEditor(ctx)
-      if (editor !== null) {
-        try {
-          const entry = findOwnEntry(editor)
-          if (entry !== null) {
-            await editor.edit(entry, (current) => {
-              const base = current && typeof current === 'object' ? { ...current } : {}
-              return { ...base, backupIncludePlugins: value }
-            })
-            // The Loader reconciles the row, but the running instance must not
-            // keep the old value until that happens.
-            config.backupIncludePlugins = value
-            log.info(`the install choice was written into the profile configuration: backupIncludePlugins=${value}`)
-            return { applied: 'config', includePlugins: value }
-          }
-          log.warn(`the configEditor service has no profile row for ${name}; the install choice degrades to ${INSTALL_CHOICE_FILE}`)
-        } catch (error) {
-          log.warn(`could not write the install choice into the profile configuration: ${describeError(error)}`)
-        }
-      } else {
-        log.warn(`the configEditor service is unavailable; the install choice degrades to ${INSTALL_CHOICE_FILE}`)
-      }
-      const file = path.join(path.dirname(stateFile), INSTALL_CHOICE_FILE)
-      try {
-        writeInstallChoice(path.dirname(stateFile), value)
-      } catch (error) {
-        throw new Error(`could not write the install choice to ${file}: ${describeError(error)}`)
-      }
-      config.backupIncludePlugins = value
-      log.warn(`the install choice was written to ${file} instead of the profile configuration`)
-      return { applied: 'fallback-file', includePlugins: value }
+      const result = await persistConfigChoice({ backupIncludePlugins: includePlugins === true })
+      return { applied: result.applied, includePlugins: includePlugins === true }
+    },
+    /**
+     * Persist whether the graceful-sleep button is shown in the main UI.
+     *
+     * @param {boolean} showSleepButton
+     * @returns {Promise<{ applied: 'config'|'fallback-file', showSleepButton: boolean }>}
+     */
+    async applySleepButtonChoice(showSleepButton) {
+      const result = await persistConfigChoice({ showSleepButton: showSleepButton === true })
+      return { applied: result.applied, showSleepButton: showSleepButton === true }
     },
     toolErrors,
     startPolling,
@@ -3235,16 +3352,20 @@ function buildHandoffRoute(ctx, runtime, config) {
 
 /**
  * Build the POST `/choice` route: persist the one-time install choice of the
- * user (whether the pre-restart backup also snapshots the installed plugins).
+ * user (whether the pre-restart backup also snapshots the installed plugins)
+ * and the answer to the one-time question whether the graceful-sleep button is
+ * shown.
  *
  * It sits next to the health route and uses the same authentication rule
  * (loopback OR a request the connection service admits). Body:
- * `{ "includePlugins": boolean }`; anything that is not a boolean is refused
- * with a 400 and NOTHING is written.
+ * `{ "includePlugins"?: boolean, "showSleepButton"?: boolean }` — at least one
+ * of the two keys must be present, and a key that IS present must be a
+ * boolean. Anything else is refused with a 400 and NOTHING is written.
  *
- * The answer is `{ ok: true, applied: 'config' | 'fallback-file', includePlugins }`:
+ * The answer is `{ ok: true, applied: 'config' | 'fallback-file', ... }`:
  * `applied` says where the choice landed — the profile configuration (the
- * official path) or the degraded fallback file.
+ * official path) or the degraded fallback file. Only the keys that were asked
+ * for are echoed back.
  */
 function buildChoiceRoute(ctx, runtime, config) {
   const routePath = resolveChoicePath(config)
@@ -3272,8 +3393,21 @@ function buildChoiceRoute(ctx, runtime, config) {
       }
       void readJsonBody(req).then(async (payload) => {
         const body = payload && typeof payload === 'object' ? payload : {}
-        const includePlugins = body.includePlugins
-        if (typeof includePlugins !== 'boolean') {
+        const hasInclude = Object.prototype.hasOwnProperty.call(body, 'includePlugins')
+        const hasShow = Object.prototype.hasOwnProperty.call(body, 'showSleepButton')
+        if (!hasInclude && !hasShow) {
+          // Neither key was asked for: there is nothing to persist.
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'no-choice',
+            instruction: 'Send { "includePlugins": true | false } and/or { "showSleepButton": true | false }.',
+          }))
+          return
+        }
+        if (hasInclude && typeof body.includePlugins !== 'boolean') {
           // Nothing is written for a malformed choice: the caller's answer
           // must not change the profile configuration.
           res.statusCode = 400
@@ -3286,15 +3420,30 @@ function buildChoiceRoute(ctx, runtime, config) {
           }))
           return
         }
-        const result = await runtime.applyBackupChoice(includePlugins)
+        if (hasShow && typeof body.showSleepButton !== 'boolean') {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'showSleepButton-must-be-boolean',
+            instruction: 'Send { "showSleepButton": true | false }.',
+          }))
+          return
+        }
+        const changes = {}
+        // The route field is `includePlugins`, the configuration key is
+        // `backupIncludePlugins` (the profile row keeps the plugin's own name).
+        if (hasInclude) changes.backupIncludePlugins = body.includePlugins === true
+        if (hasShow) changes.showSleepButton = body.showSleepButton === true
+        const result = await runtime.applyConfigChoice(changes)
+        const answer = { ok: true, applied: result.applied }
+        if (hasInclude) answer.includePlugins = body.includePlugins === true
+        if (hasShow) answer.showSleepButton = body.showSleepButton === true
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
-        res.end(JSON.stringify({
-          ok: true,
-          applied: result.applied,
-          includePlugins: result.includePlugins === true,
-        }))
+        res.end(JSON.stringify(answer))
       }).catch((error) => {
         res.statusCode = 500
         res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -3304,8 +3453,165 @@ function buildChoiceRoute(ctx, runtime, config) {
   }
 }
 
+/**
+ * Is the graceful sleep a dry run?
+ *
+ * With `DSH_AUTORESTART_SLEEP_DRYRUN=1` the plugin reports the command it
+ * WOULD run and never runs it. That is what makes the feature testable on a
+ * live machine.
+ *
+ * @returns {boolean}
+ */
+function sleepDryRun() {
+  return process.env.DSH_AUTORESTART_SLEEP_DRYRUN === '1'
+}
+
+/**
+ * Build the graceful-sleep service: the detected host plan plus the state
+ * machine that waits for the conversations, counts down and switches the
+ * machine off.
+ *
+ * The gate is NOT re-implemented here: the sleep feature asks the very same
+ * `busyAgents()` and `gate()` the restart feature uses, so both agree on what
+ * "every conversation is idle" means.
+ *
+ * @param {object} ctx
+ * @param {object} runtime
+ * @param {object} config
+ * @returns {{ plan: object, controller: object, invocation: () => object }}
+ */
+function createSleepService(ctx, runtime, config) {
+  const plan = detectShutdownPlan({ platform: process.platform, env: process.env })
+  // The configured command (if any) replaces the detected one; the plan keeps
+  // the host kind, so the UI still shows WHICH machine is going to be closed.
+  const invocation = () => planInvocation(plan, {
+    sleepCommand: config.sleepCommand,
+    platform: plan.platform,
+  })
+  const controller = createSleepController({
+    now: () => Date.now(),
+    busyAgents: () => runtime.busyAgents(),
+    gate: () => runtime.gate(),
+    titleOf: (sessionId) => runtime.sessionTitle(sessionId),
+    countdownSeconds: config.sleepCountdownSeconds,
+    hostLabel: plan.label,
+    supported: plan.kind !== 'unsupported',
+    log: runtime.log,
+    // The timer belongs to the plugin: `ctx.interval` is disposed with it.
+    setInterval: (fn, ms) => ctx.interval(fn, ms),
+    clearInterval: (handle) => {
+      try {
+        if (typeof handle === 'function') handle()
+      } catch {}
+    },
+    shutdown: () => runShutdown(invocation(), {
+      dryRun: sleepDryRun(),
+      log: runtime.log,
+      // The gate is checked ONE more time right before the machine is closed.
+      gate: () => runtime.gate(),
+    }),
+  })
+  return { plan, controller, invocation }
+}
+
+/**
+ * The state of the graceful sleep, in the shape the client renders it.
+ *
+ * @param {{ plan: object, controller: object, invocation: () => object }} sleep
+ * @param {object} config
+ * @returns {object}
+ */
+function sleepStatusPayload(sleep, config) {
+  const status = sleep.controller.status()
+  const invocation = sleep.invocation()
+  return {
+    ok: true,
+    phase: status.phase,
+    armed: status.armed,
+    showSleepButton: config.showSleepButton !== false,
+    countdownSeconds: status.countdownSeconds,
+    remainingMs: status.remainingMs,
+    blockers: status.blockers,
+    host: {
+      platform: invocation.platform || process.platform,
+      kind: invocation.kind,
+      label: invocation.label,
+      source: invocation.source,
+    },
+    dryRun: sleepDryRun(),
+    message: status.message,
+    lastRun: status.lastRun,
+  }
+}
+
+/**
+ * Build the `/sleep` route: `GET` reports the state of the graceful sleep,
+ * `POST` arms or cancels it.
+ *
+ * It sits next to the health route and uses the same authentication rule
+ * (loopback OR a request the connection service admits). Body:
+ * `{ "action": "arm" | "cancel" }`; anything else is refused with a 400.
+ */
+function buildSleepRoute(ctx, runtime, config, sleep) {
+  const routePath = resolveSleepPath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      const answer = (payload, status = 200) => {
+        res.statusCode = status
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify(payload))
+      }
+      const method = req && typeof req.method === 'string' ? req.method.toUpperCase() : 'GET'
+      if (method === 'GET') {
+        answer(sleepStatusPayload(sleep, config))
+        return
+      }
+      if (method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'GET, POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then((payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const action = typeof body.action === 'string' ? body.action.trim() : ''
+        if (action === 'arm') {
+          sleep.controller.arm()
+        } else if (action === 'cancel') {
+          sleep.controller.cancel()
+        } else {
+          answer({
+            ok: false,
+            error: 'unknown-action',
+            instruction: 'Send { "action": "arm" | "cancel" }.',
+          }, 400)
+          return
+        }
+        answer(sleepStatusPayload(sleep, config))
+      }).catch((error) => {
+        answer({ ok: false, error: describeError(error) }, 400)
+      })
+    },
+  }
+}
+
 /** Expose a tiny read-only health route for humans and verification scripts. */
-function registerHealthRoute(ctx, runtime, config) {
+function registerHealthRoute(ctx, runtime, config, sleep) {
   const routePath = typeof config.healthPath === 'string' && config.healthPath.startsWith('/')
     ? config.healthPath
     : '/__dsh_autorestart/health'
@@ -3491,6 +3797,7 @@ function registerHealthRoute(ctx, runtime, config) {
     const recoverRoute = buildRecoverRoute(ctx, runtime, config)
     const handoffRoute = buildHandoffRoute(ctx, runtime, config)
     const choiceRoute = buildChoiceRoute(ctx, runtime, config)
+    const sleepRoute = sleep ? buildSleepRoute(ctx, runtime, config, sleep) : null
     try {
       const origin = typeof webServer.getOrigin === 'function' ? String(webServer.getOrigin()) : ''
       const portMatch = /:(\d+)\/?$/.exec(origin)
@@ -3521,6 +3828,13 @@ function registerHealthRoute(ctx, runtime, config) {
       target.effect(() => webServer.register(choiceRoute), 'dsh-autorestart: choice route')
     } catch (error) {
       runtime.log.warn('could not register the choice route:', String(error))
+    }
+    if (sleepRoute !== null) {
+      try {
+        target.effect(() => webServer.register(sleepRoute), 'dsh-autorestart: sleep route')
+      } catch (error) {
+        runtime.log.warn('could not register the sleep route:', String(error))
+      }
     }
     if (config.autoReloadPage !== false && typeof webServer.tapIndex === 'function') {
       try {
@@ -3658,10 +3972,18 @@ export function apply(ctx, rawConfig) {
   // The one-time install choice lives in the profile row config (the single
   // source of truth). Only when the row does not set the key at all does the
   // degraded fallback file get a say.
-  const choice = resolveBackupIncludePlugins(rawConfig, resolveStateDir(config))
+  const stateDir = resolveStateDir(config)
+  const choice = resolveBackupIncludePlugins(rawConfig, stateDir)
   config.backupIncludePlugins = choice.includePlugins
+  // The same rule for the graceful-sleep button: the profile row decides, the
+  // fallback file fills the gap, the built-in default applies otherwise.
+  const sleepChoice = resolveShowSleepButton(rawConfig, stateDir)
+  config.showSleepButton = sleepChoice.showSleepButton
   const runtime = createRuntime(ctx, config, { backupChoiceSource: choice.source })
   const log = runtime.log
+  // The graceful sleep: the host plan and the state machine that waits for the
+  // conversations, counts down and switches the machine off.
+  const sleep = createSleepService(ctx, runtime, config)
 
   log.info('activated', {
     stateFile: runtime.stateFile,
@@ -3673,6 +3995,9 @@ export function apply(ctx, rawConfig) {
     configSchema: Config !== undefined,
     backupIncludePlugins: config.backupIncludePlugins,
     backupChoiceSource: choice.source,
+    showSleepButton: config.showSleepButton,
+    sleepChoiceSource: sleepChoice.source,
+    sleepHost: sleep.plan.kind,
   })
   if (Config === undefined) {
     log.warn('Config schema is unavailable in this build (schemastery could not be loaded); configuration still works through cordis.patch.yml and the built-in defaults')
@@ -3702,13 +4027,22 @@ export function apply(ctx, rawConfig) {
   registerTools(ctx, runtime, config)
   registerManualRestartGuard(ctx, runtime, config)
   registerSystemPrompt(ctx, runtime)
-  registerHealthRoute(ctx, runtime, config)
+  registerHealthRoute(ctx, runtime, config, sleep)
 
   ctx.effect(() => () => {
     runtime.markDisposed()
     runtime.stopPolling()
+    // The countdown timer belongs to the plugin: it must not survive it.
+    sleep.controller.dispose()
     persistSafely(runtime)
   }, 'dsh-autorestart lifecycle')
 }
 
-export { DEFAULTS, normalizeConfig, resolveStateFile, resolveStateDir, resolveChoicePath }
+export {
+  DEFAULTS,
+  normalizeConfig,
+  resolveStateFile,
+  resolveStateDir,
+  resolveChoicePath,
+  resolveSleepPath,
+}

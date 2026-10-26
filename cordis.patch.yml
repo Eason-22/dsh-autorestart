@@ -45,3 +45,14 @@
         # How long the detached watcher waits for the relaunched host (ms) before
         # it restores the snapshot and launches the host again.
         rollbackTimeoutMs: 90000
+        # 优雅挂机：Show the graceful-sleep button in the top-left of the main UI.
+        # The button arms the countdown; the machine is switched off for real
+        # (a WSL host shuts Windows down, not the WSL distribution).
+        showSleepButton: true
+        # How many seconds the countdown lasts after every conversation is done
+        # (3..120). The plugin counts down itself, so the operating system is
+        # asked to shut down immediately afterwards.
+        sleepCountdownSeconds: 10
+        # A custom shutdown command. Empty = the host is detected automatically
+        # (Windows / WSL / Linux / macOS); a value replaces the detected command.
+        sleepCommand: ''

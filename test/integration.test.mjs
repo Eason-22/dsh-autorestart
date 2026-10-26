@@ -468,13 +468,16 @@ test('the served index gets a boot-token heartbeat for dsh web pages', () => {
     },
   })
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
-  assert.equal(routes.length, 5)
+  // 6 routes: health, park, recover, handoff, choice and sleep.
+  assert.equal(routes.length, 6)
   assert.equal(routes[0].kind, 'exact')
   assert.equal(routes[0].path, '/__dsh_autorestart/health')
   assert.equal(routes[1].kind, 'exact')
   assert.equal(routes[1].path, '/__dsh_autorestart/park')
   assert.equal(routes[4].kind, 'exact')
   assert.equal(routes[4].path, '/__dsh_autorestart/choice')
+  assert.equal(routes[5].kind, 'exact')
+  assert.equal(routes[5].path, '/__dsh_autorestart/sleep')
   assert.equal(taps.length, 1)
   const html = taps[0]('<html><head></head><body>app</body></html>')
   assert.match(html, /data-dsh-autorestart-heartbeat/)
@@ -504,7 +507,7 @@ test('autoReloadPage: false suppresses the heartbeat but keeps the health route'
     },
   })
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, autoReloadPage: false })
-  assert.equal(routes.length, 5)
+  assert.equal(routes.length, 6)
   assert.equal(taps.length, 0)
 })
 
@@ -669,7 +672,7 @@ test('the ?gate=1 probe refuses a restart while a conversation has queued inbox 
   agent.inbox = { nextTurn: [{ id: 'm1' }], nextStep: [] };
   const { fake, routes } = contextWithRoutes({ runningAgents: [agent] });
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
-  assert.equal(routes.length, 5, 'the health route must be registered');
+  assert.equal(routes.length, 6, 'the health route must be registered');
   const res = fakeResponse();
   routes[0].handler({ url: '/__dsh_autorestart/health?gate=1', socket: { remoteAddress: '127.0.0.1' } }, res);
   assert.equal(res.statusCode, 200);
@@ -717,7 +720,7 @@ test('the ?state=1 probe reports the pending-restart state a UI banner needs', (
   });
   const { fake, routes } = contextWithRoutes();
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
-  assert.equal(routes.length, 5, 'the health route must be registered');
+  assert.equal(routes.length, 6, 'the health route must be registered');
   const res = fakeResponse();
   routes[0].handler({ url: '/__dsh_autorestart/health?state=1', socket: { remoteAddress: '127.0.0.1' } }, res);
   assert.equal(res.statusCode, 200);

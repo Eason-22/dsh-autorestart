@@ -1686,6 +1686,7 @@ test('a real click sends the gesture ticket, a scripted one does not', async () 
   assert.ok(real, 'the click must reach the host')
   assert.equal(real.init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
   assert.ok(real.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
+  assert.equal(mounted.reloads.count, 0, 'a page with a ticket never reloads')
 })
 
 /** The arm requests the client sent so far. */
@@ -1749,12 +1750,12 @@ test('a real click alone arms the machine', async () => {
   assert.ok(armed.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
 })
 
-test('a page without a gesture ticket does not arm: it reloads itself and offers a refresh', async () => {
+test('a page without a gesture ticket reloads itself once, quietly', async () => {
   // The page was opened before the plugin was updated: it has no ticket at
-  // all. There is no HTTP route that hands one out, so the only way out is a
-  // fresh page (in a browser).
+  // all. There is no HTTP route that hands one out, so the page reloads
+  // itself — silently — and the next click works.
   const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], platform: 'web' },
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
     ticket: null,
   })
   await mounted.poll()
@@ -1767,19 +1768,52 @@ test('a page without a gesture ticket does not arm: it reloads itself and offers
     .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
     .filter((call) => JSON.parse(call.init.body).action === 'arm')
   assert.equal(armed.length, 0, 'without a ticket nothing may be armed')
-  assert.equal(mounted.reloads.count, 0, 'the page must not reload itself')
+  assert.equal(mounted.reloads.count, 1, 'the page reloads itself once')
 
-  // The button only says what to do — there is nothing to click and the
-  // page does nothing on its own.
+  // The reload is silent: no hint, no button — the user only sees the page
+  // come back with a fresh ticket.
   const after = mounted.render('sidebar.footer.action')
-  const shown = textOf(after)
-  assert.ok(shown.includes('重启一次 DSH'), `the hint must be visible, got: ${shown}`)
+  assert.ok(!textOf(after).includes('重启'), 'the first reload must not show a hint')
   const buttons = walk(after).filter((node) => node.type === 'button')
   assert.equal(buttons.length, 1, 'the moon button must be the only button')
-  assert.equal(buttons[0].props['data-dsh-autorestart-sleep-button'], 'true')
 })
 
-test('a spent ticket says the same thing', async () => {
+test('the second attempt without a ticket says what to do', async () => {
+  const sessionStorage = createStorage()
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
+    ticket: null,
+    sessionStorage,
+  })
+  await mounted.poll()
+  let button = await mounted.settled('sidebar.footer.action')
+
+  // The first click: the page reloads itself (and remembers that it did).
+  button.props.onPointerDown({ isTrusted: true })
+  button.props.onClick()
+  await settleClient()
+  assert.equal(mounted.reloads.count, 1, 'the first click reloads the page')
+  assert.equal(sessionStorage.getItem('dsh-autorestart-sleep-ticket-reload'), '1')
+
+  // The page comes back without a ticket again (the host still serves the
+  // old page): now the button says what to do, and it does NOT reload again.
+  button = mounted.render('sidebar.footer.action')
+  const again = walk(button).find(
+    (node) => node.props && node.props['data-dsh-autorestart-sleep-button'] === 'true',
+  )
+  assert.ok(again, 'the button must still be there')
+  again.props.onPointerDown({ isTrusted: true })
+  again.props.onClick()
+  await settleClient()
+  assert.equal(mounted.reloads.count, 1, 'the page must not reload for ever')
+
+  const after = mounted.render('sidebar.footer.action')
+  assert.ok(textOf(after).includes('重启一次 DSH'), 'the hint must be visible')
+  const buttons = walk(after).filter((node) => node.type === 'button')
+  assert.equal(buttons.length, 1, 'there must be no action button')
+})
+
+test('a spent ticket reloads the page once, too', async () => {
   const mounted = mountClient({
     status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
     ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
@@ -1791,11 +1825,9 @@ test('a spent ticket says the same thing', async () => {
   button.props.onClick()
   await settleClient()
 
-  assert.equal(mounted.reloads.count, 0, 'the page must not reload itself')
+  assert.equal(mounted.reloads.count, 1, 'a spent ticket reloads the page once')
   const after = mounted.render('sidebar.footer.action')
-  assert.ok(textOf(after).includes('重启一次 DSH'), 'the hint must be visible')
-  const buttons = walk(after).filter((node) => node.type === 'button')
-  assert.equal(buttons.length, 1, 'there must be no action button')
+  assert.ok(!textOf(after).includes('重启'), 'the reload is silent')
 })
 
 test('a refused request is shown, never silent', async () => {

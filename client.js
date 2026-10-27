@@ -118,6 +118,16 @@ const SLEEP_DRY_RUN_NOTICE_MS = 8_000
 const SLEEP_GESTURE_WINDOW_MS = 3_000
 
 /**
+ * The flag that remembers "this session already reloaded itself once".
+ *
+ * A page that was opened before the plugin was updated has no gesture
+ * ticket (the host injects it into the HTML it serves). Reloading the page
+ * is the silent way to get a fresh one — the flag keeps that from becoming
+ * a loop.
+ */
+const SLEEP_RELOAD_FLAG = 'dsh-autorestart-sleep-ticket-reload'
+
+/**
  * The reasons that mean: this page has no usable gesture ticket.
  *
  * The ticket lives in the page (the host injects it into the HTML it
@@ -187,7 +197,7 @@ const ZH = {
   'sleep.error': '没能联系上关机服务：{message}',
   'sleep.refused': '这次点击没有被接受：{message}',
   'sleep.gestureMissing': '请用鼠标（或触控笔）直接点一下这个按钮：只有真实的点击才算数。',
-  'sleep.ticketHint': '插件刚更新过，重启一次 DSH 后可用这个按钮。',
+  'sleep.ticketHint': '插件刚更新过，请重启一次 DSH',
   'sleep.dryRun.title': '试运行：不会真的关机',
   'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
   'sleep.dryRun.close': '知道了',
@@ -301,7 +311,7 @@ const EN = {
   'sleep.error': 'Could not reach the sleep service: {message}',
   'sleep.refused': 'This click was not accepted: {message}',
   'sleep.gestureMissing': 'Click the button with the mouse (or a stylus): only a real click counts.',
-  'sleep.ticketHint': 'The plugin was just updated; restart DSH once and this button works again.',
+  'sleep.ticketHint': 'The plugin was just updated, please restart DSH once',
   'sleep.dryRun.title': 'Dry run: the machine stays on',
   'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
   'sleep.dryRun.close': 'Got it',
@@ -1861,6 +1871,45 @@ if (moduleLoader) moduleLoader.load({
     }
 
     /**
+     * Reload the page ONCE per browser session — silently.
+     *
+     * A page that was opened BEFORE the plugin was updated has no gesture
+     * ticket (the ticket is injected into the HTML the host serves), so a
+     * real click cannot be proven. Reloading the page is the quiet way to
+     * get a fresh ticket: the user clicks, the page refreshes itself, and
+     * the next click works. There is deliberately no HTTP route that hands
+     * out a ticket — that would let any script arm the machine.
+     *
+     * The flag in sessionStorage survives the reload, so the page cannot
+     * reload itself for ever: the second attempt answers false and the
+     * button says what to do instead.
+     *
+     * @returns {boolean} true when a reload was started
+     */
+    function reloadPageOnce() {
+      if (typeof window === 'undefined' || !window.location) return false
+      let already = false
+      try {
+        already = Boolean(window.sessionStorage)
+          && window.sessionStorage.getItem(SLEEP_RELOAD_FLAG) === '1'
+      } catch {
+        already = false
+      }
+      if (already) return false
+      try {
+        if (window.sessionStorage) window.sessionStorage.setItem(SLEEP_RELOAD_FLAG, '1')
+      } catch {
+        // Without a sessionStorage the reload may happen twice — never more.
+      }
+      try {
+        window.location.reload()
+      } catch {
+        // A page that cannot reload still shows the hint.
+      }
+      return true
+    }
+
+    /**
      * The current sleep status, re-rendered whenever the shared poll lands. */
     function useSleepStatus() {
       const [status, setStatus] = useState(sleepStore.info)
@@ -2322,8 +2371,9 @@ if (moduleLoader) moduleLoader.load({
        *
        * A page that was opened BEFORE the plugin was updated has no ticket
        * at all (the host injects it into the HTML it serves). Then there is
-       * nothing to send, and there is deliberately no route that hands out a
-       * ticket — so the button only says what to do: restart DSH.
+       * nothing to send: the page reloads itself once, silently (the next
+       * click then works), and only if that did not help does the button
+       * say what to do.
        */
       const arm = async () => {
         if (arming) return
@@ -2331,8 +2381,9 @@ if (moduleLoader) moduleLoader.load({
         setError('')
         try {
           if (!sleepTicket()) {
-            // No ticket at all: this page cannot arm the machine.
-            setTicketHint(true)
+            // No ticket at all: this page cannot arm the machine. Reload it
+            // once — quietly — so the next click works.
+            if (!reloadPageOnce()) setTicketHint(true)
             return
           }
           const headers = gestureHeaders()
@@ -2350,10 +2401,10 @@ if (moduleLoader) moduleLoader.load({
             ? fill(t('sleep.refused'), { message })
             : fill(t('sleep.error'), { message }))
           // A ticket that is too old, too fresh or already spent means the
-          // page has no usable ticket any more: only a restart helps.
+          // page has no usable ticket any more: a fresh page has one.
           if (failure && typeof failure.reason === 'string'
             && SLEEP_STALE_TICKET_REASONS.indexOf(failure.reason) !== -1) {
-            setTicketHint(true)
+            if (!reloadPageOnce()) setTicketHint(true)
           }
         } finally {
           setArming(false)

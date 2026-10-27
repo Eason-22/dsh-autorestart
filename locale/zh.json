@@ -28,7 +28,7 @@
     "error": "没能联系上关机服务：{message}",
     "refused": "这次点击没有被接受：{message}",
     "gestureMissing": "请用鼠标（或触控笔）直接点一下这个按钮：只有真实的点击才算数。",
-    "ticketHint": "插件刚更新过，重启一次 DSH 后可用这个按钮。",
+    "ticketHint": "插件刚更新过，请重启一次 DSH",
     "dryRun": {
       "title": "试运行：不会真的关机",
       "body": "彩排结束，本来会执行这条命令（真的什么都没执行）：",

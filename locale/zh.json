@@ -10,7 +10,7 @@
     "withPluginsHint": "多约 3 秒、约 117 MB；插件把启动搞坏时也能回退。",
     "configOnly": "只备份配置",
     "configOnlyHint": "瞬间完成、约 66 KB；插件问题无法回退，需要手动重装。",
-    "footnote": "以后可在 设置 → 插件 → dsh-autorestart 修改",
+    "footnote": "以后可在 设置 → 自动重启与关机 修改",
     "pickPrimary": "用这个",
     "pickSecondary": "只备份配置",
     "recommended": "推荐",
@@ -101,7 +101,7 @@
       "hide": "不要这个按钮",
       "hideCta": "不要",
       "hideHint": "界面保持原样；以后想用，再从设置里打开。",
-      "footnote": "以后可在 设置 → 插件 → dsh-autorestart 修改",
+      "footnote": "以后可在 设置 → 自动重启与关机 修改",
       "diagramLabel": "按钮出现在左侧栏最底部、设置按钮旁边",
       "error": "保存失败：{message}"
     }

@@ -832,8 +832,20 @@ test('the two option texts live in the locale files and state the time cost', ()
   assert.match(en.backupChoice.configOnlyHint, /66 KB/)
   assert.match(en.backupChoice.configOnlyHint, /instant/i, 'the en copy must say that the config-only backup is instant')
 
-  assert.match(zh.backupChoice.footnote, /dsh-autorestart/, 'the zh copy must say where the answer can be changed')
-  assert.match(en.backupChoice.footnote, /dsh-autorestart/, 'the en copy must say where the answer can be changed')
+  // The footnote points at the settings section — the ONE place where these
+  // answers can be changed (the plugin row no longer carries a form).
+  assert.match(zh.backupChoice.footnote, /自动重启与关机/, 'the zh copy must say where the answer can be changed')
+  assert.match(en.backupChoice.footnote, /Auto-restart & shut down/, 'the en copy must say where the answer can be changed')
+  assert.doesNotMatch(
+    zh.backupChoice.footnote,
+    /设置 → 插件/,
+    'the footnote must not point at the old plugin row any more',
+  )
+  assert.doesNotMatch(
+    en.backupChoice.footnote,
+    /Settings → Plugins/,
+    'the footnote must not point at the old plugin row any more',
+  )
 })
 
 test('the client renders exactly the texts of the locale files', () => {

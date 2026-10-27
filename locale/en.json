@@ -10,7 +10,7 @@
     "withPluginsHint": "About 3 seconds and 117 MB more; a plugin that breaks the boot can be rolled back too.",
     "configOnly": "Configuration only",
     "configOnlyHint": "Instant, about 66 KB; plugin problems cannot be rolled back and need a manual reinstall.",
-    "footnote": "You can change this later in Settings → Plugins → dsh-autorestart",
+    "footnote": "You can change this later in Settings → Auto-restart & shut down",
     "pickPrimary": "Use this",
     "pickSecondary": "Configuration only",
     "recommended": "Recommended",
@@ -101,7 +101,7 @@
       "hide": "No button, thanks",
       "hideCta": "No button",
       "hideHint": "The interface stays as it is; turn it on again in the settings whenever you want it.",
-      "footnote": "You can change this later in Settings → Plugins → dsh-autorestart",
+      "footnote": "You can change this later in Settings → Auto-restart & shut down",
       "diagramLabel": "The button sits at the bottom of the left sidebar, next to Settings",
       "error": "Could not save the choice: {message}"
     }

@@ -16,6 +16,22 @@
     "recommended": "Recommended",
     "dismissAria": "Close this one-time prompt"
   },
+  "settings": {
+    "summary": "Stand-by: {controller} · {seconds} countdown",
+    "controller": {
+      "label": "Who may use this button",
+      "human": "Only I may click it",
+      "anyone": "AI and scripts may use it too",
+      "hint": "With \"only I may click it\": scripts and the AI can neither switch the machine off nor cancel a running countdown."
+    },
+    "seconds": {
+      "label": "Countdown seconds",
+      "immediate": "No countdown (switch off right away)",
+      "value": "{n} seconds",
+      "hint": "After the button: wait for every conversation to be done, count down this many seconds and switch off. \"No countdown\" switches off as soon as the conversations are done."
+    },
+    "error": "Could not save the settings: {message}"
+  },
   "sleep": {
     "button": {
       "label": "Shut down",

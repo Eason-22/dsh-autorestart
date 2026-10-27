@@ -20,6 +20,7 @@ import { apply } from '../index.js'
 
 /** The route that persists the choices. */
 const CHOICE_PATH = '/__dsh_autorestart/choice'
+const SLEEP_PATH = '/__dsh_autorestart/sleep'
 
 /** Create a temporary state directory per test. */
 function tempStateDir(label) {
@@ -203,6 +204,61 @@ test('both answers at once are both written', async () => {
   assert.equal(edits.length, 1, 'both answers must land in ONE edit')
   assert.equal(edits[0].next.backupIncludePlugins, false)
   assert.equal(edits[0].next.showSleepButton, true)
+})
+
+test('the settings of the configuration page are written into the profile row', async () => {
+  const { file } = tempStateDir('settings')
+  const edits = []
+  const { ctx, routes } = createContext({ services: { configEditor: createEditor(edits) } })
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const res = fakeResponse()
+  choiceRoute(routes).handler(
+    fakeRequest('POST', { sleepController: 'anyone', sleepCountdownSeconds: 30 }),
+    res,
+  )
+  await settle()
+
+  assert.equal(res.statusCode, 200)
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.applied, 'config')
+  assert.equal(payload.sleepController, 'anyone')
+  assert.equal(payload.sleepCountdownSeconds, 30)
+  assert.equal(edits.length, 1)
+  assert.equal(edits[0].next.sleepController, 'anyone')
+  assert.equal(edits[0].next.sleepCountdownSeconds, 30)
+
+  // The running instance takes the new values at once: the status route
+  // reports them.
+  const state = fakeResponse()
+  const sleep = routes.find((entry) => entry.path === SLEEP_PATH)
+  assert.ok(sleep, 'the sleep route must be registered')
+  sleep.handler(fakeRequest('GET'), state)
+  await settle()
+  const status = JSON.parse(state.body)
+  assert.equal(status.controller, 'anyone')
+  assert.equal(status.countdownSeconds, 30)
+})
+
+test('an invalid setting is refused with 400 and nothing is written', async () => {
+  const { file } = tempStateDir('invalid-settings')
+  const edits = []
+  const { ctx, routes } = createContext({ services: { configEditor: createEditor(edits) } })
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  for (const body of [
+    { sleepController: 'nobody' },
+    { sleepCountdownSeconds: 15 },
+    { sleepCountdownSeconds: '20' },
+  ]) {
+    const res = fakeResponse()
+    choiceRoute(routes).handler(fakeRequest('POST', body), res)
+    await settle()
+    assert.equal(res.statusCode, 400, `${JSON.stringify(body)} must be refused`)
+    assert.equal(JSON.parse(res.body).ok, false)
+  }
+  assert.equal(edits.length, 0, 'nothing may be written into the profile configuration')
 })
 
 test('an empty body is refused with 400 and nothing is written', async () => {

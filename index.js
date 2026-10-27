@@ -619,7 +619,7 @@ const INSTALL_CHOICE_FILE = 'install-choice.json'
  * Read the recorded install choice from the fallback file.
  *
  * @param {string} stateDir
- * @returns {{ includePlugins: boolean|null, showSleepButton: boolean|null }|null}
+ * @returns {{ includePlugins: boolean|null, showSleepButton: boolean|null, sleepController: string|null, sleepCountdownSeconds: number|null }|null}
  */
 function readInstallChoice(stateDir) {
   try {
@@ -629,6 +629,10 @@ function readInstallChoice(stateDir) {
     return {
       includePlugins: typeof parsed.includePlugins === 'boolean' ? parsed.includePlugins : null,
       showSleepButton: typeof parsed.showSleepButton === 'boolean' ? parsed.showSleepButton : null,
+      sleepController: typeof parsed.sleepController === 'string' ? parsed.sleepController : null,
+      sleepCountdownSeconds: typeof parsed.sleepCountdownSeconds === 'number'
+        ? parsed.sleepCountdownSeconds
+        : null,
     }
   } catch {
     return null
@@ -642,15 +646,24 @@ function readInstallChoice(stateDir) {
  * erase the recorded backup scope (and the other way round).
  *
  * @param {string} stateDir
- * @param {{ includePlugins?: boolean, showSleepButton?: boolean }} values
+ * @param {{ includePlugins?: boolean, showSleepButton?: boolean, sleepController?: string, sleepCountdownSeconds?: number }} values
  * @returns {string} the file that was written
  */
 function writeInstallChoice(stateDir, values) {
   const file = path.join(stateDir, INSTALL_CHOICE_FILE)
-  const current = readInstallChoice(stateDir) || { includePlugins: null, showSleepButton: null }
+  const current = readInstallChoice(stateDir) || {
+    includePlugins: null,
+    showSleepButton: null,
+    sleepController: null,
+    sleepCountdownSeconds: null,
+  }
   const payload = {
     includePlugins: typeof values.includePlugins === 'boolean' ? values.includePlugins : current.includePlugins,
     showSleepButton: typeof values.showSleepButton === 'boolean' ? values.showSleepButton : current.showSleepButton,
+    sleepController: typeof values.sleepController === 'string' ? values.sleepController : current.sleepController,
+    sleepCountdownSeconds: typeof values.sleepCountdownSeconds === 'number'
+      ? values.sleepCountdownSeconds
+      : current.sleepCountdownSeconds,
     at: new Date().toISOString(),
   }
   fs.mkdirSync(stateDir, { recursive: true })
@@ -1767,7 +1780,7 @@ export function createRuntime(ctx, config, options = {}) {
    * is unavailable the choice degrades to a file in the plugin's state
    * directory and a warning is logged, so the choice is never silently lost.
    *
-   * @param {{ backupIncludePlugins?: boolean, showSleepButton?: boolean }} changes
+   * @param {{ backupIncludePlugins?: boolean, showSleepButton?: boolean, sleepController?: string, sleepCountdownSeconds?: number }} changes
    * @returns {Promise<{ applied: 'config'|'fallback-file' }>}
    */
   const persistConfigChoice = async (changes) => {
@@ -1783,6 +1796,14 @@ export function createRuntime(ctx, config, options = {}) {
     if (typeof changes.showSleepButton === 'boolean') {
       wanted.showSleepButton = changes.showSleepButton
       fallback.showSleepButton = changes.showSleepButton
+    }
+    if (typeof changes.sleepController === 'string') {
+      wanted.sleepController = changes.sleepController
+      fallback.sleepController = changes.sleepController
+    }
+    if (typeof changes.sleepCountdownSeconds === 'number') {
+      wanted.sleepCountdownSeconds = changes.sleepCountdownSeconds
+      fallback.sleepCountdownSeconds = changes.sleepCountdownSeconds
     }
     const editor = resolveConfigEditor(ctx)
     if (editor !== null) {
@@ -3429,20 +3450,24 @@ function buildHandoffRoute(ctx, runtime, config) {
 
 /**
  * Build the POST `/choice` route: persist the one-time install choice of the
- * user (whether the pre-restart backup also snapshots the installed plugins)
- * and the answer to the one-time question whether the graceful-sleep button is
- * shown.
+ * user (whether the pre-restart backup also snapshots the installed plugins),
+ * the answer to the one-time question whether the graceful-sleep button is
+ * shown, and the two settings of the configuration page (who may drive the
+ * shutdown and how long the countdown runs).
  *
  * It sits next to the health route and uses the same authentication rule
  * (loopback OR a request the connection service admits). Body:
- * `{ "includePlugins"?: boolean, "showSleepButton"?: boolean }` — at least one
- * of the two keys must be present, and a key that IS present must be a
- * boolean. Anything else is refused with a 400 and NOTHING is written.
+ * `{ "includePlugins"?: boolean, "showSleepButton"?: boolean,
+ *   "sleepController"?: "human" | "anyone",
+ *   "sleepCountdownSeconds"?: 0 | 10 | 20 | 30 | 60 }` — at least one
+ * of the keys must be present, and a key that IS present must carry a valid
+ * value. Anything else is refused with a 400 and NOTHING is written.
  *
  * The answer is `{ ok: true, applied: 'config' | 'fallback-file', ... }`:
  * `applied` says where the choice landed — the profile configuration (the
  * official path) or the degraded fallback file. Only the keys that were asked
- * for are echoed back.
+ * for are echoed back, plus the effective `controller` and
+ * `countdownSeconds` so the settings page can read them back at once.
  */
 function buildChoiceRoute(ctx, runtime, config) {
   const routePath = resolveChoicePath(config)
@@ -3472,15 +3497,17 @@ function buildChoiceRoute(ctx, runtime, config) {
         const body = payload && typeof payload === 'object' ? payload : {}
         const hasInclude = Object.prototype.hasOwnProperty.call(body, 'includePlugins')
         const hasShow = Object.prototype.hasOwnProperty.call(body, 'showSleepButton')
-        if (!hasInclude && !hasShow) {
-          // Neither key was asked for: there is nothing to persist.
+        const hasController = Object.prototype.hasOwnProperty.call(body, 'sleepController')
+        const hasSeconds = Object.prototype.hasOwnProperty.call(body, 'sleepCountdownSeconds')
+        if (!hasInclude && !hasShow && !hasController && !hasSeconds) {
+          // No key was asked for: there is nothing to persist.
           res.statusCode = 400
           res.setHeader('content-type', 'application/json; charset=utf-8')
           res.setHeader('cache-control', 'no-store')
           res.end(JSON.stringify({
             ok: false,
             error: 'no-choice',
-            instruction: 'Send { "includePlugins": true | false } and/or { "showSleepButton": true | false }.',
+            instruction: 'Send { "includePlugins": true | false } and/or { "showSleepButton": true | false } and/or { "sleepController": "human" | "anyone" } and/or { "sleepCountdownSeconds": 0 | 10 | 20 | 30 | 60 }.',
           }))
           return
         }
@@ -3508,15 +3535,41 @@ function buildChoiceRoute(ctx, runtime, config) {
           }))
           return
         }
+        if (hasController && body.sleepController !== 'human' && body.sleepController !== 'anyone') {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'sleepController-must-be-human-or-anyone',
+            instruction: 'Send { "sleepController": "human" | "anyone" }.',
+          }))
+          return
+        }
+        if (hasSeconds && COUNTDOWN_CHOICES.indexOf(body.sleepCountdownSeconds) === -1) {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'sleepCountdownSeconds-must-be-offered',
+            instruction: `Send { "sleepCountdownSeconds": ${COUNTDOWN_CHOICES.join(' | ')} }.`,
+          }))
+          return
+        }
         const changes = {}
         // The route field is `includePlugins`, the configuration key is
         // `backupIncludePlugins` (the profile row keeps the plugin's own name).
         if (hasInclude) changes.backupIncludePlugins = body.includePlugins === true
         if (hasShow) changes.showSleepButton = body.showSleepButton === true
+        if (hasController) changes.sleepController = body.sleepController
+        if (hasSeconds) changes.sleepCountdownSeconds = body.sleepCountdownSeconds
         const result = await runtime.applyConfigChoice(changes)
         const answer = { ok: true, applied: result.applied }
         if (hasInclude) answer.includePlugins = body.includePlugins === true
         if (hasShow) answer.showSleepButton = body.showSleepButton === true
+        if (hasController) answer.sleepController = body.sleepController
+        if (hasSeconds) answer.sleepCountdownSeconds = body.sleepCountdownSeconds
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
@@ -3645,12 +3698,12 @@ function createSleepService(ctx, runtime, config, options = {}) {
   const final = invocation()
   const now = typeof options.sleepNow === 'function' ? options.sleepNow : () => Date.now()
   const spawn = typeof options.sleepSpawn === 'function' ? options.sleepSpawn : undefined
-  const controller = createSleepController({
+  const buildController = (seconds) => createSleepController({
     now,
     busyAgents: () => runtime.busyAgents(),
     gate,
     titleOf: (sessionId) => runtime.sessionTitle(sessionId),
-    countdownSeconds: config.sleepCountdownSeconds,
+    countdownSeconds: seconds,
     hostLabel: final.shortLabel,
     supported: final.supported,
     log: runtime.log,
@@ -3670,7 +3723,35 @@ function createSleepService(ctx, runtime, config, options = {}) {
       gate,
     }),
   })
-  return { plan, controller, invocation }
+  // The countdown length belongs to the CONFIGURATION, and the configuration
+  // page can change it while the plugin runs. The controller is rebuilt as
+  // soon as the new length is known — but never while a countdown is running:
+  // that one keeps the length it was started with.
+  let active = buildController(config.sleepCountdownSeconds)
+  let activeSeconds = config.sleepCountdownSeconds
+  const current = () => {
+    const seconds = config.sleepCountdownSeconds
+    if (seconds === activeSeconds) return active
+    if (active.status().armed) return active
+    active.dispose()
+    active = buildController(seconds)
+    activeSeconds = seconds
+    return active
+  }
+  const liveController = {
+    arm: (...args) => current().arm(...args),
+    cancel: (...args) => current().cancel(...args),
+    tick: (...args) => current().tick(...args),
+    status: (...args) => current().status(...args),
+    dispose: (...args) => current().dispose(...args),
+  }
+  return {
+    plan,
+    get controller() {
+      return liveController
+    },
+    invocation,
+  }
 }
 
 /**

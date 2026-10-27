@@ -202,6 +202,16 @@ const ZH = {
   'sleep.button.titleImmediate': '等所有会话收工后立即关机（不倒数）',
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
+  'settings.summary': '收工关机：{controller} · 倒数 {seconds}',
+  'settings.controller.label': '谁能用这个按钮',
+  'settings.controller.human': '只有我能点',
+  'settings.controller.anyone': 'AI 和脚本也能用',
+  'settings.controller.hint': '「只有我能点」时：脚本和 AI 点不动这个按钮，也取消不了正在进行的倒数。',
+  'settings.seconds.label': '倒计时秒数',
+  'settings.seconds.immediate': '不倒数（立即关机）',
+  'settings.seconds.value': '{n} 秒',
+  'settings.seconds.hint': '按下按钮后，等所有会话收工，再倒数这么多秒才关机；「不倒数」表示会话一收工就关机。',
+  'settings.error': '没能保存设置：{message}',
   'sleep.ticketHint': '这个页面还没拿到票据，点一下会自动刷新一次。',
   'sleep.dryRun.title': '试运行：不会真的关机',
   'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
@@ -314,6 +324,16 @@ const EN = {
   'sleep.button.titleImmediate': 'Waits for every session to finish, then powers off right away (no countdown)',
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
+  'settings.summary': 'Stand-by: {controller} · {seconds} countdown',
+  'settings.controller.label': 'Who may use this button',
+  'settings.controller.human': 'Only I may click it',
+  'settings.controller.anyone': 'AI and scripts may use it too',
+  'settings.controller.hint': 'With "only I may click it": scripts and the AI can neither switch the machine off nor cancel a running countdown.',
+  'settings.seconds.label': 'Countdown seconds',
+  'settings.seconds.immediate': 'No countdown (switch off right away)',
+  'settings.seconds.value': '{n} seconds',
+  'settings.seconds.hint': 'After the button: wait for every conversation to be done, count down this many seconds and switch off. "No countdown" switches off as soon as the conversations are done.',
+  'settings.error': 'Could not save the settings: {message}',
   'sleep.ticketHint': 'This page has no ticket yet — click once and it refreshes itself.',
   'sleep.dryRun.title': 'Dry run: the machine stays on',
   'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
@@ -2264,6 +2284,28 @@ if (moduleLoader) moduleLoader.load({
       '  border-color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
       '  color:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
       '}',
+      // The configuration page of the plugin row.
+      '.dsh-autorestart-settings{display:flex;flex-direction:column;gap:14px;}',
+      '.dsh-autorestart-settings__summary{margin:0;font-size:13px;line-height:18px;}',
+      '.dsh-autorestart-settings__field{display:flex;flex-direction:column;gap:4px;}',
+      '.dsh-autorestart-settings__label{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);}',
+      '.dsh-autorestart-settings__select{',
+      '  min-height:30px;',
+      '  padding:4px 8px;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:8px;',
+      '  background:var(--dsw-alias-bg-layer-2,transparent);',
+      '  color:var(--dsw-alias-label-primary);',
+      '  font:inherit;',
+      '  font-size:13px;',
+      '}',
+      '.dsh-autorestart-settings__hint{font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary);}',
+      '.dsh-autorestart-settings__error{',
+      '  margin:0;',
+      '  color:var(--dsw-alias-danger,#d14343);',
+      '  font-size:12.5px;',
+      '  line-height:18px;',
+      '}',
       // The whale.
       '.dsh-autorestart-whale{width:min(44vmin,240px);height:auto;display:block;overflow:visible;}',
       '.dsh-autorestart-whale__float{',
@@ -2389,6 +2431,150 @@ if (moduleLoader) moduleLoader.load({
      *
      * @param {{ wide?: boolean }} [props] the sidebar's column state
      */
+    /**
+     * The configuration page of the plugin (the "Plugins → Autorestart" row).
+     *
+     * The Host renders this page for the row `dsh-autorestart#dsh-autorestart`:
+     * two dropdowns — who may drive the shutdown button, and how long the
+     * countdown runs. A change is written to the profile configuration at once
+     * (through the plugin's own choice route, which uses the official
+     * `configEditor` service), and the panel reads the new values back from
+     * the Host.
+     *
+     * @param {object} props the Host's props: `t` (the translator of the
+     *   registered locale) and `view` ('page' for the form, 'summary' for the
+     *   one-line version under the title)
+     */
+    function SleepSettingsPanel(props) {
+      const status = useSleepStatus()
+      const info = useSharedInfo(true)
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState('')
+      const t = props && typeof props.t === 'function'
+        ? props.t
+        : (translate ?? ((name) => name))
+
+      // The current values come from the Host, so the panel always shows what
+      // is really in effect.
+      const controller = status && typeof status === 'object' && typeof status.controller === 'string'
+        ? status.controller
+        : 'human'
+      const reported = status && typeof status === 'object' && typeof status.countdownSeconds === 'number'
+        ? status.countdownSeconds
+        : SLEEP_DEFAULT_COUNTDOWN_SECONDS
+      const seconds = SLEEP_COUNTDOWN_CHOICES.indexOf(reported) === -1
+        ? SLEEP_DEFAULT_COUNTDOWN_SECONDS
+        : reported
+
+      const controllerText = controller === 'anyone'
+        ? t('settings.controller.anyone')
+        : t('settings.controller.human')
+      const secondsText = seconds === 0
+        ? t('settings.seconds.immediate')
+        : fill(t('settings.seconds.value'), { n: seconds })
+
+      // The summary view: one line under the title.
+      if (props && props.view === 'summary') {
+        return h(
+          'p',
+          { className: 'dsh-autorestart-settings__summary' },
+          fill(t('settings.summary'), { controller: controllerText, seconds: secondsText }),
+        )
+      }
+
+      /**
+       * Write one change into the profile configuration.
+       *
+       * The Host answers with the effective values, and the panel reads them
+       * back with a fresh poll — so the dropdowns never show a value the
+       * Host did not take.
+       *
+       * @param {object} changes the keys to write
+       */
+      const save = async (changes) => {
+        if (busy) return
+        setBusy(true)
+        setError('')
+        try {
+          const response = await fetch(choiceUrlFor(info), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(changes),
+          })
+          const body = await response.json().catch(() => null)
+          if (!response.ok) {
+            const message = body && typeof body === 'object'
+              ? (body.message || body.error || String(response.status))
+              : String(response.status)
+            setError(fill(t('settings.error'), { message }))
+            return
+          }
+          // Read the new values back from the Host.
+          await pollSleepOnce()
+        } catch (failure) {
+          setError(fill(t('settings.error'), { message: describeError(failure) }))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      ensureSleepStyle()
+
+      return h(
+        'div',
+        { className: 'dsh-autorestart-settings' },
+        h(
+          'label',
+          { className: 'dsh-autorestart-settings__field' },
+          h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.controller.label')),
+          h(
+            'select',
+            {
+              className: 'dsh-autorestart-settings__select',
+              value: controller,
+              disabled: busy,
+              'data-dsh-autorestart-setting': 'sleepController',
+              onChange: (event) => {
+                const value = event && event.target ? String(event.target.value) : ''
+                if (value !== controller) void save({ sleepController: value })
+              },
+            },
+            h('option', { value: 'human' }, t('settings.controller.human')),
+            h('option', { value: 'anyone' }, t('settings.controller.anyone')),
+          ),
+          h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.controller.hint')),
+        ),
+        h(
+          'label',
+          { className: 'dsh-autorestart-settings__field' },
+          h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.seconds.label')),
+          h(
+            'select',
+            {
+              className: 'dsh-autorestart-settings__select',
+              value: String(seconds),
+              disabled: busy,
+              'data-dsh-autorestart-setting': 'sleepCountdownSeconds',
+              onChange: (event) => {
+                const value = Number(event && event.target ? event.target.value : NaN)
+                if (!Number.isFinite(value) || value === seconds) return
+                void save({ sleepCountdownSeconds: value })
+              },
+            },
+            SLEEP_COUNTDOWN_CHOICES.map((choice) => h(
+              'option',
+              { key: String(choice), value: String(choice) },
+              choice === 0 ? t('settings.seconds.immediate') : fill(t('settings.seconds.value'), { n: choice }),
+            )),
+          ),
+          h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.seconds.hint')),
+        ),
+        error === ''
+          ? null
+          : h('p', { className: 'dsh-autorestart-settings__error', role: 'alert' }, error),
+      )
+    }
+
     function SleepButton(props) {
       const status = useSleepStatus()
       const [arming, setArming] = useState(false)
@@ -3057,6 +3243,14 @@ if (moduleLoader) moduleLoader.load({
         // sidebar hands the column state to it, so the collapsed rail shows
         // the icon only.
         ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'autorestart-sleep-button', order: 10, locale: NS }, SleepButton))
+        // The configuration page of the row `dsh-autorestart#dsh-autorestart`
+        // (the row id comes from the profile patch): who may drive the
+        // shutdown button and how long the countdown runs.
+        ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
+          name: 'plugins.row.config',
+          key: 'dsh-autorestart#dsh-autorestart',
+          locale: NS,
+        }, SleepSettingsPanel))
         // The countdown overlay: a frame-wide floating layer above every
         // column.
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-sleep-overlay', order: 60 }, SleepOverlay))

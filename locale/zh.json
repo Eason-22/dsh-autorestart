@@ -16,6 +16,22 @@
     "recommended": "推荐",
     "dismissAria": "关闭这个一次性提示"
   },
+  "settings": {
+    "summary": "收工关机：{controller} · 倒数 {seconds}",
+    "controller": {
+      "label": "谁能用这个按钮",
+      "human": "只有我能点",
+      "anyone": "AI 和脚本也能用",
+      "hint": "「只有我能点」时：脚本和 AI 点不动这个按钮，也取消不了正在进行的倒数。"
+    },
+    "seconds": {
+      "label": "倒计时秒数",
+      "immediate": "不倒数（立即关机）",
+      "value": "{n} 秒",
+      "hint": "按下按钮后，等所有会话收工，再倒数这么多秒才关机；「不倒数」表示会话一收工就关机。"
+    },
+    "error": "没能保存设置：{message}"
+  },
   "sleep": {
     "button": {
       "label": "收工关机",

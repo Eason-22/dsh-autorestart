@@ -1326,7 +1326,7 @@ const settleClient = () => new Promise((resolve) => setTimeout(resolve, 5))
 /**
  * Load the classic client script in a sandbox and mount its surfaces.
  *
- * @param {{ status?: object, storage?: object, language?: string, ticket?: object, meta?: object, refuseArm?: object, sessionStorage?: object, fakeTimers?: boolean }} options
+ * @param {{ status?: object, storage?: object, language?: string, ticket?: object, meta?: object, refuseArm?: object, failChoice?: boolean, sessionStorage?: object, fakeTimers?: boolean }} options
  */
 function mountClient({
   status = null,
@@ -1335,6 +1335,7 @@ function mountClient({
   ticket = null,
   meta = null,
   refuseArm = null,
+  failChoice = false,
   sessionStorage = createStorage(),
   fakeTimers = false,
 } = {}) {
@@ -1387,6 +1388,30 @@ function mountClient({
       fetches.push({ url: String(url), init })
       const action = init && init.body ? JSON.parse(init.body).action : null
       const isSleep = String(url).includes('/sleep')
+      const isChoice = String(url).includes('/choice')
+      // The configuration page writes its settings: the Host takes them into
+      // the profile configuration and the next poll reports them back.
+      if (isChoice && init && init.body) {
+        if (failChoice) {
+          return Promise.resolve({
+            ok: false,
+            status: 500,
+            json: async () => ({ ok: false, error: 'config-write-failed' }),
+          })
+        }
+        const written = JSON.parse(init.body)
+        const next = { ...(state.status || {}) }
+        if (typeof written.sleepController === 'string') next.controller = written.sleepController
+        if (typeof written.sleepCountdownSeconds === 'number') {
+          next.countdownSeconds = written.sleepCountdownSeconds
+        }
+        state.status = next
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, applied: 'config', ...written }),
+        })
+      }
       // The host refuses the request (a failure the user must see).
       if (isSleep && action && refuseArm && (!refuseArm.action || refuseArm.action === action)) {
         return Promise.resolve({
@@ -1816,6 +1841,95 @@ test('a refused request is shown, never silent', async () => {
     `the refusal must be visible, got: ${shown} / ${after.props.title}`,
   )
   assert.equal(mounted.reloads.count, 0, 'a failure never reloads the page')
+})
+
+test('the plugin registers a configuration page for its own row', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 20 },
+  })
+  const entry = mounted.slots.get('plugins.row.config')
+  assert.ok(entry, 'the configuration slot must be registered')
+  const registration = entry().registration
+  assert.equal(registration.name, 'plugins.row.config')
+  assert.equal(registration.key, 'dsh-autorestart#dsh-autorestart')
+  assert.equal(registration.locale, 'dshAutorestart')
+})
+
+test('the configuration page shows both dropdowns with the current values', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 30 },
+  })
+  const panel = await mounted.settled('plugins.row.config')
+  assert.ok(panel, 'the configuration page must be rendered')
+  const selects = walk(panel).filter((node) => node.type === 'select')
+  assert.equal(selects.length, 2, 'the page has two dropdowns')
+  assert.equal(selects[0].props.value, 'human', 'the first dropdown shows who may drive the shutdown')
+  assert.equal(selects[1].props.value, '30', 'the second dropdown shows the countdown length')
+  const controllerOptions = walk(selects[0]).filter((node) => node.type === 'option').map((node) => node.props.value)
+  assert.deepEqual(controllerOptions, ['human', 'anyone'])
+  const secondsOptions = walk(selects[1]).filter((node) => node.type === 'option').map((node) => node.props.value)
+  assert.deepEqual(secondsOptions, ['0', '10', '20', '30', '60'])
+  // The labels and the explanation are on the page.
+  const shown = textOf(panel)
+  assert.ok(shown.includes('谁能用这个按钮'), `the label must be there: ${shown}`)
+  assert.ok(shown.includes('倒计时秒数'), `the label must be there: ${shown}`)
+  assert.ok(shown.includes('取消不了'), `the human mode must say what it means: ${shown}`)
+})
+
+test('choosing a value writes it into the profile configuration and reads it back', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 20 },
+  })
+  const panel = await mounted.settled('plugins.row.config')
+  const selects = walk(panel).filter((node) => node.type === 'select')
+  selects[0].props.onChange({ target: { value: 'anyone' } })
+  await settleClient()
+
+  const posts = mounted.fetches.filter(
+    (call) => String(call.url).includes('/choice') && call.init && call.init.body,
+  )
+  assert.equal(posts.length, 1, 'the change must be written once')
+  assert.deepEqual(JSON.parse(posts[0].init.body), { sleepController: 'anyone' })
+
+  // The new value is read back from the Host.
+  const after = mounted.render('plugins.row.config')
+  const again = walk(after).filter((node) => node.type === 'select')
+  assert.equal(again[0].props.value, 'anyone', 'the page must show the value the Host took')
+})
+
+test('the countdown length is written into the profile configuration too', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 20 },
+  })
+  const panel = await mounted.settled('plugins.row.config')
+  const selects = walk(panel).filter((node) => node.type === 'select')
+  selects[1].props.onChange({ target: { value: '60' } })
+  await settleClient()
+
+  const posts = mounted.fetches.filter(
+    (call) => String(call.url).includes('/choice') && call.init && call.init.body,
+  )
+  assert.equal(posts.length, 1)
+  assert.deepEqual(JSON.parse(posts[0].init.body), { sleepCountdownSeconds: 60 })
+  const after = mounted.render('plugins.row.config')
+  const again = walk(after).filter((node) => node.type === 'select')
+  assert.equal(again[1].props.value, '60')
+})
+
+test('a failed save shows the error on the configuration page', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 20 },
+    failChoice: true,
+  })
+  const panel = await mounted.settled('plugins.row.config')
+  const selects = walk(panel).filter((node) => node.type === 'select')
+  selects[0].props.onChange({ target: { value: 'anyone' } })
+  await settleClient()
+
+  const after = mounted.render('plugins.row.config')
+  const shown = textOf(after)
+  assert.ok(shown.includes('没能保存设置'), `the failure must be visible: ${shown}`)
+  assert.ok(shown.includes('config-write-failed'), `the reason must be visible: ${shown}`)
 })
 
 /* ------------------------------------------------------------------ *

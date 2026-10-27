@@ -602,9 +602,32 @@ test('a blocker without a name still gets a line', async () => {
 
   const card = await mounted.settled('autorestart-sleep-overlay')
   const text = textOf(card)
-  assert.match(text, /有一个会话正在运行/, `the session needs a line: ${text}`)
+  assert.match(text, /有一个任务正在运行/, `the session needs a line: ${text}`)
   assert.match(text, /有一个子智能体正在运行/, `the subagent needs a line: ${text}`)
   assert.doesNotMatch(text, /sess-/, 'a raw session id must never be shown')
+  assert.doesNotMatch(text, /会话「会话」/, 'a generic name must never be shown as a title')
+})
+
+test('the card never shows a list of generic names', async () => {
+  const mounted = mountClient({
+    status: {
+      ok: true,
+      phase: 'waiting',
+      showSleepButton: true,
+      message: '等 3 个任务收工，收工后开始倒数。',
+      blockers: [
+        { sessionId: 'sess-a', kind: 'session', label: null, name: '' },
+        { sessionId: 'sess-b', kind: 'session', label: null, name: '' },
+        { sessionId: 'sess-c', kind: 'session', label: null, name: '' },
+      ],
+    },
+  })
+
+  const card = await mounted.settled('autorestart-sleep-overlay')
+  const text = textOf(card)
+  assert.doesNotMatch(text, /（会话、会话/, 'a list of generic names looks like a bug')
+  assert.doesNotMatch(text, /会话「会话」/, 'a generic name is not a title')
+  assert.match(text, /还有 3 个任务在干活/, `the count is still there: ${text}`)
 })
 
 test('the copy of the card lives in the locale files', () => {

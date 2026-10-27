@@ -149,7 +149,7 @@ const ZH = {
   panelStateGoalActive: '等待其他会话停泊它自动续跑的 goal',
   panelStateGoalExhausted: '等待其他会话的 goal（轮次额度已用完）',
   panelBlockedTitle: '占用会话：{title}',
-  panelBlockedGeneric: '有一个会话正在运行',
+  panelBlockedGeneric: '有一个任务正在运行',
   // One line per blocker: a session and a subagent are told apart, and
   // neither of them is ever shown as a raw session id.
   panelBlockedSession: '会话「{label}」正在运行',
@@ -293,7 +293,7 @@ const EN = {
   panelStateGoalActive: 'Waiting for the other sessions to park their self-continuing goal',
   panelStateGoalExhausted: 'Waiting for the other sessions\' goal (its round budget is used up)',
   panelBlockedTitle: 'Blocking session: {title}',
-  panelBlockedGeneric: 'One session is running',
+  panelBlockedGeneric: 'One task is running',
   // One line per blocker: a session and a subagent are told apart, and
   // neither of them is ever shown as a raw session id.
   panelBlockedSession: 'Session "{label}" is running',

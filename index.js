@@ -1253,8 +1253,11 @@ export function createRuntime(ctx, config, options = {}) {
         kind: 'session',
         // The label is the title of the session itself.
         label,
-        // The full name of the blocker: its title, or a generic one.
-        name: label || '会话',
+        // The full name of the blocker: its title — or NOTHING when it has no
+        // title. A generic name ("会话") says nothing and would end up in the
+        // interface as "会话「会话」" or as a list of three identical
+        // entries; the client decides what to write when the name is empty.
+        name: label || '',
         parentTitle: null,
         parentSessionId: null,
       }
@@ -1678,7 +1681,43 @@ export function createRuntime(ctx, config, options = {}) {
    */
   const titleCache = { at: 0, titles: new Map(), inFlight: false }
 
-  /** Store the titles of one session-list answer. Never throws. */
+  /**
+ * The title of one row of the session list.
+ *
+ * The title is a PROJECTION: the summary row carries it under
+ * `projections.values.title` (the same place `dsh-session-reference` reads it
+ * from), not under a `title` field of its own. A plain `title`/`name` is
+ * accepted too, so a list with a different shape still works.
+ *
+ * @param {any} item one row of the session list
+ * @returns {string} the title, or '' when the row carries none
+ */
+const titleOfSummary = (item) => {
+  try {
+    if (!item || typeof item !== 'object') return ''
+    const projections = item.projections && typeof item.projections === 'object'
+      ? item.projections
+      : null
+    const values = projections && projections.values && typeof projections.values === 'object'
+      ? projections.values
+      : null
+    const candidates = [
+      values ? values.title : undefined,
+      item.title,
+      item.name,
+    ]
+    for (const candidate of candidates) {
+      if (typeof candidate !== 'string') continue
+      const title = candidate.trim()
+      if (title !== '') return title
+    }
+    return ''
+  } catch {
+    return ''
+  }
+}
+
+/** Store the titles of one session-list answer. Never throws. */
   const applySessionTitles = (payload) => {
     const items = payload && Array.isArray(payload.items)
       ? payload.items
@@ -1686,9 +1725,13 @@ export function createRuntime(ctx, config, options = {}) {
     const titles = new Map()
     for (const item of items) {
       if (!item || typeof item !== 'object') continue
-      const id = item.id === undefined || item.id === null ? '' : String(item.id)
+      // The session list names its rows `sessionId` (`id` is an older shape).
+      const rawId = item.sessionId !== undefined && item.sessionId !== null
+        ? item.sessionId
+        : item.id
+      const id = rawId === undefined || rawId === null ? '' : String(rawId)
       if (!id) continue
-      const title = typeof item.title === 'string' ? item.title.trim() : ''
+      const title = titleOfSummary(item)
       if (title) titles.set(id, title)
     }
     titleCache.titles = titles
@@ -3014,16 +3057,21 @@ function registerTools(ctx, runtime, config) {
               // Every blocker says WHAT it is (`session` or `subagent`) and
               // HOW it is called (`label`: the title of the session, or of the
               // session that created the subagent).
+              //
+              // The title fields are NULLABLE: a session whose title could not
+              // be resolved reports `null`, and a strict schema would reject
+              // the whole tool output for it. The tool schema has no type
+              // arrays, so "string or null" is declared as a `oneOf`.
               properties: {
                 sessionId: { type: 'string' },
                 reason: { type: 'string' },
                 busyReason: { type: 'string' },
-                kind: { type: 'string', enum: ['session', 'subagent'] },
-                label: { type: 'string' },
+                kind: { type: 'string', enum: ['session', 'subagent', 'restart-pending'] },
+                label: { oneOf: [{ type: 'string' }, { type: 'null' }] },
                 name: { type: 'string' },
-                parentTitle: { type: 'string' },
-                parentSessionId: { type: 'string' },
-                title: { type: 'string' },
+                parentTitle: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+                parentSessionId: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+                title: { oneOf: [{ type: 'string' }, { type: 'null' }] },
               },
             },
           },

@@ -40,7 +40,9 @@ function blocker(sessionId, reason, label = null) {
     reason,
     kind: 'session',
     label,
-    name: label === null ? '会话' : label,
+    // No title, no name: the host never invents a generic one (a list of
+    // "会话、会话、会话" says nothing and looks like a bug).
+    name: label === null ? '' : label,
     parentTitle: null,
     parentSessionId: null,
   }
@@ -814,8 +816,23 @@ test('continuum_status reports the restart gate verdict', () => {
   assert.equal(schema.gateAllow.type, 'boolean');
   assert.equal(schema.quietForMs.type, 'number');
   assert.equal(schema.blockedBy.type, 'array');
-  assert.equal(schema.blockedBy.items.properties.kind.enum.join(','), 'session,subagent');
-  assert.equal(schema.blockedBy.items.properties.label.type, 'string');
+  assert.equal(schema.blockedBy.items.properties.kind.enum.join(','), 'session,subagent,restart-pending');
+  // The title fields are NULLABLE: a session whose title could not be
+  // resolved reports null, and a strict schema would reject the whole tool
+  // output for it. The tool schema has no type arrays, so "string or null" is
+  // declared as a `oneOf`.
+  assert.equal(schema.blockedBy.items.properties.label.type, undefined);
+  assert.deepEqual(
+    schema.blockedBy.items.properties.label.oneOf.map((branch) => branch.type).join(','),
+    'string,null',
+  );
+  for (const key of ['label', 'parentTitle', 'parentSessionId', 'title']) {
+    assert.deepEqual(
+      schema.blockedBy.items.properties[key].oneOf.map((branch) => branch.type).join(','),
+      'string,null',
+      `${key} must accept null`,
+    );
+  }
 });
 
 /**

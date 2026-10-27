@@ -254,6 +254,32 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 **排障用。** `GET /sleep` 会报 `armedAt`（什么时候点的关机），旁边还有 `phase`、`blockers`、`graceMs`。
 
+### 故障排查：点了没关机
+
+**下面是真实宿主返回的东西**（文案是中文，字段名不是）：
+
+```
+POST /__dsh_autorestart/sleep {"action":"arm"}   # 有 3 个会话在干活
+→ phase=waiting  armed=true  remainingMs=20000（满值＝没开始倒数）
+  message: 等 3 个任务收工，收工后开始倒数。
+
+# 制造一个待执行的重启之后：
+GET /__dsh_autorestart/sleep
+→ phase=waiting  armed=true  remainingMs=20000
+  message: 等这次重启完成后再关机……
+  blockers: [{"sessionId":"restart-pending","kind":"restart-pending",
+              "label":"待执行的重启","name":"待执行的重启"}]
+```
+
+**`remainingMs` 是满值 = 倒数还没开始**，也就是机器在等什么东西。下面是可能的原因，以及该怎么办：
+
+1. **还有任务在跑。** `blockers[]` 列的就是它们，看 `kind`：`session` 是会话，`subagent` 是某个会话派出去的子智能体。**子智能体也算在干活，这是故意的** —— 否则重启会把它掐断。**怎么办：** 等它干完，或者把那个会话停掉；列表会自己变短。
+2. **有待执行的重启。** `kind` 是 `restart-pending`（`label`/`name` 都是 `待执行的重启`）。这是正常排队，不是故障：先重启，会话跟着回来，完事之后倒数自动接着走。**怎么办：** 不用管，等重启完即可（也可以用 `continuum_cancel_restart` 把这次重启取消掉）。
+3. **刚收工，还在宽限期里**（默认 10 秒，给记忆/总结类插件留落盘时间）。**你会看到：** `graceMs` 是配的窗口，`quietForMs` 是宿主已经安静了多久。**怎么办：** 等着；等待期间又有会话开始干活，计时会重新开始（这就是这个窗口的意义）。不想要这段等待就在设置里把它调成 `0`。
+4. **倒数期间又有会话开始干活。** 倒数退回「等待」，`remainingMs` 变回满值。**你会看到：** 消息里说又有谁开始干活了，`blockers[]` 列着是谁。**怎么办：** 等他们干完。
+5. **想看「到底等谁」。** `continuum_status` 的 `blockedBy[]` 和 `GET /sleep` 的 `blockers[]` 是**同一份数据**（前者给 agent 看，后者给脚本看）。每条都有 `kind`（它是什么）、`label`（会话标题）、`name`（完整称呼，比如「写代码的会话的子智能体」）。标题解析不到时 `label` 是 `null`、`name` 是空字符串 —— 这时候等待那句话就只说「等 3 个任务收工」，不带名字列表。
+6. **彻底不想关了。** 等待卡片上的取消按钮（或者再点一次月亮按钮，或者 `POST /sleep {"action":"cancel"}`）会把这个意图彻底清掉：`armed` 变回 `false`，`armedAt` 变回 `null`。
+
 **桌面端和 web 端行为完全一致。** 没有票据、没有额外请求头、没有隐藏模式：`POST /__dsh_autorestart/sleep` 只带一个动作，两端走的是同一条路由。脚本（或者 agent）同样可以驱动它：
 
 ```bash

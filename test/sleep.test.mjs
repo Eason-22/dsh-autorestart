@@ -353,9 +353,11 @@ function blocker(sessionId, label) {
     sessionId,
     kind: 'session',
     label,
-    name: label === null ? '会话' : label,
+    // No title, no name: the host never invents a generic one (a list of
+    // "会话、会话、会话" says nothing and looks like a bug).
+    name: label === null ? '' : label,
     parentTitle: null,
-    title: label === null ? '会话' : label,
+    title: label === null ? '' : label,
   }
 }
 
@@ -431,8 +433,9 @@ test('a conversation that starts working during the countdown stops the shutdown
   assert.equal(status.phase, 'waiting', 'the countdown must go back to waiting')
   assert.equal(harness.shutdowns.length, 0, 'nothing may be closed')
   assert.deepEqual(status.blockers, [blocker('sess-c', null)])
-  assert.match(status.message, /又开始干活了/, 'the message must say who started working')
-  assert.match(status.message, /会话/, 'the message must name the blocker, never its id')
+  assert.match(status.message, /开始干活了/, 'the message must say who started working')
+  assert.match(status.message, /任务/, 'the message counts tasks, never raw session ids')
+  assert.doesNotMatch(status.message, /（/, 'a blocker without a title must not produce a parenthetical')
 })
 
 test('the gate is asked once more before the machine is closed', () => {

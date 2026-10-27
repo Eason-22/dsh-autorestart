@@ -332,6 +332,53 @@ itself off for ever because of a half-written file.
 **For the troubleshooting.** `GET /sleep` reports `armedAt` (when the shutdown was armed) next to
 `phase`, `blockers` and `graceMs`.
 
+### Troubleshooting: the machine did not switch off
+
+**These are the real answers of a running host** (the copy of the host is Chinese, the fields are
+not):
+
+```
+POST /__dsh_autorestart/sleep {"action":"arm"}   # three conversations are working
+→ phase=waiting  armed=true  remainingMs=20000   (the full value: the countdown has NOT started)
+  message: 等 3 个任务收工，收工后开始倒数。
+
+# after a restart was requested:
+GET /__dsh_autorestart/sleep
+→ phase=waiting  armed=true  remainingMs=20000
+  message: 等这次重启完成后再关机……
+  blockers: [{"sessionId":"restart-pending","kind":"restart-pending",
+              "label":"待执行的重启","name":"待执行的重启"}]
+```
+
+`remainingMs` at its full value is the tell: **the countdown has not started**, so the machine is
+waiting for something. Here is what it can be, and what to do about it:
+
+1. **Some tasks are still working.** `blockers[]` lists them; look at `kind`:
+   `session` is a conversation, `subagent` is a child agent of one. A subagent counts as work on
+   purpose — otherwise a restart would cut it off. **What to do:** let it finish, or stop that
+   conversation. The list shrinks on its own.
+2. **A restart is still pending.** `kind` is `restart-pending` (`label`/`name` are
+   `待执行的重启`). That is normal queueing, not a fault: the restart runs first, the sessions
+   come back with it, and the countdown continues afterwards. **What to do:** nothing — wait for
+   the restart. (You can also cancel the restart with `continuum_cancel_restart`.)
+3. **The work just ended and the grace window is still running** (default 10 seconds, so that a
+   memory or summary plugin can still write its notes). **What you see:** `graceMs` is the
+   configured window, `quietForMs` is how long the host has actually been quiet. **What to do:**
+   wait; if another conversation starts working during the wait, the timer starts over (that is
+   the point of the window). Set it to `0` in the settings if you do not want the extra wait.
+4. **Somebody started working during the countdown.** The countdown goes back to "waiting" and
+   `remainingMs` returns to its full value. **What you see:** the message says that somebody
+   started working again, and `blockers[]` lists who. **What to do:** let them finish.
+5. **You want to know who it is waiting for.** `continuum_status` → `blockedBy[]` and
+   `GET /sleep` → `blockers[]` are the **same data**: the first is for agents, the second for
+   scripts. Each entry has `kind` (what it is), `label` (the title of the session) and `name`
+   (the whole name, e.g. "the subagent of the coding session"). A session whose title could not
+   be resolved reports `label: null` and an empty `name` — that is why the waiting line then
+   only says "等 3 个任务收工" without a list of names.
+6. **You do not want it at all.** The cancel button on the waiting card (or the moon button
+   again, or `POST /sleep {"action":"cancel"}`) clears the intent for good: `armed` becomes
+   `false` and `armedAt` becomes `null`.
+
 **Where the button is.** The moon button sits at the **very bottom of the left sidebar, right next
 to the Settings row** (`sidebar.footer.action`). That seat is a **root** slot, so the button is
 there even when no conversation is open — on any page. When the sidebar is collapsed into its narrow

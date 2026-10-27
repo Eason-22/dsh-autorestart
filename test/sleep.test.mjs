@@ -339,6 +339,26 @@ function createController({
   }
 }
 
+/**
+ * The blocker entry the controller reports for a busy session.
+ *
+ * A blocker always says WHAT it is (`kind`) and HOW it is called (`label`):
+ * a raw session id never reaches the interface.
+ *
+ * @param {string} sessionId
+ * @param {string|null} label the title of the session (null when unknown)
+ */
+function blocker(sessionId, label) {
+  return {
+    sessionId,
+    kind: 'session',
+    label,
+    name: label === null ? '会话' : label,
+    parentTitle: null,
+    title: label === null ? '会话' : label,
+  }
+}
+
 test('arming with nothing to do starts the countdown', () => {
   const harness = createController()
   const status = harness.controller.arm()
@@ -359,15 +379,22 @@ test('a busy conversation keeps the machine alive and is listed', () => {
   const status = harness.controller.arm()
   assert.equal(status.phase, 'waiting')
   assert.equal(status.armed, true)
-  assert.deepEqual(status.blockers, [{ sessionId: 'sess-a', title: '写代码的会话' }])
+  assert.deepEqual(status.blockers, [blocker('sess-a', '写代码的会话')])
   assert.equal(harness.shutdowns.length, 0)
   assert.match(status.message, /写代码的会话/)
 })
 
-test('a blocker without a title falls back to its session id', () => {
+test('a blocker without a title never shows its session id', () => {
   const harness = createController({ busy: [{ sessionId: 'sess-b', reason: 'running' }] })
   const status = harness.controller.arm()
-  assert.deepEqual(status.blockers, [{ sessionId: 'sess-b', title: 'sess-b' }])
+  assert.deepEqual(status.blockers, [blocker('sess-b', null)])
+  for (const entry of status.blockers) {
+    // The id is still reported (the client needs it), but it is never the
+    // NAME the user reads.
+    assert.notEqual(entry.label, entry.sessionId)
+    assert.notEqual(entry.name, entry.sessionId)
+    assert.notEqual(entry.title, entry.sessionId)
+  }
 })
 
 test('the countdown runs down and closes the machine', () => {
@@ -403,9 +430,9 @@ test('a conversation that starts working during the countdown stops the shutdown
   const status = harness.controller.tick()
   assert.equal(status.phase, 'waiting', 'the countdown must go back to waiting')
   assert.equal(harness.shutdowns.length, 0, 'nothing may be closed')
-  assert.deepEqual(status.blockers, [{ sessionId: 'sess-c', title: 'sess-c' }])
+  assert.deepEqual(status.blockers, [blocker('sess-c', null)])
   assert.match(status.message, /又开始干活了/, 'the message must say who started working')
-  assert.match(status.message, /sess-c/)
+  assert.match(status.message, /会话/, 'the message must name the blocker, never its id')
 })
 
 test('the gate is asked once more before the machine is closed', () => {
@@ -515,7 +542,7 @@ test('a countdown of zero seconds still waits for the busy conversations', () =>
   const status = harness.controller.arm()
   assert.equal(status.phase, 'waiting', 'a busy conversation blocks the shutdown')
   assert.equal(harness.shutdowns.length, 0, 'nothing may be closed while somebody is working')
-  assert.deepEqual(status.blockers, [{ sessionId: 'sess-a', title: '写代码的会话' }])
+  assert.deepEqual(status.blockers, [blocker('sess-a', '写代码的会话')])
 
   // Once the conversation is done, the next tick switches the machine off.
   harness.state.busy = []
@@ -738,7 +765,7 @@ test('arming waits for the busy conversations and lists them', async () => {
   const payload = JSON.parse(res.body)
   assert.equal(payload.phase, 'waiting')
   assert.equal(payload.armed, true)
-  assert.deepEqual(payload.blockers, [{ sessionId: 'sess-busy', title: 'sess-busy' }])
+  assert.deepEqual(payload.blockers, [blocker('sess-busy', null)])
   assert.equal(timers.length, 1, 'the countdown timer belongs to the plugin')
 })
 
@@ -987,7 +1014,7 @@ test('the last gate keeps the busy conversations in the waiting card', async () 
   assert.equal(status.phase, 'waiting', 'the machine must not be closed')
   assert.deepEqual(
     status.blockers,
-    [{ sessionId: 'sess-late', title: '收尾的会话' }],
+    [blocker('sess-late', '收尾的会话')],
     'the waiting card must still know WHO is busy',
   )
   assert.match(status.message, /收尾的会话/)

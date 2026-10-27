@@ -116,18 +116,18 @@ const SLEEP_DRY_RUN_NOTICE_MS = 8_000
 
 const ZH = {
   label: '待重启',
-  busyPrefix: ' · 被 ',
-  busySuffix: ' 个会话占用',
+  busyPrefix: ' · 等待 ',
+  busySuffix: ' 个任务结束',
   idle: ' · 空闲后自动重启',
-  goalActive: ' · 被某个会话自动续跑的 goal 占着',
-  goalExhausted: ' · 某个会话的 goal 轮次额度已用完，无法续跑',
+  goalActive: ' · 被某个自动续跑的 goal 占着',
+  goalExhausted: ' · 某个任务的 goal 轮次额度已用完，无法续跑',
   parkedGoals: ' · 已停泊 {n} 个 goal，重启后自动继续',
   parkButton: '停泊并重启',
   parkButtonAria: '停泊该会话的 goal，并立即请求重启',
   parkBusy: '停泊中…',
   parkError: '停泊失败：{message}',
   tooltip: '等待其他会话空闲后自动重启；重启后会自动继续本会话进度',
-  tooltipBusy: '等待其他会话空闲后自动重启（计数含“排队但还没开始”的任务）；重启后本会话会自动继续进度',
+  tooltipBusy: '等待其他任务结束（计数含“排队但还没开始”的任务）后自动重启；重启后本会话会自动继续进度',
   tooltipWithError: '等待其他会话空闲后自动重启；重启后本会话会自动继续进度。{message}',
   dotAria: '待重启',
   panelHeading: '待重启',
@@ -137,6 +137,11 @@ const ZH = {
   panelStateGoalExhausted: '等待其他会话的 goal（轮次额度已用完）',
   panelBlockedTitle: '占用会话：{title}',
   panelBlockedGeneric: '有一个会话正在运行',
+  // One line per blocker: a session and a subagent are told apart, and
+  // neither of them is ever shown as a raw session id.
+  panelBlockedSession: '会话「{label}」正在运行',
+  panelBlockedSubagent: '子智能体（{label}）正在运行',
+  panelBlockedSubagentGeneric: '有一个子智能体正在运行',
   panelGoalActiveLine: '占用会话「{title}」：goal 正在自动续跑（goal-active）',
   panelGoalExhaustedLine: '占用会话「{title}」：goal 轮次额度已用完，无法继续（goal-exhausted）',
   panelParkedTitle: '已停泊的 goal（重启后自动继续）：',
@@ -212,7 +217,8 @@ const ZH = {
   'sleep.countdown.hint': '再过 {n} 秒就关机，点「算了，别关」可以留下。',
   'sleep.waiting.title': '还在等大家收工',
   'sleep.waiting.body': '等这些会话忙完，就轮到关机啦：',
-  'sleep.waiting.count': '还有 {n} 个会话在干活',
+  'sleep.waiting.count': '还有 {n} 个任务在干活',
+  'sleep.waiting.subagents': '其中 {k} 个是子智能体',
   'sleep.waiting.blocker': '· {title}',
   'sleep.waiting.none': '（正在确认还有谁在忙）',
   'sleep.waiting.cancel': '不关了',
@@ -246,8 +252,8 @@ const ZH = {
 
 const EN = {
   label: 'Pending restart',
-  busyPrefix: ' · blocked by ',
-  busySuffix: ' session(s)',
+  busyPrefix: ' · waiting for ',
+  busySuffix: ' task(s) to finish',
   idle: ' · restarts once idle',
   goalActive: ' · held by a self-continuing goal',
   goalExhausted: ' · a goal ran out of rounds',
@@ -259,7 +265,7 @@ const EN = {
   tooltip:
     'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart.',
   tooltipBusy:
-    'Waits for the other sessions to become idle, then restarts automatically (the count includes work that is queued but not started yet); this session resumes its progress after the restart.',
+    'Waits for the other tasks to finish (the count includes work that is queued but not started yet), then restarts automatically; this session resumes its progress after the restart.',
   tooltipWithError:
     'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart. {message}',
   dotAria: 'Pending restart',
@@ -270,6 +276,11 @@ const EN = {
   panelStateGoalExhausted: 'Waiting for the other sessions\' goal (its round budget is used up)',
   panelBlockedTitle: 'Blocking session: {title}',
   panelBlockedGeneric: 'One session is running',
+  // One line per blocker: a session and a subagent are told apart, and
+  // neither of them is ever shown as a raw session id.
+  panelBlockedSession: 'Session "{label}" is running',
+  panelBlockedSubagent: 'Subagent of "{label}" is running',
+  panelBlockedSubagentGeneric: 'One subagent is running',
   panelGoalActiveLine: 'Blocking session "{title}": the goal keeps driving rounds by itself (goal-active)',
   panelGoalExhaustedLine: 'Blocking session "{title}": the goal ran out of rounds and cannot continue (goal-exhausted)',
   panelParkedTitle: 'Parked goals (they continue after the restart):',
@@ -345,7 +356,8 @@ const EN = {
   'sleep.countdown.hint': 'Powering off in {n} seconds — pick "Never mind, keep it on" to stay.',
   'sleep.waiting.title': 'Waiting for everyone to finish',
   'sleep.waiting.body': 'Once these sessions are done, the machine powers off:',
-  'sleep.waiting.count': '{n} session(s) still working',
+  'sleep.waiting.count': '{n} task(s) still working',
+  'sleep.waiting.subagents': '{k} of them are subagents',
   'sleep.waiting.blocker': '· {title}',
   'sleep.waiting.none': '(checking who is still busy)',
   'sleep.waiting.cancel': 'Keep it on',
@@ -729,6 +741,31 @@ if (moduleLoader) moduleLoader.load({
       return template.replace(/\{(\w+)\}/g, (match, name) => (
         vars && Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : match
       ))
+    }
+
+    /**
+     * The line of one blocker: a session and a subagent are told apart, and
+     * neither of them is ever shown as a raw session id.
+     *
+     * The Host says WHAT the blocker is (`kind`) and HOW it is called
+     * (`label`: the title of the session, or of the session that created the
+     * subagent). A blocker without a name gets a generic line.
+     *
+     * @param {any} entry the blocker the Host reported
+     * @returns {string}
+     */
+    function blockerLine(entry) {
+      const t = translate ?? ((name) => name)
+      const kind = entry && entry.kind === 'subagent' ? 'subagent' : 'session'
+      const label = entry && typeof entry.label === 'string' ? entry.label.trim() : ''
+      if (kind === 'subagent') {
+        return label === ''
+          ? t('panelBlockedSubagentGeneric')
+          : fill(t('panelBlockedSubagent'), { label })
+      }
+      return label === ''
+        ? t('panelBlockedGeneric')
+        : fill(t('panelBlockedSession'), { label })
     }
 
     /** How long the pending restart has been waiting, as a locale string. */
@@ -2873,6 +2910,11 @@ if (moduleLoader) moduleLoader.load({
       if (phase === 'waiting') {
         ensureSleepStyle()
         const blockers = status && Array.isArray(status.blockers) ? status.blockers : []
+        // How many of the blockers are subagents: the card says so, so the
+        // count is not read as "that many conversations".
+        const subagentCount = blockers.filter(
+          (entry) => entry && entry.kind === 'subagent',
+        ).length
         return h(
           'div',
           {
@@ -2893,16 +2935,19 @@ if (moduleLoader) moduleLoader.load({
               blockers.map((entry, index) => h(
                 'li',
                 { key: 'blocker-' + index },
-                fill(t('sleep.waiting.blocker'), {
-                  title: entry && typeof entry.title === 'string' && entry.title !== ''
-                    ? entry.title
-                    : t('panelBlockedGeneric'),
-                }),
+                blockerLine(entry),
               )),
             ),
           h('p', { className: 'dsh-autorestart-sleep-waiting__count' }, blockers.length === 0
             ? null
             : fill(t('sleep.waiting.count'), { n: blockers.length })),
+          subagentCount === 0
+            ? null
+            : h(
+              'p',
+              { className: 'dsh-autorestart-sleep-waiting__subagents' },
+              fill(t('sleep.waiting.subagents'), { k: subagentCount }),
+            ),
           errorLine(),
           h(
             'button',

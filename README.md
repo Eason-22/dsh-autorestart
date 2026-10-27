@@ -29,10 +29,14 @@ round starts, so the session goes idle and the restart can proceed. The goal is 
 restart and continues.
 
 The browser shows the state: a compact "pending restart" pill on the left side of the input toolbar
-and a small dot next to the session title in the sidebar. The pill's text reports how many
-conversations are still in the way (counted once per conversation, and the tooltip explains that a
-conversation with queued-but-not-started work counts too); it does not open a details panel. The dot
-breathes when the restart is about to fire.
+and a small dot next to the session title in the sidebar. The pill's text reports how many **tasks**
+are still in the way — a conversation, a subagent or a teammate counts as one task each, and the
+tooltip explains that queued-but-not-started work counts too; it does not open a details panel. The
+dot breathes when the restart is about to fire.
+
+Every blocker says **what it is**: a conversation is named by its own title, and a **subagent** is
+named after the conversation that created it ("Subagent of *that* conversation"). A raw session id is
+never shown to the user.
 
 Before every restart the plugin snapshots the profile, so a restart that leaves the host unable to
 boot is rolled back automatically — see

@@ -81,7 +81,8 @@
     "waiting": {
       "title": "还在等大家收工",
       "body": "等这些会话忙完，就轮到关机啦：",
-      "count": "还有 {n} 个会话在干活",
+      "count": "还有 {n} 个任务在干活",
+      "subagents": "其中 {k} 个是子智能体",
       "blocker": "· {title}",
       "none": "（正在确认还有谁在忙）",
       "cancel": "不关了"

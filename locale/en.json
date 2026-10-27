@@ -81,7 +81,8 @@
     "waiting": {
       "title": "Waiting for everyone to finish",
       "body": "Once these sessions are done, the machine powers off:",
-      "count": "{n} session(s) still working",
+      "count": "{n} task(s) still working",
+      "subagents": "{k} of them are subagents",
       "blocker": "· {title}",
       "none": "(checking who is still busy)",
       "cancel": "Keep it on"

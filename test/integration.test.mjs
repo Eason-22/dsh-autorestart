@@ -25,6 +25,28 @@ function tempStateFile(label) {
 }
 
 /**
+ * The blocker entry the Host reports for a busy session.
+ *
+ * Every blocker says WHAT it is (`kind`) and HOW it is called (`label`): a
+ * raw session id never reaches the interface.
+ *
+ * @param {string} sessionId
+ * @param {string} reason why it blocks ('running' or 'queued')
+ * @param {string|null} [label] the title of the session (null when unknown)
+ */
+function blocker(sessionId, reason, label = null) {
+  return {
+    sessionId,
+    reason,
+    kind: 'session',
+    label,
+    name: label === null ? '会话' : label,
+    parentTitle: null,
+    parentSessionId: null,
+  }
+}
+
+/**
  * Build a fake Cordis context. `services` are resolved through `ctx.get(name)`, so
  * the test can omit the optional web server or session controller.
  */
@@ -709,7 +731,7 @@ test('the ?gate=1 probe refuses a restart while a conversation has queued inbox 
   assert.equal(payload.allowRestart, false);
   assert.equal(payload.gate.allow, false);
   assert.equal(payload.gate.reason, 'conversation-active');
-  assert.deepEqual(payload.gate.blockedBy, [{ sessionId: 'sess-queued', reason: 'queued' }]);
+  assert.deepEqual(payload.gate.blockedBy, [blocker('sess-queued', 'queued')]);
   assert.equal(payload.busyCount, 1);
   assert.equal(payload.agentCount, 1);
   assert.equal(typeof payload.settleMs, 'number');
@@ -783,12 +805,14 @@ test('continuum_status reports the restart gate verdict', () => {
   const status = fake.tools.find((tool) => tool.name === 'continuum_status');
   const result = status.execute({});
   assert.equal(result.gateAllow, false);
-  assert.deepEqual(result.blockedBy, [{ sessionId: 'sess-status-busy', reason: 'running' }]);
+  assert.deepEqual(result.blockedBy, [blocker('sess-status-busy', 'running')]);
   assert.equal(typeof result.quietForMs, 'number');
   const schema = status.output.schema.properties;
   assert.equal(schema.gateAllow.type, 'boolean');
   assert.equal(schema.quietForMs.type, 'number');
   assert.equal(schema.blockedBy.type, 'array');
+  assert.equal(schema.blockedBy.items.properties.kind.enum.join(','), 'session,subagent');
+  assert.equal(schema.blockedBy.items.properties.label.type, 'string');
 });
 
 /**

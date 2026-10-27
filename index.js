@@ -1144,8 +1144,85 @@ export function createRuntime(ctx, config, options = {}) {
   }
 
   /**
+   * Whether this agent is a subagent (a delegated child), and which session
+   * created it.
+   *
+   * The origin is the ONLY reliable marker: a forked session also carries a
+   * parent session, but it is a top-level conversation, not a subagent.
+   *
+   * @param {any} agent
+   * @returns {string|null} the parent session id, or null when this is not a
+   *   subagent
+   */
+  const subagentParentOf = (agent) => {
+    try {
+      if (!agent || typeof agent !== 'object') return null
+      const session = agent.session && typeof agent.session === 'object' ? agent.session : null
+      const header = session && session.header && typeof session.header === 'object' ? session.header : null
+      const origin = agent.origin != null ? agent.origin : (header ? header.origin : undefined)
+      if (origin !== 'subagent') return null
+      const parent = agent.parentId != null
+        ? agent.parentId
+        : agent.parentSessionId != null
+          ? agent.parentSessionId
+          : (header ? header.parentSession : undefined)
+      if (parent == null || parent === '') return null
+      return String(parent)
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The readable identity of one blocker: WHAT it is (a session or a
+   * subagent) and HOW it is called.
+   *
+   * A subagent has no title of its own, so it is named after the session that
+   * created it ("<that session>'s subagent"). A raw session id never reaches
+   * the interface: an unknown name is a generic one.
+   *
+   * @param {string} sessionId
+   * @param {any} agent
+   * @returns {{ kind: 'session'|'subagent', label: string|null, name: string, parentTitle: string|null, parentSessionId: string|null }}
+   */
+  const describeBlocker = (sessionId, agent) => {
+    const parent = agent ? subagentParentOf(agent) : null
+    if (parent === null) {
+      let title = null
+      try { title = sessionTitle(sessionId) } catch { /* a missing title is not a problem */ }
+      const label = title ? String(title) : null
+      return {
+        kind: 'session',
+        // The label is the title of the session itself.
+        label,
+        // The full name of the blocker: its title, or a generic one.
+        name: label || '会话',
+        parentTitle: null,
+        parentSessionId: null,
+      }
+    }
+    let parentTitle = null
+    try { parentTitle = sessionTitle(parent) } catch { /* a missing title is not a problem */ }
+    const title = parentTitle ? String(parentTitle) : null
+    return {
+      kind: 'subagent',
+      // The label is the title of the session that created it: the UI shows
+      // "子智能体（<that title>）".
+      label: title,
+      // The full name of the blocker: "<that session>'s subagent".
+      name: title ? `${title}的子智能体` : '子智能体',
+      parentTitle: title,
+      parentSessionId: parent,
+    }
+  }
+
+  /**
    * Every conversation that is still working, subagents and teammates included.
    * 'running' is a live turn; 'queued' is inbox work that has not started yet.
+   *
+   * Every entry carries the kind of the blocker and a readable name, so the
+   * interface can tell a session from a subagent and never has to show a raw
+   * session id.
    */
   const busyAgents = () => {
     const out = []
@@ -1158,8 +1235,10 @@ export function createRuntime(ctx, config, options = {}) {
     for (const agent of agents) {
       try {
         if (!agent || !agent.id) continue
-        if (agent.status === 'running') out.push({ sessionId: String(agent.id), reason: 'running' })
-        else if (pendingInboxCount(agent) > 0) out.push({ sessionId: String(agent.id), reason: 'queued' })
+        const sessionId = String(agent.id)
+        const described = describeBlocker(sessionId, agent)
+        if (agent.status === 'running') out.push({ sessionId, reason: 'running', ...described })
+        else if (pendingInboxCount(agent) > 0) out.push({ sessionId, reason: 'queued', ...described })
       } catch {}
     }
     return out
@@ -2808,7 +2887,26 @@ function registerTools(ctx, runtime, config) {
           pendingRestart: { type: 'boolean' },
           gateAllow: { type: 'boolean' },
           quietForMs: { type: 'number' },
-          blockedBy: { type: 'array', items: { type: 'object' } },
+          blockedBy: {
+            type: 'array',
+            items: {
+              type: 'object',
+              // Every blocker says WHAT it is (`session` or `subagent`) and
+              // HOW it is called (`label`: the title of the session, or of the
+              // session that created the subagent).
+              properties: {
+                sessionId: { type: 'string' },
+                reason: { type: 'string' },
+                busyReason: { type: 'string' },
+                kind: { type: 'string', enum: ['session', 'subagent'] },
+                label: { type: 'string' },
+                name: { type: 'string' },
+                parentTitle: { type: 'string' },
+                parentSessionId: { type: 'string' },
+                title: { type: 'string' },
+              },
+            },
+          },
           parkedGoals: { type: 'array', items: { type: 'object' } },
           recovery: { type: 'array', items: { type: 'object' } },
           handoffs: { type: 'array', items: { type: 'object' } },

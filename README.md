@@ -148,7 +148,6 @@ show up in the Plugin Manager and in the config editor.
 | `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the relaunched host before it restores the snapshot and launches the host again. |
 | `showSleepButton` | `true` | Whether the moon button of the graceful shutdown is shown at the foot of the left sidebar, next to Settings. |
 | `sleepCountdownSeconds` | `20` | How many seconds the graceful shutdown counts down before the machine goes down — a dropdown: `0` / `10` / `20` / `30` / `60` seconds. `0` means "switch off right away" (still waiting for the conversations to be idle). |
-| `sleepHumanOnly` | `true` | Whether arming the shutdown needs a real human click (a one-time gesture ticket). `false` lets a plain HTTP request arm it again — anyone on the machine can then switch it off. |
 | `sleepCommand` | `''` | A custom shutdown command for the graceful shutdown. Empty = the host is detected automatically; a value replaces the detected command (`cmd.exe /c …` on Windows, `/bin/sh -c …` everywhere else). |
 
 The two waits are independent of each other, and both default to two seconds:
@@ -275,40 +274,19 @@ system is asked to shut down immediately (`/t 0`) instead of counting down a sec
 
 **Configuration.** `showSleepButton` (default `true`) decides whether the button is shown,
 `sleepCountdownSeconds` (a **dropdown**: `0` / `10` / `20` / `30` / `60` seconds, default `20`) how
-long the countdown runs, `sleepHumanOnly` (default `true`) whether a real human click is required (see
-below), and `sleepCommand` (default `''`) replaces the detected command with one of your own — empty
-means "detect the host automatically". `0` means **no countdown at all**: the machine is switched off
-as soon as every conversation is idle (a busy conversation still blocks it), and no countdown card
-appears. A profile that still carries a value the dropdown does not offer (`15`, `45`, …) is snapped
-onto the nearest offered one instead of breaking.
+long the countdown runs, and `sleepCommand` (default `''`) replaces the detected command with one of
+your own — empty means "detect the host automatically". `0` means **no countdown at all**: the machine
+is switched off as soon as every conversation is idle (a busy conversation still blocks it), and no
+countdown card appears. A profile that still carries a value the dropdown does not offer (`15`,
+`45`, …) is snapped onto the nearest offered one instead of breaking.
 
-**The button is a human control.** By default (`sleepHumanOnly: true`) the machine may only be
-switched off after **a person really clicked the button**. The host hands the page a one-time ticket
-with every page load; the button sends it together with the timestamp of a trusted `pointerdown`
-(`event.isTrusted === true`, which a script cannot fake) — and the host consumes the ticket, so one
-click arms once. A plain `POST /__dsh_autorestart/sleep {"action":"arm"}` without that gesture is
-answered with **403** and a machine-readable reason (`no-ticket`, `bad-ticket`, `expired-ticket`,
-`replayed-ticket`, `stale-gesture`, `cross-site`); nothing is armed, nothing is counted down and no
-command runs. The button shows that reason instead of failing silently.
+**One click is all it takes.** The moon button arms the shutdown: the host waits for every busy
+conversation, counts down **20 seconds** in a floating card (it never covers the interface), and then
+switches the machine off. Clicking the button again — or the cancel button on the card — takes it
+back. Nothing else is asked of the user: no ticket, no confirmation dialog, no page reload.
 
-For an **agent** this means: you cannot switch the machine off with a shell command. You have to
-drive the desktop and click the button for real — and the user sees it happen (the screen shows the
-"controlling the computer" banner). That is the point: the shutdown is the one thing a human must
-agree to.
-
-This raises the bar, it is **not an absolute boundary**: a local process that can read the page (or
-the host's memory) can still forge a ticket. If you really want a script to trigger the shutdown, set
-`sleepHumanOnly: false` — the route then accepts a plain HTTP request again, the state reports
-`humanOnly: false`, and you take the risk that anything on the machine (including your own agent) can
-switch it off.
-
-**A page that was open before the update heals itself.** The ticket lives *in the page* (the host
-injects it into the HTML it serves), so a page that was already open when the plugin was updated has
-no ticket — and a real click on it would be refused. The button notices that, shows "the page needs a
-refresh" with a **Refresh the page** button, and reloads the page once by itself (a flag in
-`sessionStorage` keeps it from looping; a refresh you click yourself always works). There is
-deliberately **no HTTP route that hands out a ticket**: any script could call it, and the whole point
-of the gesture is that only a person can arm the machine.
+The route is plain HTTP, so a script can do it as well:
+`POST /__dsh_autorestart/sleep {"action":"arm"}` arms it, `{"action":"cancel"}` takes it back.
 
 **The one-time install question.** The first time the plugin is used, the composer dock asks once
 more whether the button should stay. The answer is written into the profile configuration

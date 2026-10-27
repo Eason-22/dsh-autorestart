@@ -29,7 +29,6 @@ import {
   snapCountdownChoice,
   WSL_SHUTDOWN_EXE,
 } from '../lib/sleep.js'
-import { createGestureTickets } from '../lib/ticket.js'
 import { apply } from '../index.js'
 
 /** The route that serves the graceful sleep. */
@@ -692,37 +691,6 @@ function sleepRoute(routes) {
   return route
 }
 
-/**
- * The gesture ticket the host injected into the page.
- *
- * The test drives the real mechanism: the page is served, the host's index
- * tap injects a ticket into it, and the client sends that ticket back.
- *
- * @param {Function[]} taps the index taps the plugin registered
- * @returns {{ ticket: string, issuedAt: number }}
- */
-function ticketFromPage(taps) {
-  const html = taps.map((fn) => fn('<html><head></head></html>')).join('')
-  const match = /window\.__DSH_SLEEP_TICKET__=(\{[^}]*\});/.exec(html)
-  assert.ok(match, 'the page must carry a gesture ticket')
-  return JSON.parse(match[1])
-}
-
-/**
- * The headers a real click sends: the page's ticket plus the timestamp of
- * the pointerdown.
- *
- * @param {{ ticket: string }} grant
- * @param {number} [at] the moment of the gesture
- * @returns {object}
- */
-function gestureHeaders(grant, at = Date.now()) {
-  return {
-    'x-dsh-sleep-ticket': grant.ticket,
-    'x-dsh-sleep-gesture': String(at),
-  }
-}
-
 test('the sleep route answers with exactly the agreed shape', async () => {
   const { file } = tempStateFile('shape')
   const { ctx, routes } = createContext()
@@ -733,14 +701,12 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(res.statusCode, 200)
   const payload = JSON.parse(res.body)
   assert.deepEqual(Object.keys(payload).sort(), [
-    'armed', 'blockers', 'countdownSeconds', 'dryRun', 'host', 'humanOnly', 'lastRun', 'message', 'ok', 'phase', 'remainingMs', 'showSleepButton', 'ticketReady',
+    'armed', 'blockers', 'countdownSeconds', 'dryRun', 'host', 'lastRun', 'message', 'ok', 'phase', 'remainingMs', 'showSleepButton',
   ])
   assert.equal(payload.ok, true)
   assert.equal(payload.phase, 'idle')
   assert.equal(payload.armed, false)
   assert.equal(payload.showSleepButton, true)
-  assert.equal(payload.humanOnly, true, 'the state must say that a human click is needed')
-  assert.equal(payload.ticketReady, false, 'a page without a ticket must be visible in the state')
   assert.equal(payload.countdownSeconds, 20)
   assert.equal(payload.remainingMs, 0)
   assert.deepEqual(payload.blockers, [])
@@ -759,15 +725,11 @@ test('the sleep route answers with exactly the agreed shape', async () => {
 test('arming waits for the busy conversations and lists them', async () => {
   const { file } = tempStateFile('busy')
   const busy = { id: 'sess-busy', status: 'running' }
-  const { ctx, routes, timers, taps } = createContext({ runningAgents: [busy] })
+  const { ctx, routes, timers } = createContext({ runningAgents: [busy] })
   apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
 
   const res = fakeResponse()
-  const grant = ticketFromPage(taps)
-  sleepRoute(routes).handler(
-    fakeRequest('POST', { action: 'arm' }, gestureHeaders(grant)),
-    res,
-  )
+  sleepRoute(routes).handler(fakeRequest('POST', { action: 'arm' }), res)
   await settle()
 
   assert.equal(res.statusCode, 200)
@@ -781,7 +743,7 @@ test('arming waits for the busy conversations and lists them', async () => {
 test('cancelling stops the countdown and releases the timer', async () => {
   const { file } = tempStateFile('cancel')
   const { ctx, routes, timers } = createContext()
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepHumanOnly: false })
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
 
   sleepRoute(routes).handler(fakeRequest('POST', { action: 'arm' }), fakeResponse())
   await settle()
@@ -795,249 +757,27 @@ test('cancelling stops the countdown and releases the timer', async () => {
   assert.equal(payload.armed, false)
   assert.ok(timers[0].disposed, 'the timer must be disposed when the sleep is cancelled')
 })
+/* ------------------------------------------------------------------ *
+ * The plain route: a click arms the machine. No ticket, no ceremony.
+ * ------------------------------------------------------------------ */
 
-test('an unknown action is refused', async () => {
-  const { file } = tempStateFile('unknown')
+test('a bare arm request arms the machine', async () => {
+  const { file } = tempStateFile('bare-arm')
   const { ctx, routes } = createContext()
   apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
 
+  // Nothing but the action: no headers, no ticket, no ceremony.
   const res = fakeResponse()
-  sleepRoute(routes).handler(fakeRequest('POST', { action: 'explode' }), res)
+  sleepRoute(routes).handler(fakeRequest('POST', { action: 'arm' }), res)
   await settle()
-  assert.equal(res.statusCode, 400)
-  assert.equal(JSON.parse(res.body).ok, false)
-})
-
-/* ------------------------------------------------------------------ *
- * The human gesture: only a real click may arm the machine.
- * ------------------------------------------------------------------ */
-
-/**
- * A plugin whose gesture tickets run on a clock the test controls.
- *
- * @param {string} label
- * @param {object} [config] extra configuration
- * @returns {object}
- */
-function createGestureHost(label, config = {}) {
-  const { file } = tempStateFile(label)
-  const clock = { at: 1_700_000_000_000 }
-  const tickets = createGestureTickets({ now: () => clock.at })
-  const { ctx, routes, taps } = createContext()
-  apply(
-    ctx,
-    { stateFile: file, recoveryDelayMs: 0, enabled: true, ...config },
-    { sleepTickets: tickets },
-  )
-  return { ctx, routes, taps, tickets, clock, file }
-}
-
-/** The state the route reports right now. */
-function currentStatus(routes) {
-  const res = fakeResponse()
-  sleepRoute(routes).handler(fakeRequest('GET'), res)
-  return JSON.parse(res.body)
-}
-
-test('arming without a gesture ticket is refused and arms nothing', async () => {
-  const host = createGestureHost('no-ticket')
-  const res = fakeResponse()
-  sleepRoute(host.routes).handler(fakeRequest('POST', { action: 'arm' }), res)
-  await settle()
-
-  assert.equal(res.statusCode, 403)
+  assert.equal(res.statusCode, 200)
   const payload = JSON.parse(res.body)
-  assert.equal(payload.ok, false)
-  assert.equal(payload.reason, 'no-ticket', 'the refusal must name its reason')
-  assert.equal(typeof payload.message, 'string')
-  assert.ok(payload.message.length > 0, 'the refusal must explain itself')
-  // Nothing was armed, nothing was counted down, no command was run.
-  const status = currentStatus(host.routes)
-  assert.equal(status.armed, false)
-  assert.equal(status.phase, 'idle')
-  assert.equal(status.remainingMs, 0)
-})
-
-test('a forged gesture ticket is refused', async () => {
-  const host = createGestureHost('bad-ticket')
-  const res = fakeResponse()
-  const headers = {
-    'x-dsh-sleep-ticket': 'deadbeef.deadbeef',
-    'x-dsh-sleep-gesture': String(host.clock.at),
-  }
-  sleepRoute(host.routes).handler(fakeRequest('POST', { action: 'arm' }, headers), res)
-  await settle()
-
-  assert.equal(res.statusCode, 403)
-  assert.equal(JSON.parse(res.body).reason, 'bad-ticket')
-  assert.equal(currentStatus(host.routes).armed, false)
-})
-
-test('an expired gesture ticket is refused', async () => {
-  const host = createGestureHost('expired-ticket')
-  const grant = ticketFromPage(host.taps)
-  // The page was loaded a minute and a half ago.
-  host.clock.at += 90_000
-  const res = fakeResponse()
-  sleepRoute(host.routes).handler(
-    fakeRequest('POST', { action: 'arm' }, gestureHeaders(grant, host.clock.at)),
-    res,
-  )
-  await settle()
-
-  assert.equal(res.statusCode, 403)
-  assert.equal(JSON.parse(res.body).reason, 'expired-ticket')
-  assert.equal(currentStatus(host.routes).armed, false)
-})
-
-test('a gesture that is too old is refused', async () => {
-  const host = createGestureHost('stale-gesture')
-  const grant = ticketFromPage(host.taps)
-  // The click was five seconds ago: too old for the three second window.
-  host.clock.at += 5_000
-  const res = fakeResponse()
-  sleepRoute(host.routes).handler(
-    fakeRequest('POST', { action: 'arm' }, gestureHeaders(grant, host.clock.at - 5_000)),
-    res,
-  )
-  await settle()
-
-  assert.equal(res.statusCode, 403)
-  assert.equal(JSON.parse(res.body).reason, 'stale-gesture')
-  assert.equal(currentStatus(host.routes).armed, false)
-})
-
-test('a cross-site request is refused', async () => {
-  const host = createGestureHost('cross-site')
-  const grant = ticketFromPage(host.taps)
-  const res = fakeResponse()
-  const headers = {
-    ...gestureHeaders(grant, host.clock.at),
-    origin: 'http://evil.example',
-    'sec-fetch-site': 'cross-site',
-  }
-  sleepRoute(host.routes).handler(fakeRequest('POST', { action: 'arm' }, headers), res)
-  await settle()
-
-  assert.equal(res.statusCode, 403)
-  assert.equal(JSON.parse(res.body).reason, 'cross-site')
-  assert.equal(currentStatus(host.routes).armed, false)
-})
-
-test('the state says whether the calling page has a usable ticket', async () => {
-  const host = createGestureHost('ticket-ready')
-  const grant = ticketFromPage(host.taps)
-  const route = sleepRoute(host.routes)
-
-  const withTicket = fakeResponse()
-  route.handler(fakeRequest('GET', undefined, { 'x-dsh-sleep-ticket': grant.ticket }), withTicket)
-  await settle()
-  const payload = JSON.parse(withTicket.body)
-  assert.equal(payload.humanOnly, true, 'the state keeps saying that a human click is needed')
-  assert.equal(payload.ticketReady, true, 'a page with a fresh ticket must be visible in the state')
-
-  // A page without a ticket (it was opened before the plugin was updated).
-  const withoutTicket = fakeResponse()
-  route.handler(fakeRequest('GET'), withoutTicket)
-  await settle()
-  assert.equal(JSON.parse(withoutTicket.body).ticketReady, false)
-
-  // The status request must not spend the ticket.
-  const again = fakeResponse()
-  route.handler(fakeRequest('GET', undefined, { 'x-dsh-sleep-ticket': grant.ticket }), again)
-  await settle()
-  assert.equal(JSON.parse(again.body).ticketReady, true, 'the status request must not spend the ticket')
-})
-
-test('a real click arms the machine, and the ticket is consumed', async () => {
-  const host = createGestureHost('gesture')
-  const grant = ticketFromPage(host.taps)
-
-  const first = fakeResponse()
-  sleepRoute(host.routes).handler(
-    fakeRequest('POST', { action: 'arm' }, gestureHeaders(grant, host.clock.at)),
-    first,
-  )
-  await settle()
-  assert.equal(first.statusCode, 200)
-  const payload = JSON.parse(first.body)
   assert.equal(payload.ok, true)
-  assert.equal(payload.armed, true)
-
-  // The same ticket a second time: one ticket, one arm.
-  const second = fakeResponse()
-  sleepRoute(host.routes).handler(
-    fakeRequest('POST', { action: 'arm' }, gestureHeaders(grant, host.clock.at)),
-    second,
+  assert.equal(payload.armed, true, 'a plain request arms the machine')
+  assert.ok(
+    payload.phase === 'countdown' || payload.phase === 'waiting',
+    `the machine must be armed, got: ${payload.phase}`,
   )
-  await settle()
-  assert.equal(second.statusCode, 403)
-  assert.equal(JSON.parse(second.body).reason, 'replayed-ticket')
-})
-
-test('a request from the page itself is not cross-site', async () => {
-  const host = createGestureHost('same-site')
-  const grant = ticketFromPage(host.taps)
-  const res = fakeResponse()
-  const headers = {
-    ...gestureHeaders(grant, host.clock.at),
-    // What a browser sends for a same-origin request.
-    origin: 'http://127.0.0.1:57545',
-    host: '127.0.0.1:57545',
-    'sec-fetch-site': 'same-origin',
-  }
-  sleepRoute(host.routes).handler(fakeRequest('POST', { action: 'arm' }, headers), res)
-  await settle()
-
-  assert.equal(res.statusCode, 200, 'the page itself must be able to arm the machine')
-  assert.equal(JSON.parse(res.body).armed, true)
-})
-
-test('cancelling needs no gesture', async () => {
-  const host = createGestureHost('cancel')
-  const grant = ticketFromPage(host.taps)
-  const armed = fakeResponse()
-  sleepRoute(host.routes).handler(
-    fakeRequest('POST', { action: 'arm' }, gestureHeaders(grant, host.clock.at)),
-    armed,
-  )
-  await settle()
-  assert.equal(armed.statusCode, 200)
-
-  const res = fakeResponse()
-  sleepRoute(host.routes).handler(fakeRequest('POST', { action: 'cancel' }), res)
-  await settle()
-  assert.equal(res.statusCode, 200)
-  assert.equal(JSON.parse(res.body).phase, 'cancelled')
-})
-
-test('sleepHumanOnly: false lets a script arm the machine again', async () => {
-  const host = createGestureHost('human-only-off', { sleepHumanOnly: false })
-  const res = fakeResponse()
-  sleepRoute(host.routes).handler(fakeRequest('POST', { action: 'arm' }), res)
-  await settle()
-
-  assert.equal(res.statusCode, 200)
-  const payload = JSON.parse(res.body)
-  assert.equal(payload.armed, true)
-  assert.equal(payload.humanOnly, false, 'the state must say that a script may arm it')
-})
-
-test('the gesture ticket is bound to this host start', async () => {
-  const host = createGestureHost('bound')
-  const grant = ticketFromPage(host.taps)
-  // A ticket of another host start (another secret) is worthless.
-  const other = createGestureTickets()
-  const foreign = other.issue()
-  const res = fakeResponse()
-  sleepRoute(host.routes).handler(
-    fakeRequest('POST', { action: 'arm' }, gestureHeaders(foreign, host.clock.at)),
-    res,
-  )
-  await settle()
-  assert.equal(res.statusCode, 403)
-  assert.equal(JSON.parse(res.body).reason, 'bad-ticket')
-  assert.ok(grant.ticket !== foreign.ticket, 'two host starts must not share a ticket')
 })
 
 /* ------------------------------------------------------------------ *
@@ -1336,15 +1076,13 @@ const settleClient = () => new Promise((resolve) => setTimeout(resolve, 5))
 /**
  * Load the classic client script in a sandbox and mount its surfaces.
  *
- * @param {{ status?: object, storage?: object, language?: string, ticket?: object, refuseArm?: object }} options
+ * @param {{ status?: object, storage?: object, language?: string, refuseArm?: object, fakeTimers?: boolean }} options
  */
 function mountClient({
   status = null,
   storage = createStorage(),
   language = 'zh',
-  ticket = null,
   refuseArm = null,
-  sessionStorage = createStorage(),
   fakeTimers = false,
 } = {}) {
   const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
@@ -1352,7 +1090,7 @@ function mountClient({
   const fetches = []
   const polls = []
   const state = { status }
-  // How often the page reloaded itself (the self-heal of a stale page).
+  // How often the page reloaded itself (the button must never do that).
   const reloads = { count: 0 }
   // The timers the client scheduled (only with `fakeTimers`): a test fires
   // them by hand instead of waiting for the real clock.
@@ -1371,13 +1109,10 @@ function mountClient({
     window: {
       __ModuleLoader__: { load: (value) => { definition = value } },
       localStorage: storage,
-      sessionStorage,
       matchMedia: () => ({ matches: false }),
       addEventListener: () => {},
       removeEventListener: () => {},
       location: { reload: () => { reloads.count += 1 } },
-      // The one-time gesture ticket the host injected into this page.
-      __DSH_SLEEP_TICKET__: ticket,
     },
     document: {
       getElementById: () => null,
@@ -1388,12 +1123,12 @@ function mountClient({
       fetches.push({ url: String(url), init })
       const action = init && init.body ? JSON.parse(init.body).action : null
       const isSleep = String(url).includes('/sleep')
-      // The host refuses an arm without a real gesture.
+      // The host refuses the request (a failure the user must see).
       if (isSleep && action === 'arm' && refuseArm) {
         return Promise.resolve({
           ok: false,
-          status: 403,
-          json: async () => ({ ok: false, error: 'human-gesture-required', ...refuseArm }),
+          status: 500,
+          json: async () => ({ ok: false, error: 'not-armed', ...refuseArm }),
         })
       }
       const body = isSleep
@@ -1655,200 +1390,47 @@ test('the button title says how long the countdown lasts', async () => {
   assert.match(String(button.props.title), /60/, 'the title must carry the countdown length')
 })
 
-test('a real click sends the gesture ticket, a scripted one does not', async () => {
+test('one click arms the machine: one request, no reload, no ticket', async () => {
   const mounted = mountClient({
     status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
-    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
   })
   await mounted.poll()
   const button = await mounted.settled('sidebar.footer.action')
   assert.ok(button, 'the button must be rendered')
-  assert.equal(typeof button.props.onPointerDown, 'function', 'the button must watch the pointer')
 
-  // A scripted pointerdown (isTrusted === false) is not a gesture: nothing
-  // is sent at all, because the host would refuse it anyway.
-  button.props.onPointerDown({ isTrusted: false })
-  button.props.onClick({ isTrusted: false })
-  await settleClient()
-  const scripted = mounted.fetches
-    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
-    .find((call) => JSON.parse(call.init.body).action === 'arm')
-  assert.equal(scripted, undefined, 'a scripted pointerdown must not arm anything')
-
-  // A trusted pointerdown is a real gesture: the ticket goes with it.
-  button.props.onPointerDown({ isTrusted: true })
-  button.props.onClick({ isTrusted: true })
-  await settleClient()
-  const real = mounted.fetches
-    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
-    .filter((call) => JSON.parse(call.init.body).action === 'arm')
-    .pop()
-  assert.ok(real, 'the click must reach the host')
-  assert.equal(real.init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
-  assert.ok(real.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
-  assert.equal(mounted.reloads.count, 0, 'a page with a ticket never reloads')
-})
-
-/** The arm requests the client sent so far. */
-function armRequests(mounted) {
-  return mounted.fetches
-    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
-    .filter((call) => JSON.parse(call.init.body).action === 'arm')
-}
-
-/** A client with a fresh ticket, waiting for a click. */
-async function mountedWithTicket() {
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
-    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-  assert.ok(button, 'the button must be rendered')
-  return { mounted, button }
-}
-
-test('a synthetic mousedown is not a gesture and arms nothing', async () => {
-  const { mounted, button } = await mountedWithTicket()
-  button.props.onMouseDown({ isTrusted: false })
-  button.props.onClick({ isTrusted: false })
-  await settleClient()
-  assert.equal(armRequests(mounted).length, 0, 'a synthetic event must not arm anything')
-})
-
-test('a real mousedown arms the machine', async () => {
-  const { mounted, button } = await mountedWithTicket()
-  button.props.onMouseDown({ isTrusted: true })
-  button.props.onClick({ isTrusted: true })
-  await settleClient()
-  const armed = armRequests(mounted).pop()
-  assert.ok(armed, 'a real mousedown must reach the host')
-  assert.equal(armed.init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
-  assert.ok(armed.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
-})
-
-test('a real touchstart arms the machine', async () => {
-  const { mounted, button } = await mountedWithTicket()
-  // A touch screen sends touchstart and no pointer event at all.
-  button.props.onTouchStart({ isTrusted: true })
-  button.props.onClick()
-  await settleClient()
-  const armed = armRequests(mounted).pop()
-  assert.ok(armed, 'a real touchstart must reach the host')
-  assert.equal(armed.init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
-  assert.ok(armed.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
-})
-
-test('a real click alone arms the machine', async () => {
-  const { mounted, button } = await mountedWithTicket()
-  // A driver that sends no pointer event at all still sends a trusted click.
-  button.props.onClick({ isTrusted: true })
-  await settleClient()
-  const armed = armRequests(mounted).pop()
-  assert.ok(armed, 'a real click must reach the host')
-  assert.equal(armed.init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
-  assert.ok(armed.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
-})
-
-test('a page without a gesture ticket reloads itself once, quietly', async () => {
-  // The page was opened before the plugin was updated: it has no ticket at
-  // all. There is no HTTP route that hands one out, so the page reloads
-  // itself — silently — and the next click works.
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
-    ticket: null,
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-  button.props.onPointerDown({ isTrusted: true })
   button.props.onClick()
   await settleClient()
 
-  const armed = mounted.fetches
+  const arms = mounted.fetches
     .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
     .filter((call) => JSON.parse(call.init.body).action === 'arm')
-  assert.equal(armed.length, 0, 'without a ticket nothing may be armed')
-  assert.equal(mounted.reloads.count, 1, 'the page reloads itself once')
-
-  // The reload is silent: no hint, no button — the user only sees the page
-  // come back with a fresh ticket.
-  const after = mounted.render('sidebar.footer.action')
-  assert.ok(!textOf(after).includes('重启'), 'the first reload must not show a hint')
-  const buttons = walk(after).filter((node) => node.type === 'button')
-  assert.equal(buttons.length, 1, 'the moon button must be the only button')
-})
-
-test('the second attempt without a ticket says what to do', async () => {
-  const sessionStorage = createStorage()
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
-    ticket: null,
-    sessionStorage,
-  })
-  await mounted.poll()
-  let button = await mounted.settled('sidebar.footer.action')
-
-  // The first click: the page reloads itself (and remembers that it did).
-  button.props.onPointerDown({ isTrusted: true })
-  button.props.onClick()
-  await settleClient()
-  assert.equal(mounted.reloads.count, 1, 'the first click reloads the page')
-  assert.equal(sessionStorage.getItem('dsh-autorestart-sleep-ticket-reload'), '1')
-
-  // The page comes back without a ticket again (the host still serves the
-  // old page): now the button says what to do, and it does NOT reload again.
-  button = mounted.render('sidebar.footer.action')
-  const again = walk(button).find(
-    (node) => node.props && node.props['data-dsh-autorestart-sleep-button'] === 'true',
+  assert.equal(arms.length, 1, 'one click must send exactly one arm request')
+  // Nothing else: no ticket, no gesture, no extra headers.
+  assert.deepEqual(
+    Object.keys(arms[0].init.headers).filter((key) => key.startsWith('x-dsh-')),
+    [],
+    'the request must not carry any custom header',
   )
-  assert.ok(again, 'the button must still be there')
-  again.props.onPointerDown({ isTrusted: true })
-  again.props.onClick()
-  await settleClient()
-  assert.equal(mounted.reloads.count, 1, 'the page must not reload for ever')
-
-  const after = mounted.render('sidebar.footer.action')
-  assert.ok(textOf(after).includes('重启一次 DSH'), 'the hint must be visible')
-  const buttons = walk(after).filter((node) => node.type === 'button')
-  assert.equal(buttons.length, 1, 'there must be no action button')
-})
-
-test('a spent ticket reloads the page once, too', async () => {
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
-    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
-    refuseArm: { reason: 'replayed-ticket', message: '这张手势票据已经用过了。' },
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-  button.props.onPointerDown({ isTrusted: true })
-  button.props.onClick()
-  await settleClient()
-
-  assert.equal(mounted.reloads.count, 1, 'a spent ticket reloads the page once')
-  const after = mounted.render('sidebar.footer.action')
-  assert.ok(!textOf(after).includes('重启'), 'the reload is silent')
+  assert.equal(mounted.reloads.count, 0, 'the button must never reload the page')
 })
 
 test('a refused request is shown, never silent', async () => {
   const mounted = mountClient({
     status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
-    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
-    refuseArm: { reason: 'stale-gesture', message: '这次点击不是刚刚发生的真人手势，请在 3 秒内再点一次。' },
+    refuseArm: { reason: 'not-armed', message: '关机命令没能启动。' },
   })
   await mounted.poll()
   const button = await mounted.settled('sidebar.footer.action')
-  button.props.onPointerDown({ isTrusted: true })
   button.props.onClick()
   await settleClient()
 
   const after = mounted.render('sidebar.footer.action')
   const shown = textOf(after)
   assert.ok(
-    shown.includes('真人手势') || String(after.props.title || '').includes('真人手势'),
+    shown.includes('没能启动') || String(after.props.title || '').includes('没能启动'),
     `the refusal must be visible, got: ${shown} / ${after.props.title}`,
   )
-  assert.equal(mounted.reloads.count, 0, 'a stale gesture is not fixed by a reload')
+  assert.equal(mounted.reloads.count, 0, 'a failure never reloads the page')
 })
 
 /* ------------------------------------------------------------------ *

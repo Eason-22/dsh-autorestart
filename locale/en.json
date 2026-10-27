@@ -26,9 +26,6 @@
       "busy": "Getting ready…"
     },
     "error": "Could not reach the sleep service: {message}",
-    "refused": "This click was not accepted: {message}",
-    "gestureMissing": "Click the button with the mouse (or a stylus): only a real click counts.",
-    "ticketHint": "The plugin was just updated, please restart DSH once",
     "dryRun": {
       "title": "Dry run: the machine stays on",
       "body": "The rehearsal is over. This is the command it WOULD have run (nothing was executed):",

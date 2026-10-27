@@ -114,30 +114,6 @@ const SLEEP_DEFAULT_COUNTDOWN_SECONDS = 20
 /** How long the note of a finished rehearsal stays on screen (ms). */
 const SLEEP_DRY_RUN_NOTICE_MS = 8_000
 
-/** How long a real pointer gesture stays valid (ms); the host uses the same window. */
-const SLEEP_GESTURE_WINDOW_MS = 3_000
-
-/**
- * The flag that remembers "this session already reloaded itself once".
- *
- * A page that was opened before the plugin was updated has no gesture
- * ticket (the host injects it into the HTML it serves). Reloading the page
- * is the silent way to get a fresh one — the flag keeps that from becoming
- * a loop.
- */
-const SLEEP_RELOAD_FLAG = 'dsh-autorestart-sleep-ticket-reload'
-
-/**
- * The reasons that mean: this page has no usable gesture ticket.
- *
- * The ticket lives in the page (the host injects it into the HTML it
- * serves), so a page that was opened before the plugin was updated has
- * none. There is deliberately NO route that hands out a ticket — that
- * would let any script arm the machine again — so the only way out is a
- * restart of DSH.
- */
-const SLEEP_STALE_TICKET_REASONS = ['no-ticket', 'bad-ticket', 'expired-ticket', 'replayed-ticket']
-
 const ZH = {
   label: '待重启',
   busyPrefix: ' · 被 ',
@@ -195,9 +171,6 @@ const ZH = {
   'sleep.button.titleImmediate': '等所有会话收工后立即关机（不倒数）',
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
-  'sleep.refused': '这次点击没有被接受：{message}',
-  'sleep.gestureMissing': '请用鼠标（或触控笔）直接点一下这个按钮：只有真实的点击才算数。',
-  'sleep.ticketHint': '插件刚更新过，请重启一次 DSH',
   'sleep.dryRun.title': '试运行：不会真的关机',
   'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
   'sleep.dryRun.close': '知道了',
@@ -309,9 +282,6 @@ const EN = {
   'sleep.button.titleImmediate': 'Waits for every session to finish, then powers off right away (no countdown)',
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
-  'sleep.refused': 'This click was not accepted: {message}',
-  'sleep.gestureMissing': 'Click the button with the mouse (or a stylus): only a real click counts.',
-  'sleep.ticketHint': 'The plugin was just updated, please restart DSH once',
   'sleep.dryRun.title': 'Dry run: the machine stays on',
   'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
   'sleep.dryRun.close': 'Got it',
@@ -1713,13 +1683,8 @@ if (moduleLoader) moduleLoader.load({
       if (sleepStore.inFlight) return
       sleepStore.inFlight = true
       try {
-        // The ticket travels with the poll (it is NOT spent by the status
-        // request): the host answers `ticketReady`, so a page that cannot
-        // arm the machine is visible in the state.
-        const grant = sleepTicket()
         const response = await fetch(DEFAULT_SLEEP_URL, {
           cache: 'no-store',
-          headers: grant ? { 'x-dsh-sleep-ticket': grant.ticket } : {},
           signal: sleepStore.controller ? sleepStore.controller.signal : undefined,
         })
         if (!response.ok) return
@@ -1770,19 +1735,12 @@ if (moduleLoader) moduleLoader.load({
      * reason.
      *
      * @param {'arm'|'cancel'} action
-     * @param {object} [extraHeaders] the gesture headers of a real click
      * @returns {Promise<object>} the new sleep status
      */
-    async function requestSleep(action, extraHeaders) {
-      const headers = { 'content-type': 'application/json' }
-      if (extraHeaders && typeof extraHeaders === 'object') {
-        for (const [key, value] of Object.entries(extraHeaders)) {
-          if (typeof value === 'string' && value !== '') headers[key] = value
-        }
-      }
+    async function requestSleep(action) {
       const response = await fetch(DEFAULT_SLEEP_URL, {
         method: 'POST',
-        headers,
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action }),
       })
       let body = null
@@ -1797,116 +1755,10 @@ if (moduleLoader) moduleLoader.load({
           : ''
         const failure = new Error(message || String(response.status))
         failure.sleepStatus = response.status
-        if (body && typeof body === 'object' && typeof body.reason === 'string') {
-          failure.reason = body.reason
-        }
         throw failure
       }
       if (body && typeof body === 'object') setSleepInfo(body)
       return body
-    }
-
-    /**
-     * The last real gesture on the shutdown button.
-     *
-     * A trusted event (`isTrusted === true`) is something the page itself
-     * cannot fake, so it is the proof that a person really clicked. The host
-     * only accepts an arm request within {@link SLEEP_GESTURE_WINDOW_MS} of
-     * it.
-     *
-     * WHICH event carries that proof differs per device: a modern browser
-     * sends `pointerdown`, an older one only `mousedown`, a touch screen
-     * `touchstart`, and a keyboard activation (or a driver that sends
-     * nothing at all) only a `click`. So every one of them counts — but only
-     * when it is trusted.
-     */
-    const sleepGesture = { at: 0 }
-
-    /**
-     * Remember a trusted gesture.
-     *
-     * A synthetic event (a script that dispatches one, or an injected
-     * message) is never trusted, so it never records a gesture and never
-     * leads to a ticket.
-     *
-     * @param {object} event the DOM event of the gesture
-     */
-    function rememberSleepGesture(event) {
-      if (!event || event.isTrusted !== true) return
-      sleepGesture.at = Date.now()
-    }
-
-    /**
-     * The one-time ticket the host injected into this page.
-     *
-     * @returns {{ ticket: string, issuedAt: number }|null}
-     */
-    function sleepTicket() {
-      if (typeof window === 'undefined') return null
-      const grant = window.__DSH_SLEEP_TICKET__
-      if (!grant || typeof grant !== 'object') return null
-      if (typeof grant.ticket !== 'string' || grant.ticket === '') return null
-      return { ticket: grant.ticket, issuedAt: Number(grant.issuedAt) || 0 }
-    }
-
-    /**
-     * The headers of a click: the one-time ticket of this page plus the
-     * timestamp of the gesture.
-     *
-     * The ticket always travels with the request (on its own it is worth
-     * nothing: the host wants the gesture as well), the gesture only when it
-     * is fresh.
-     *
-     * @returns {object}
-     */
-    function gestureHeaders() {
-      const grant = sleepTicket()
-      if (!grant) return {}
-      const headers = { 'x-dsh-sleep-ticket': grant.ticket }
-      const at = sleepGesture.at
-      if (at && Date.now() - at <= SLEEP_GESTURE_WINDOW_MS) {
-        headers['x-dsh-sleep-gesture'] = String(at)
-      }
-      return headers
-    }
-
-    /**
-     * Reload the page ONCE per browser session — silently.
-     *
-     * A page that was opened BEFORE the plugin was updated has no gesture
-     * ticket (the ticket is injected into the HTML the host serves), so a
-     * real click cannot be proven. Reloading the page is the quiet way to
-     * get a fresh ticket: the user clicks, the page refreshes itself, and
-     * the next click works. There is deliberately no HTTP route that hands
-     * out a ticket — that would let any script arm the machine.
-     *
-     * The flag in sessionStorage survives the reload, so the page cannot
-     * reload itself for ever: the second attempt answers false and the
-     * button says what to do instead.
-     *
-     * @returns {boolean} true when a reload was started
-     */
-    function reloadPageOnce() {
-      if (typeof window === 'undefined' || !window.location) return false
-      let already = false
-      try {
-        already = Boolean(window.sessionStorage)
-          && window.sessionStorage.getItem(SLEEP_RELOAD_FLAG) === '1'
-      } catch {
-        already = false
-      }
-      if (already) return false
-      try {
-        if (window.sessionStorage) window.sessionStorage.setItem(SLEEP_RELOAD_FLAG, '1')
-      } catch {
-        // Without a sessionStorage the reload may happen twice — never more.
-      }
-      try {
-        window.location.reload()
-      } catch {
-        // A page that cannot reload still shows the hint.
-      }
-      return true
     }
 
     /**
@@ -2017,15 +1869,6 @@ if (moduleLoader) moduleLoader.load({
       '  max-width:100%;',
       '  padding:0 2px;',
       '  color:var(--dsw-alias-danger,#d14343);',
-      '  font-size:11.5px;',
-      '  line-height:15px;',
-      '  text-align:left;',
-      '}',
-      // The hint that says what to do when the page has no gesture ticket.
-      '.dsh-autorestart-sleep-button__hint{',
-      '  max-width:100%;',
-      '  padding:0 2px;',
-      '  color:var(--dsw-alias-label-secondary);',
       '  font-size:11.5px;',
       '  line-height:15px;',
       '  text-align:left;',
@@ -2320,9 +2163,6 @@ if (moduleLoader) moduleLoader.load({
       const status = useSleepStatus()
       const [arming, setArming] = useState(false)
       const [error, setError] = useState('')
-      // The page has no usable gesture ticket: a restart of DSH is the only
-      // way out, and the button says so.
-      const [ticketHint, setTicketHint] = useState(false)
       const t = translate ?? ((name) => name)
 
       // The Host's truth decides, and an UNKNOWN truth decides NOTHING: before
@@ -2363,49 +2203,18 @@ if (moduleLoader) moduleLoader.load({
        * Ask the Host to stand by: it waits for every session to finish and
        * then counts down.
        *
-       * The Host only accepts a REAL gesture: the one-time ticket the page
-       * got from the host plus the timestamp of a trusted pointerdown that
-       * happened a moment ago. Without them the host refuses the request
-       * (403) and nothing is armed — so the button does not even send a
-       * request it knows would be refused.
-       *
-       * A page that was opened BEFORE the plugin was updated has no ticket
-       * at all (the host injects it into the HTML it serves). Then there is
-       * nothing to send: the page reloads itself once, silently (the next
-       * click then works), and only if that did not help does the button
-       * say what to do.
+       * That is all a click does: the Host arms the shutdown, waits for the
+       * busy conversations and counts down. Clicking again (or the cancel
+       * button on the card) takes it back.
        */
       const arm = async () => {
         if (arming) return
         setArming(true)
         setError('')
         try {
-          if (!sleepTicket()) {
-            // No ticket at all: this page cannot arm the machine. Reload it
-            // once — quietly — so the next click works.
-            if (!reloadPageOnce()) setTicketHint(true)
-            return
-          }
-          const headers = gestureHeaders()
-          if (!headers['x-dsh-sleep-gesture']) {
-            // No trusted pointerdown (a scripted click, a keyboard
-            // activation): the host would refuse it anyway.
-            setError(t('sleep.gestureMissing'))
-            return
-          }
-          await requestSleep('arm', headers)
+          await requestSleep('arm')
         } catch (failure) {
-          // A refused gesture has its own sentence (the host explains why).
-          const message = describeError(failure)
-          setError(failure && failure.reason
-            ? fill(t('sleep.refused'), { message })
-            : fill(t('sleep.error'), { message }))
-          // A ticket that is too old, too fresh or already spent means the
-          // page has no usable ticket any more: a fresh page has one.
-          if (failure && typeof failure.reason === 'string'
-            && SLEEP_STALE_TICKET_REASONS.indexOf(failure.reason) !== -1) {
-            if (!reloadPageOnce()) setTicketHint(true)
-          }
+          setError(fill(t('sleep.error'), { message: describeError(failure) }))
         } finally {
           setArming(false)
         }
@@ -2426,13 +2235,12 @@ if (moduleLoader) moduleLoader.load({
       }
 
       /**
-       * The click itself is the last fallback of the gesture: a device that
-       * sends no pointer event at all still sends a trusted click.
+       * The click itself is the action: the moon button arms the shutdown,
+       * and while it is armed the same button cancels it again.
        *
        * @param {object} event the DOM event of the click
        */
       const handleClick = (event) => {
-        rememberSleepGesture(event)
         if (armed) cancel()
         else arm()
       }
@@ -2451,12 +2259,6 @@ if (moduleLoader) moduleLoader.load({
           title: error || (armed ? t('sleep.button.cancel') : countdownHint),
           disabled: arming,
           onClick: handleClick,
-          // The gesture: only a TRUSTED event counts, so the page cannot arm
-          // the machine on its own. Which event carries that proof differs
-          // per device, so every real input event is accepted.
-          onPointerDown: rememberSleepGesture,
-          onMouseDown: rememberSleepGesture,
-          onTouchStart: rememberSleepGesture,
           'data-dsh-autorestart-sleep-button': 'true',
           'data-armed': armed ? 'true' : 'false',
           'data-wide': wide ? 'true' : 'false',
@@ -2477,26 +2279,18 @@ if (moduleLoader) moduleLoader.load({
           : null,
       )
 
-      // A refused request (no gesture, an expired ticket, ...) is never
-      // silent: the reason is written under the button.
-      if (!wide || (error === '' && !ticketHint)) return button
+      // A refused request is never silent: the reason is written under the
+      // button.
+      if (!wide || error === '') return button
       return h(
         'div',
         { className: 'dsh-autorestart-sleep-button__wrap' },
         button,
-        // The hint replaces the raw reason: it is the one thing the user can
-        // act on (restart DSH — there is no ticket to fetch over HTTP).
-        ticketHint
-          ? h(
-            'span',
-            { className: 'dsh-autorestart-sleep-button__hint', role: 'alert' },
-            t('sleep.ticketHint'),
-          )
-          : h(
-            'span',
-            { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
-            error,
-          ),
+        h(
+          'span',
+          { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
+          error,
+        ),
       )
     }
 

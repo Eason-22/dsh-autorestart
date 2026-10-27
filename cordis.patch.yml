@@ -58,11 +58,6 @@
         # it). The plugin counts down itself, so the operating system is asked
         # to shut down immediately afterwards.
         sleepCountdownSeconds: 20
-        # 收工关机只接受真人点击：the button needs a real gesture (a one-time
-        # ticket the page got from this host, plus a fresh pointerdown). A
-        # plain HTTP request is refused with 403 and nothing is armed.
-        # Set this to false to let a script call the route directly.
-        sleepHumanOnly: true
         # A custom shutdown command. Empty = the host is detected automatically
         # (Windows / WSL / Linux / macOS); a value replaces the detected command.
         sleepCommand: ''

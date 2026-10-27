@@ -55,7 +55,7 @@ what it adds before you install it.
 | Kind | What it adds |
 | --- | --- |
 | Agent tools (6) | `continuum_restart`, `continuum_status`, `continuum_cancel_restart`, `continuum_park_goal`, `continuum_recover_now`, `continuum_handoff` |
-| HTTP routes (6) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`, `GET /sleep` and `POST /sleep` (the graceful shutdown — arming it needs a real human click). Loopback or an authenticated browser only |
+| HTTP routes (6) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`, `GET /sleep` and `POST /sleep` (the graceful shutdown — in the `human` mode only the page's button may drive it). Loopback or an authenticated browser only |
 | Client slots (4) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`); `sidebar.footer.action` — the moon button of the graceful shutdown (`autorestart-sleep-button`); `shell.overlay` — its countdown card |
 | System prompt | One "Restart policy" section that tells the agent how to ask for a restart and what the plugin will do |
 | Harness hooks | `agent/status` (tracks which conversations are busy), `tools/pre-execute` (blocks a shell command that would kill or relaunch DSH by hand), and the boot pass that resumes interrupted sessions |
@@ -148,6 +148,7 @@ show up in the Plugin Manager and in the config editor.
 | `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the relaunched host before it restores the snapshot and launches the host again. |
 | `showSleepButton` | `true` | Whether the moon button of the graceful shutdown is shown at the foot of the left sidebar, next to Settings. |
 | `sleepCountdownSeconds` | `20` | How many seconds the graceful shutdown counts down before the machine goes down — a dropdown: `0` / `10` / `20` / `30` / `60` seconds. `0` means "switch off right away" (still waiting for the conversations to be idle). |
+| `sleepController` | `human` | Who may drive the graceful shutdown — a dropdown: `human` (only the button in the page can arm it **and** cancel it) or `anyone` (a script may arm and cancel it too). |
 | `sleepCommand` | `''` | A custom shutdown command for the graceful shutdown. Empty = the host is detected automatically; a value replaces the detected command (`cmd.exe /c …` on Windows, `/bin/sh -c …` everywhere else). |
 
 The two waits are independent of each other, and both default to two seconds:
@@ -274,7 +275,8 @@ system is asked to shut down immediately (`/t 0`) instead of counting down a sec
 
 **Configuration.** `showSleepButton` (default `true`) decides whether the button is shown,
 `sleepCountdownSeconds` (a **dropdown**: `0` / `10` / `20` / `30` / `60` seconds, default `20`) how
-long the countdown runs, and `sleepCommand` (default `''`) replaces the detected command with one of
+long the countdown runs, `sleepController` (a **dropdown**: `human` / `anyone`, default `human`) who
+may drive the shutdown, and `sleepCommand` (default `''`) replaces the detected command with one of
 your own — empty means "detect the host automatically". `0` means **no countdown at all**: the machine
 is switched off as soon as every conversation is idle (a busy conversation still blocks it), and no
 countdown card appears. A profile that still carries a value the dropdown does not offer (`15`,
@@ -283,10 +285,47 @@ countdown card appears. A profile that still carries a value the dropdown does n
 **One click is all it takes.** The moon button arms the shutdown: the host waits for every busy
 conversation, counts down **20 seconds** in a floating card (it never covers the interface), and then
 switches the machine off. Clicking the button again — or the cancel button on the card — takes it
-back. Nothing else is asked of the user: no ticket, no confirmation dialog, no page reload.
+back. Nothing else is asked of the user: no confirmation dialog, no second click.
 
-The route is plain HTTP, so a script can do it as well:
-`POST /__dsh_autorestart/sleep {"action":"arm"}` arms it, `{"action":"cancel"}` takes it back.
+**Who may drive it: `human` (the default) or `anyone`.** The setting `sleepController` decides:
+
+| Mode | Who can arm the shutdown | Who can cancel a running countdown |
+| --- | --- | --- |
+| `human` (default, "only I may click") | **only the button in the page** | **only the button in the page** |
+| `anyone` ("AI and scripts may use it too") | anybody | anybody |
+
+In the `human` mode the host hands the page a **one-time ticket** with every page load (it is
+injected into the HTML the host serves), and the button sends it with its request. The ticket is
+good for **60 seconds** and for **one request** — arming *and* cancelling both need it. A shell
+script (or an agent) on the same machine cannot read the ticket out of the page, so it can neither
+switch the machine off **nor** take a running countdown back: such a request is answered with
+**403** and a machine-readable reason (`no-ticket`, `bad-ticket`, `expired-ticket`,
+`replayed-ticket`), and **nothing changes** — no countdown starts, no countdown stops.
+
+This raises the bar, it is **not an absolute boundary**: a local process that can read the page (or
+the host's memory) can still get hold of a ticket.
+
+**Still only ONE click.** A page that was opened before the plugin was updated holds no ticket, so
+the click could not be carried out. Then the button writes the intent (`pendingArm` / `pendingCancel`)
+into `sessionStorage`, reloads the page **once** — quietly — and the new page (which holds a fresh
+ticket) carries the intent out by itself. The user clicked once; the page refreshed once and the
+machine stood down. If the new page still has no ticket, the button shows a single line
+("refresh the page once and it works") and does nothing else — no reload loop.
+
+**How a script uses it.** In the `anyone` mode the route is plain HTTP and needs no ticket:
+
+```bash
+# arm it (the machine counts down and goes off)
+curl -s -X POST http://127.0.0.1:<port>/__dsh_autorestart/sleep \
+  -H 'content-type: application/json' -d '{"action":"arm"}'
+# take it back
+curl -s -X POST http://127.0.0.1:<port>/__dsh_autorestart/sleep \
+  -H 'content-type: application/json' -d '{"action":"cancel"}'
+```
+
+In the `human` mode the same request is refused with **403** — that is the whole point of the mode.
+Switch `sleepController` to `anyone` in the settings page if you want a script (or an agent) to
+drive it.
 
 **The one-time install question.** The first time the plugin is used, the composer dock asks once
 more whether the button should stay. The answer is written into the profile configuration
@@ -298,11 +337,13 @@ environment: the plugin then reports the command it *would* run and never runs i
 
 **The machine-readable state.** `GET <healthPath 前缀>/sleep` (default
 `/__dsh_autorestart/sleep`) answers with the phase, the countdown and the host that is about to be
-closed. Three of its fields are meant to be read by code rather than by a human: `host.kind` is the
+closed. A few of its fields are meant to be read by code rather than by a human: `host.kind` is the
 kind of machine (`windows`, `wsl`, `linux`, `macos`, `unsupported`, or `custom` when the platform
 could not be recognised but a `sleepCommand` was configured); `host.suspect` is `true` when the host
-was only recognised as WSL because the Windows drive is mounted — a hint, not a proof; and
-`lastRun.dryRun` marks the last run as a rehearsal that switched nothing off.
+was only recognised as WSL because the Windows drive is mounted — a hint, not a proof;
+`lastRun.dryRun` marks the last run as a rehearsal that switched nothing off; `controller` says
+which mode is active (`human` or `anyone`); and `ticketReady` says whether the calling page holds a
+usable ticket (the check does **not** spend it — a script that wants a ticket still gets none).
 
 **When the shutdown command does not start.** The host waits for the real answer of the process. If
 the command cannot start (missing binary, denied permission), the shutdown does **not** pretend it

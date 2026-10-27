@@ -74,6 +74,10 @@ import {
   scheduleDetachedRestart,
 } from './lib/restart.js'
 import {
+  createGestureTickets,
+  describeTicketReason,
+} from './lib/ticket.js'
+import {
   createSleepController,
   COUNTDOWN_CHOICES,
   DEFAULT_COUNTDOWN_SECONDS,
@@ -262,6 +266,11 @@ function buildConfigSchema() {
         .default(DEFAULT_COUNTDOWN_SECONDS)
         .loose()
         .description('收工关机的倒计时秒数（下拉框：0 / 10 / 20 / 30 / 60 秒，默认 20；0 表示不倒数、立即关机，但仍会先等所有会话收工）。'),
+      // Who may switch the machine off? A union of the offered choices
+      // projects into an enum (the settings page renders a select).
+      sleepController: schemastery.union(['human', 'anyone']).default('human')
+        .loose()
+        .description('谁能触发「收工关机」：human（默认，只有页面里的按钮可以——脚本和 AI 既不能关机也不能取消）；anyone（任何人都可以，脚本直接 POST 就能武装或取消）。'),
       sleepCommand: schemastery.string().default('')
         .description('自定义关机命令：留空表示按系统自动识别（Windows / WSL / Linux / macOS），填了就用这条命令代替自动识别。'),
     })
@@ -308,6 +317,9 @@ const DEFAULTS = {
   // shutdown command (empty = the host is detected automatically).
   showSleepButton: true,
   sleepCountdownSeconds: DEFAULT_COUNTDOWN_SECONDS,
+  // Who may switch the machine off: only the page ('human') or anybody
+  // ('anyone', so a script can drive it too).
+  sleepController: 'human',
   sleepCommand: '',
 }
 
@@ -337,6 +349,11 @@ function normalizeConfig(raw) {
   // profile that still carries an old value (15, 45, …) is snapped onto the
   // nearest one instead of breaking, and 0 means "no countdown at all".
   config.sleepCountdownSeconds = snapCountdownChoice(config.sleepCountdownSeconds)
+  // Who may drive the shutdown: only the page ('human') or anybody
+  // ('anyone'). An old or broken profile value falls back to the safe one.
+  if (config.sleepController !== 'human' && config.sleepController !== 'anyone') {
+    config.sleepController = 'human'
+  }
   if (typeof config.sleepCommand !== 'string') config.sleepCommand = ''
   if (typeof config.showSleepButton !== 'boolean') config.showSleepButton = true
   return config
@@ -1850,6 +1867,13 @@ export function createRuntime(ctx, config, options = {}) {
     log,
     persist,
     /**
+     * The one-time page tickets of this host start: the page gets one with
+     * every page load, and the host spends it when the button is used.
+     */
+    sleepTickets: typeof options.sleepTickets === 'object' && options.sleepTickets !== null
+      ? options.sleepTickets
+      : createGestureTickets(),
+    /**
      * Persist one or more user choices into the profile row of this plugin.
      *
      * @param {{ backupIncludePlugins?: boolean, showSleepButton?: boolean }} changes
@@ -2891,6 +2915,29 @@ function injectPageHeartbeat(html, bootId, routePath) {
 }
 
 /**
+ * Inject the one-time page ticket into the served index.
+ *
+ * The ticket is the proof that a request comes from a page this host
+ * served: a shell script on the same machine cannot read it out of the
+ * page, so it cannot drive the shutdown in the `human` mode.
+ *
+ * @param {string} html
+ * @param {{ ticket: string, issuedAt: number }} grant
+ * @returns {string}
+ */
+function injectSleepTicket(html, grant) {
+  if (typeof html !== 'string') return html
+  if (html.includes('data-dsh-autorestart-sleep-ticket')) return html
+  if (!grant || typeof grant.ticket !== 'string' || grant.ticket === '') return html
+  const script = [
+    '<script data-dsh-autorestart-sleep-ticket>',
+    `window.__DSH_SLEEP_TICKET__=${JSON.stringify({ ticket: grant.ticket, issuedAt: grant.issuedAt })};`,
+    '</script>',
+  ].join('')
+  return html.includes('</head>') ? html.replace('</head>', `${script}</head>`) : `${script}${html}`
+}
+
+/**
  * The system-prompt section that makes the restart policy discoverable to every agent:
  * call `continuum_restart` instead of killing the app by hand. This is a real Host hook,
  * so it applies without touching any AGENTS.md.
@@ -3608,9 +3655,11 @@ function createSleepService(ctx, runtime, config, options = {}) {
  *
  * @param {{ plan: object, controller: object, invocation: () => object }} sleep
  * @param {object} config
+ * @param {object} runtime
+ * @param {string} [ticket] the ticket the calling page holds (if any)
  * @returns {object}
  */
-function sleepStatusPayload(sleep, config) {
+function sleepStatusPayload(sleep, config, runtime, ticket) {
   const status = sleep.controller.status()
   const invocation = sleep.invocation()
   return {
@@ -3619,6 +3668,17 @@ function sleepStatusPayload(sleep, config) {
     armed: status.armed,
     showSleepButton: config.showSleepButton !== false,
     countdownSeconds: status.countdownSeconds,
+    /**
+     * Who may drive the shutdown: 'human' (only the page) or 'anyone'.
+     */
+    controller: config.sleepController === 'anyone' ? 'anyone' : 'human',
+    /**
+     * Whether the page that asked holds a usable ticket. The check does NOT
+     * spend it — it only answers "could this page drive the shutdown?".
+     */
+    ticketReady: runtime && runtime.sleepTickets
+      ? runtime.sleepTickets.check(ticket).ok === true
+      : false,
     remainingMs: status.remainingMs,
     blockers: status.blockers,
     host: {
@@ -3669,8 +3729,10 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
         res.end(JSON.stringify(payload))
       }
       const method = req && typeof req.method === 'string' ? req.method.toUpperCase() : 'GET'
+      const headers = req && req.headers && typeof req.headers === 'object' ? req.headers : {}
+      const pageTicket = typeof headers['x-dsh-sleep-ticket'] === 'string' ? headers['x-dsh-sleep-ticket'] : ''
       if (method === 'GET') {
-        answer(sleepStatusPayload(sleep, config))
+        answer(sleepStatusPayload(sleep, config, runtime, pageTicket))
         return
       }
       if (method !== 'POST') {
@@ -3683,17 +3745,36 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
       void readJsonBody(req).then((payload) => {
         const body = payload && typeof payload === 'object' ? payload : {}
         const action = typeof body.action === 'string' ? body.action.trim() : ''
-        if (action === 'arm') {
-          sleep.controller.arm()
-        } else if (action === 'cancel') {
-          sleep.controller.cancel()
-        } else {
+        if (action !== 'arm' && action !== 'cancel') {
           answer({
             ok: false,
             error: 'unknown-action',
             instruction: 'Send { "action": "arm" | "cancel" }.',
           }, 400)
           return
+        }
+        // In the 'human' mode only the page may drive the shutdown: BOTH
+        // arming and cancelling need the one-time ticket the host injected
+        // into that page. A shell script (or an agent) can therefore neither
+        // switch the machine off nor take a running countdown back.
+        if (config.sleepController !== 'anyone') {
+          const verdict = runtime.sleepTickets.consume(pageTicket)
+          if (verdict.ok !== true) {
+            const reason = typeof verdict.reason === 'string' ? verdict.reason : 'no-ticket'
+            answer({
+              ok: false,
+              error: 'page-ticket-required',
+              reason,
+              message: describeTicketReason(reason),
+              controller: 'human',
+            }, 403)
+            return
+          }
+        }
+        if (action === 'arm') {
+          sleep.controller.arm()
+        } else {
+          sleep.controller.cancel()
         }
         answer(sleepStatusPayload(sleep, config, runtime))
       }).catch((error) => {
@@ -3929,6 +4010,22 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
         runtime.log.warn('could not register the sleep route:', String(error))
       }
     }
+    if (typeof webServer.tapIndex === 'function') {
+      // The page ticket: every page load gets a fresh one, so only the page
+      // itself can drive the shutdown in the 'human' mode.
+      try {
+        target.effect(
+          () => webServer.tapIndex((html) => {
+            runtime.indexTaps = (runtime.indexTaps ?? 0) + 1
+            return injectSleepTicket(html, runtime.sleepTickets.issue())
+          }),
+          'dsh-autorestart: sleep page ticket',
+        )
+        runtime.sleepTicketTap = true
+      } catch (error) {
+        runtime.log.warn('could not inject the sleep page ticket:', String(error))
+      }
+    }
     if (config.autoReloadPage !== false && typeof webServer.tapIndex === 'function') {
       try {
         target.effect(
@@ -4078,7 +4175,12 @@ export function apply(ctx, rawConfig, options = {}) {
   // fallback file fills the gap, the built-in default applies otherwise.
   const sleepChoice = resolveShowSleepButton(rawConfig, stateDir)
   config.showSleepButton = sleepChoice.showSleepButton
-  const runtime = createRuntime(ctx, config, { backupChoiceSource: choice.source })
+  const runtime = createRuntime(ctx, config, {
+    backupChoiceSource: choice.source,
+    // The one-time page tickets of this host start. Production creates them
+    // here; a test may bring its own (with a clock it controls).
+    sleepTickets: options.sleepTickets,
+  })
   const log = runtime.log
   // The graceful sleep: the host plan and the state machine that waits for the
   // conversations, counts down and switches the machine off.

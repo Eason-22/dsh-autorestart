@@ -56,7 +56,7 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 | 类型 | 具体占用 |
 | --- | --- |
 | Agent 工具（6 个） | `continuum_restart`、`continuum_status`、`continuum_cancel_restart`、`continuum_park_goal`、`continuum_recover_now`、`continuum_handoff` |
-| HTTP 路由（6 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`、`GET /sleep`、`POST /sleep`（收工关机）；只接受本机回环或已认证的浏览器 |
+| HTTP 路由（6 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`、`GET /sleep`、`POST /sleep`（收工关机——`human` 模式下只有页面里的按钮能驱动它）；只接受本机回环或已认证的浏览器 |
 | 前端槽位（4 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`）、`sidebar.footer.action`（收工关机的月亮按钮，id `autorestart-sleep-button`）、`shell.overlay`（倒数浮动卡片） |
 | 系统提示词 | 一段「重启政策」说明，告诉 agent 怎么请求重启、插件会做什么 |
 | 宿主事件 | `agent/status`（跟踪哪些会话在忙）、`tools/pre-execute`（拦下"手动杀/重启 DSH"的 shell 命令）、启动时的恢复流程 |
@@ -157,6 +157,7 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 | `continuationText` | `''` | 覆盖默认续接提示文本 |
 | `showSleepButton` | `true` | 收工关机的月亮按钮是否显示在左侧栏最底部、设置按钮旁边 |
 | `sleepCountdownSeconds` | `20` | 收工关机在真正关机前倒数几秒——**下拉框：0 / 10 / 20 / 30 / 60 秒**，默认 20；`0` 表示**不倒数、立即关机**（仍会先等所有会话收工） |
+| `sleepController` | `human` | 谁能触发收工关机——**下拉框：`human`（只有页面里的按钮能武装**和**取消）/ `anyone`（脚本也能武装和取消）** |
 | `sleepCommand` | `''` | 收工关机的自定义关机命令；留空 = 自动识别宿主（Windows 用 `cmd.exe /c …`，其它平台用 `/bin/sh -c …`） |
 
 ## Agent 工具与"它怎么知道该用插件"
@@ -204,9 +205,33 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 **倒数多长由设置页决定。** `sleepCountdownSeconds` 是一个**下拉框**：0 / 10 / 20 / 30 / 60 秒，默认 20 秒。`0` = **不倒数、立即关机**：所有会话一收工、闸门一开就直接关机（忙着的会话照样挡住它），屏幕上**不会出现倒计时卡片**。配置里还留着下拉框之外的老数值（15、45…）时，会自动吸附到最近的一档（15→20、45→60），不会把插件弄坏。
 
-**点一下就够了。** 月亮按钮按下就武装：宿主等所有忙会话收工，在角落里倒数 **20 秒**（浮动卡片，不遮挡界面），然后关掉整台机器。**再点一下**（或点卡片上的「算了，别关」）就取消。除此之外什么都不用用户做：没有票据、没有确认框、不会刷新页面。
+**点一下就够了。** 月亮按钮按下就武装：宿主等所有忙会话收工，在角落里倒数 **20 秒**（浮动卡片，不遮挡界面），然后关掉整台机器。**再点一下**（或点卡片上的「算了，别关」）就取消。除此之外什么都不用用户做：没有确认框、不用点第二次。
 
-路由就是最普通的 HTTP，脚本也能用：`POST /__dsh_autorestart/sleep {"action":"arm"}` 武装，`{"action":"cancel"}` 取消。
+**谁能触发：`human`（默认）还是 `anyone`。** 设置项 `sleepController` 决定：
+
+| 模式 | 谁能武装关机 | 谁能取消正在进行的倒数 |
+| --- | --- | --- |
+| `human`（默认，「只有我能点」） | **只有页面里的那个按钮** | **只有页面里的那个按钮** |
+| `anyone`（「AI 和脚本也能用」） | 任何人 | 任何人 |
+
+`human` 模式下，宿主每发一次页面就附一张**一次性票据**（注入在自己发出去的 HTML 里），按钮把它和请求一起发回来。这张票据**60 秒有效、只能用一次**——武装和取消**都要用**它。同机的 shell 脚本（或者 agent）读不到页面里的票据，所以它**既关不了机，也取消不了正在进行的倒数**：这种请求会得到 **403** 和一个机器可读的原因（`no-ticket` / `bad-ticket` / `expired-ticket` / `replayed-ticket`），而且**状态完全不变**——不开始倒数，也不停止倒数。
+
+这是**提高门槛，不是绝对边界**：本机有文件权限、读得到页面（或宿主内存）的进程，理论上仍能拿到票据。
+
+**还是只点一次。** 插件更新之前就打开着的那个页面没有票据，这一次点击就执行不了。这时按钮把意图（`pendingArm` / `pendingCancel`）写进 `sessionStorage`，**静默重载页面一次**，新页面（手里有新鲜票据）**自己把那次点击补上**——用户只点了一次，页面自己刷新了一次，机器照常收工。如果新页面还是拿不到票据，按钮就显示**一句话**（「这个页面没有拿到票据，刷新一次页面就能用了。」）然后**不再动作**：不会变成刷新死循环。
+
+**脚本怎么用。** `anyone` 模式下路由就是最普通的 HTTP，不需要任何票据：
+
+```bash
+# 武装（倒数之后关机）
+curl -s -X POST http://127.0.0.1:<端口>/__dsh_autorestart/sleep \
+  -H 'content-type: application/json' -d '{"action":"arm"}'
+# 取消
+curl -s -X POST http://127.0.0.1:<端口>/__dsh_autorestart/sleep \
+  -H 'content-type: application/json' -d '{"action":"cancel"}'
+```
+
+`human` 模式下同样的请求会被 **403** 拒掉——这正是这个模式的意义。想让脚本（或者 agent）来驱动，就在设置页把 `sleepController` 换成 `anyone`。
 
 **关的是真宿主机。** 不是关子系统，是关**整台机器**：
 
@@ -220,19 +245,20 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 WSL 的判定依据：`WSL_DISTRO_NAME`、`WSL_INTEROP`、`/proc/version` 里出现 microsoft，或挂载的 Windows 程序存在。倒数是插件自己做的，所以操作系统被要求**立即**关机（`/t 0`），不会再倒数第二遍。
 
-**四个配置项。**
+**五个配置项。**
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `showSleepButton` | `true` | 左侧栏最底部（设置按钮旁边）的月亮按钮是否显示 |
 | `sleepCountdownSeconds` | `20` | 真正关机前倒数几秒——**下拉框：0 / 10 / 20 / 30 / 60 秒**，默认 20；`0` = 不倒数、立即关机（仍会先等会话收工） |
+| `sleepController` | `human` | 谁能触发收工关机——**下拉框：`human`（只有页面里的按钮能武装**和**取消）/ `anyone`（脚本也能武装和取消）** |
 | `sleepCommand` | `''` | 自定义关机命令；留空 = 自动识别宿主，填了就用这条命令代替（Windows 走 `cmd.exe /c …`，其它平台走 `/bin/sh -c …`） |
 
 **首次安装会问一次「按钮要不要留着」。** 答完写进 profile 配置的 `showSleepButton` 键（用官方 `configEditor` Service，和备份范围那次问询同一条路），所以设置页和问询看到的永远是同一个值。
 
 **想空跑、不真关机。** 给宿主进程的环境变量设 `DSH_AUTORESTART_SLEEP_DRYRUN=1`：插件只报告"本来会执行什么命令"，**一条都不执行**。
 
-**给代码看的状态字段。** `GET <healthPath 前缀>/sleep`（默认 `/__dsh_autorestart/sleep`）会回答阶段、倒数和"要关的是哪台机器"。其中三个字段是给**程序**看的、不是给人看的：`host.kind` 是机器类别（`windows` / `wsl` / `linux` / `macos` / `unsupported`；如果平台没认出来、但你配了 `sleepCommand`，则是 `custom`）；`host.suspect` 为 `true` 表示这台机器**只凭挂着 Windows 盘**才被认成 WSL（是佐证，不是铁证）；`lastRun.dryRun` 表示上一次是**试运行**，什么都没真关。
+**给代码看的状态字段。** `GET <healthPath 前缀>/sleep`（默认 `/__dsh_autorestart/sleep`）会回答阶段、倒数和"要关的是哪台机器"。其中几个字段是给**程序**看的、不是给人看的：`host.kind` 是机器类别（`windows` / `wsl` / `linux` / `macos` / `unsupported`；如果平台没认出来、但你配了 `sleepCommand`，则是 `custom`）；`host.suspect` 为 `true` 表示这台机器**只凭挂着 Windows 盘**才被认成 WSL（是佐证，不是铁证）；`lastRun.dryRun` 表示上一次是**试运行**，什么都没真关；`controller` 说明当前是哪个模式（`human` / `anyone`）；`ticketReady` 说明**调用方这个页面**手里有没有可用票据（这个检查**不消费**票据——脚本照样拿不到）。
 
 **关机命令起不来时的退路。** 宿主会等命令的**真实结果**（进程有没有真的起来）。命令起不来（找不到程序、权限不够）时，关机**不会假装成功**：状态回到 `idle`，并给出原因（"关机命令没跑起来（…），电脑还开着，可以再点一次月亮按钮。"），电脑保持开机。界面上那个「正在关机」的卡片也**不会把界面锁死**：最多停留 8 秒就会给出一个"关掉这个提示"的按钮。
 

@@ -26,6 +26,7 @@
       "busy": "Getting ready…"
     },
     "error": "Could not reach the sleep service: {message}",
+    "ticketHint": "This page has no ticket yet — refresh the page once and it works.",
     "dryRun": {
       "title": "Dry run: the machine stays on",
       "body": "The rehearsal is over. This is the command it WOULD have run (nothing was executed):",

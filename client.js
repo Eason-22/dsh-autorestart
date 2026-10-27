@@ -114,6 +114,37 @@ const SLEEP_DEFAULT_COUNTDOWN_SECONDS = 20
 /** How long the note of a finished rehearsal stays on screen (ms). */
 const SLEEP_DRY_RUN_NOTICE_MS = 8_000
 
+/**
+ * The sessionStorage keys of the single-click flow.
+ *
+ * `pendingArm` / `pendingCancel` carry the intent of a click that could not
+ * be carried out (the page had no ticket), `reloaded` remembers that the
+ * page already reloaded itself once — that is what keeps the flow from
+ * looping.
+ */
+const PENDING_ARM_KEY = 'dsh-autorestart-pending-arm'
+const PENDING_CANCEL_KEY = 'dsh-autorestart-pending-cancel'
+const RELOADED_KEY = 'dsh-autorestart-reloaded'
+
+/**
+ * The reasons that mean: the page needs a fresh ticket.
+ *
+ * The ticket lives in the page and is good for one request, so a spent or
+ * expired one is fixed by a fresh page — not by another attempt.
+ */
+const SLEEP_TICKET_REASONS = ['no-ticket', 'bad-ticket', 'expired-ticket', 'replayed-ticket']
+
+/**
+ * Whether a refusal means "this page has no usable ticket".
+ *
+ * @param {object} failure the error of the refused request
+ * @returns {boolean}
+ */
+function isTicketProblem(failure) {
+  if (!failure || typeof failure.reason !== 'string') return false
+  return SLEEP_TICKET_REASONS.indexOf(failure.reason) !== -1
+}
+
 const ZH = {
   label: '待重启',
   busyPrefix: ' · 被 ',
@@ -171,6 +202,7 @@ const ZH = {
   'sleep.button.titleImmediate': '等所有会话收工后立即关机（不倒数）',
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
+  'sleep.ticketHint': '这个页面没有拿到票据，刷新一次页面就能用了。',
   'sleep.dryRun.title': '试运行：不会真的关机',
   'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
   'sleep.dryRun.close': '知道了',
@@ -282,6 +314,7 @@ const EN = {
   'sleep.button.titleImmediate': 'Waits for every session to finish, then powers off right away (no countdown)',
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
+  'sleep.ticketHint': 'This page has no ticket yet — refresh the page once and it works.',
   'sleep.dryRun.title': 'Dry run: the machine stays on',
   'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
   'sleep.dryRun.close': 'Got it',
@@ -1661,9 +1694,146 @@ if (moduleLoader) moduleLoader.load({
       timer: null,
       inFlight: false,
       controller: null,
+      // The static hint under the button (the page has no ticket and the
+      // reload did not help).
+      hint: false,
       // When the current status was received: the countdown runs on this
       // clock, so the big number keeps moving between two polls.
       at: 0,
+    }
+
+    /**
+     * The one-time ticket the host injected into this page.
+     *
+     * In the `human` mode the host only accepts a request that carries it,
+     * so a shell script can neither switch the machine off nor cancel a
+     * running countdown.
+     *
+     * @returns {{ ticket: string, issuedAt: number }|null}
+     */
+    function sleepTicket() {
+      if (typeof window === 'undefined') return null
+      const grant = window.__DSH_SLEEP_TICKET__
+      if (!grant || typeof grant !== 'object') return null
+      if (typeof grant.ticket !== 'string' || grant.ticket === '') return null
+      return { ticket: grant.ticket, issuedAt: Number(grant.issuedAt) || 0 }
+    }
+
+    /**
+     * The intent the user left behind before the page reloaded itself.
+     *
+     * A page that was opened before the plugin was updated has no ticket, so
+     * the click could not arm the machine. The client writes the intent,
+     * reloads the page once and the new page carries it out — the user
+     * clicks ONCE.
+     *
+     * @returns {'arm'|'cancel'|null} the intent (and clears it)
+     */
+    function readPendingIntent() {
+      try {
+        if (typeof window === 'undefined' || !window.sessionStorage) return null
+        const arm = window.sessionStorage.getItem(PENDING_ARM_KEY) === '1'
+        const cancel = window.sessionStorage.getItem(PENDING_CANCEL_KEY) === '1'
+        if (!arm && !cancel) return null
+        window.sessionStorage.removeItem(PENDING_ARM_KEY)
+        window.sessionStorage.removeItem(PENDING_CANCEL_KEY)
+        return arm ? 'arm' : 'cancel'
+      } catch {
+        return null
+      }
+    }
+
+    /**
+     * Remember the intent and reload the page once.
+     *
+     * @param {'arm'|'cancel'} intent
+     * @returns {boolean} true when the page is reloading now
+     */
+    function deferIntent(intent) {
+      try {
+        if (typeof window === 'undefined' || !window.sessionStorage || !window.location) return false
+        // The page already reloaded itself once for this problem: do not
+        // reload again, that would be a loop.
+        if (window.sessionStorage.getItem(RELOADED_KEY) === '1') return false
+        window.sessionStorage.setItem(RELOADED_KEY, '1')
+        window.sessionStorage.setItem(
+          intent === 'cancel' ? PENDING_CANCEL_KEY : PENDING_ARM_KEY,
+          '1',
+        )
+        window.location.reload()
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    /** The reload marker is only about one reload: a carried-out intent clears it. */
+    function clearReloadMarker() {
+      try {
+        if (typeof window === 'undefined' || !window.sessionStorage) return
+        window.sessionStorage.removeItem(RELOADED_KEY)
+      } catch {
+        // Nothing to clear.
+      }
+    }
+
+    /**
+     * Carry out the intent the page was reloaded for.
+     *
+     * The new page holds a fresh ticket, so the arm (or the cancel) goes
+     * through. If the page still has no ticket the hint is shown instead —
+     * once, without any further action.
+     */
+    async function flushPendingIntent() {
+      const intent = readPendingIntent()
+      if (intent === null) return
+      const grant = sleepTicket()
+      if (!grant) {
+        sleepStore.hint = true
+        return
+      }
+      try {
+        await requestSleep(intent, { 'x-dsh-sleep-ticket': grant.ticket })
+        clearReloadMarker()
+      } catch (failure) {
+        sleepStore.hint = true
+      }
+    }
+
+    /**
+     * Carry out one intent ('arm' or 'cancel').
+     *
+     * In the `human` mode the host only accepts a request that carries the
+     * page's one-time ticket. Without it the click cannot do anything, so
+     * the client remembers the intent, reloads the page once and the new
+     * page (with a fresh ticket) carries it out — the user clicks ONCE.
+     *
+     * When the reload did not help either, the static hint appears and
+     * nothing else happens.
+     */
+    async function driveSleep(intent) {
+      const info = sleepStore.info
+      const controller = info && typeof info === 'object' && typeof info.controller === 'string'
+        ? info.controller
+        : 'human'
+      if (controller === 'anyone') {
+        // Anybody may drive it: no ticket, no reload.
+        return requestSleep(intent)
+      }
+      const grant = sleepTicket()
+      try {
+        if (grant) {
+          return await requestSleep(intent, { 'x-dsh-sleep-ticket': grant.ticket })
+        }
+      } catch (failure) {
+        // The ticket was spent (or it expired): the page needs a fresh one.
+        if (!isTicketProblem(failure)) throw failure
+      }
+      // The page has no (usable) ticket: remember the intent and reload once.
+      if (deferIntent(intent)) return null
+      // The reload did not help: say what to do, without acting again.
+      sleepStore.hint = true
+      return null
     }
 
     /** Publish a new sleep status to every surface. */
@@ -1683,8 +1853,12 @@ if (moduleLoader) moduleLoader.load({
       if (sleepStore.inFlight) return
       sleepStore.inFlight = true
       try {
+        // The ticket travels with the poll: it is NOT spent by the status
+        // request, it only makes `ticketReady` meaningful for this page.
+        const grant = sleepTicket()
         const response = await fetch(DEFAULT_SLEEP_URL, {
           cache: 'no-store',
+          headers: grant ? { 'x-dsh-sleep-ticket': grant.ticket } : {},
           signal: sleepStore.controller ? sleepStore.controller.signal : undefined,
         })
         if (!response.ok) return
@@ -1737,10 +1911,16 @@ if (moduleLoader) moduleLoader.load({
      * @param {'arm'|'cancel'} action
      * @returns {Promise<object>} the new sleep status
      */
-    async function requestSleep(action) {
+    async function requestSleep(action, extraHeaders) {
+      const headers = { 'content-type': 'application/json' }
+      if (extraHeaders && typeof extraHeaders === 'object') {
+        for (const [key, value] of Object.entries(extraHeaders)) {
+          if (typeof value === 'string' && value !== '') headers[key] = value
+        }
+      }
       const response = await fetch(DEFAULT_SLEEP_URL, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers,
         body: JSON.stringify({ action }),
       })
       let body = null
@@ -1755,6 +1935,9 @@ if (moduleLoader) moduleLoader.load({
           : ''
         const failure = new Error(message || String(response.status))
         failure.sleepStatus = response.status
+        if (body && typeof body === 'object' && typeof body.reason === 'string') {
+          failure.reason = body.reason
+        }
         throw failure
       }
       if (body && typeof body === 'object') setSleepInfo(body)
@@ -1869,6 +2052,15 @@ if (moduleLoader) moduleLoader.load({
       '  max-width:100%;',
       '  padding:0 2px;',
       '  color:var(--dsw-alias-danger,#d14343);',
+      '  font-size:11.5px;',
+      '  line-height:15px;',
+      '  text-align:left;',
+      '}',
+      // The hint that says what to do when the page holds no ticket.
+      '.dsh-autorestart-sleep-button__hint{',
+      '  max-width:100%;',
+      '  padding:0 2px;',
+      '  color:var(--dsw-alias-label-secondary);',
       '  font-size:11.5px;',
       '  line-height:15px;',
       '  text-align:left;',
@@ -2212,7 +2404,7 @@ if (moduleLoader) moduleLoader.load({
         setArming(true)
         setError('')
         try {
-          await requestSleep('arm')
+          await driveSleep('arm')
         } catch (failure) {
           setError(fill(t('sleep.error'), { message: describeError(failure) }))
         } finally {
@@ -2226,7 +2418,7 @@ if (moduleLoader) moduleLoader.load({
         setArming(true)
         setError('')
         try {
-          await requestSleep('cancel')
+          await driveSleep('cancel')
         } catch (failure) {
           setError(fill(t('sleep.error'), { message: describeError(failure) }))
         } finally {
@@ -2280,17 +2472,28 @@ if (moduleLoader) moduleLoader.load({
       )
 
       // A refused request is never silent: the reason is written under the
-      // button.
-      if (!wide || error === '') return button
+      // button. The same is true for the hint that says what to do when the
+      // page has no ticket and the reload did not help.
+      const hint = sleepStore.hint ? t('sleep.ticketHint') : ''
+      if (!wide || (error === '' && hint === '')) return button
       return h(
         'div',
         { className: 'dsh-autorestart-sleep-button__wrap' },
         button,
-        h(
-          'span',
-          { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
-          error,
-        ),
+        error === ''
+          ? null
+          : h(
+            'span',
+            { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
+            error,
+          ),
+        hint === ''
+          ? null
+          : h(
+            'span',
+            { className: 'dsh-autorestart-sleep-button__hint', role: 'alert' },
+            hint,
+          ),
       )
     }
 
@@ -2597,7 +2800,7 @@ if (moduleLoader) moduleLoader.load({
         setBusy(true)
         setError('')
         try {
-          const body = await requestSleep('cancel')
+          const body = await driveSleep('cancel')
           if (body && typeof body === 'object' && body.phase === 'cancelled') setHidden(true)
         } catch (failure) {
           // The countdown keeps running: the button can be pressed again.
@@ -2819,6 +3022,10 @@ if (moduleLoader) moduleLoader.load({
         // The countdown overlay: a frame-wide floating layer above every
         // column.
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-sleep-overlay', order: 60 }, SleepOverlay))
+        // The page was reloaded for a click that could not be carried out
+        // (the old page held no ticket): carry that intent out now, so the
+        // user only had to click ONCE.
+        void flushPendingIntent()
       },
       // The named exports of this module (the client module system hands
       // `factory(require) -> exports` to every importer).

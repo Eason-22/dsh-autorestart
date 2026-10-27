@@ -28,9 +28,11 @@
     "error": "Could not reach the sleep service: {message}",
     "refused": "This click was not accepted: {message}",
     "gestureMissing": "Click the button with the mouse (or a stylus): only a real click counts.",
-    "refresh": {
-      "hint": "The page needs a refresh (the plugin was just updated; this page has no gesture ticket yet).",
-      "button": "Refresh the page"
+    "ticketHint": "The plugin was just updated; restart DSH once and this button works again.",
+    "dryRun": {
+      "title": "Dry run: the machine stays on",
+      "body": "The rehearsal is over. This is the command it WOULD have run (nothing was executed):",
+      "close": "Got it"
     },
     "countdown": {
       "caption": {

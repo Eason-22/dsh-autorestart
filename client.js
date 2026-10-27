@@ -111,26 +111,22 @@ const SLEEP_COUNTDOWN_CHOICES = Object.freeze([0, 10, 20, 30, 60])
 /** The countdown length used when the Host did not report one. */
 const SLEEP_DEFAULT_COUNTDOWN_SECONDS = 20
 
+/** How long the note of a finished rehearsal stays on screen (ms). */
+const SLEEP_DRY_RUN_NOTICE_MS = 8_000
+
 /** How long a real pointer gesture stays valid (ms); the host uses the same window. */
 const SLEEP_GESTURE_WINDOW_MS = 3_000
 
 /**
- * The flag that remembers "this session already reloaded itself once".
+ * The reasons that mean: this page has no usable gesture ticket.
  *
- * A page that was opened before the plugin was updated has no gesture ticket
- * (the host injects it into the HTML it serves), and reloading the page is
- * the only way to get one. The flag keeps that from becoming a loop.
+ * The ticket lives in the page (the host injects it into the HTML it
+ * serves), so a page that was opened before the plugin was updated has
+ * none. There is deliberately NO route that hands out a ticket — that
+ * would let any script arm the machine again — so the only way out is a
+ * restart of DSH.
  */
-const SLEEP_RELOAD_FLAG = 'dsh-autorestart-sleep-ticket-reload'
-
-/**
- * The reasons a refresh of the page fixes.
- *
- * The ticket is single use and lives in the page: a page that is too old,
- * that sat open for too long, or that already spent its ticket gets a fresh
- * one by reloading.
- */
-const SLEEP_REFRESHABLE_REASONS = ['no-ticket', 'bad-ticket', 'expired-ticket', 'replayed-ticket']
+const SLEEP_STALE_TICKET_REASONS = ['no-ticket', 'bad-ticket', 'expired-ticket', 'replayed-ticket']
 
 const ZH = {
   label: '待重启',
@@ -191,8 +187,10 @@ const ZH = {
   'sleep.error': '没能联系上关机服务：{message}',
   'sleep.refused': '这次点击没有被接受：{message}',
   'sleep.gestureMissing': '请用鼠标（或触控笔）直接点一下这个按钮：只有真实的点击才算数。',
-  'sleep.refresh.hint': '页面需要刷新一次（插件刚更新过，这个页面还没拿到手势票据）。',
-  'sleep.refresh.button': '刷新页面',
+  'sleep.ticketHint': '插件刚更新过，重启一次 DSH 后可用这个按钮。',
+  'sleep.dryRun.title': '试运行：不会真的关机',
+  'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
+  'sleep.dryRun.close': '知道了',
   'sleep.countdown.caption.20': '鲸鱼娘开始收网了',
   'sleep.countdown.caption.19': '备份已经替你打包好',
   'sleep.countdown.caption.18': '没说完的话，再讲一句',
@@ -303,8 +301,10 @@ const EN = {
   'sleep.error': 'Could not reach the sleep service: {message}',
   'sleep.refused': 'This click was not accepted: {message}',
   'sleep.gestureMissing': 'Click the button with the mouse (or a stylus): only a real click counts.',
-  'sleep.refresh.hint': 'The page needs a refresh (the plugin was just updated; this page has no gesture ticket yet).',
-  'sleep.refresh.button': 'Refresh the page',
+  'sleep.ticketHint': 'The plugin was just updated; restart DSH once and this button works again.',
+  'sleep.dryRun.title': 'Dry run: the machine stays on',
+  'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
+  'sleep.dryRun.close': 'Got it',
   'sleep.countdown.caption.20': 'The whale is casting her net',
   'sleep.countdown.caption.19': 'Your backup is already packed',
   'sleep.countdown.caption.18': 'One unfinished thought, one more',
@@ -1703,8 +1703,13 @@ if (moduleLoader) moduleLoader.load({
       if (sleepStore.inFlight) return
       sleepStore.inFlight = true
       try {
+        // The ticket travels with the poll (it is NOT spent by the status
+        // request): the host answers `ticketReady`, so a page that cannot
+        // arm the machine is visible in the state.
+        const grant = sleepTicket()
         const response = await fetch(DEFAULT_SLEEP_URL, {
           cache: 'no-store',
+          headers: grant ? { 'x-dsh-sleep-ticket': grant.ticket } : {},
           signal: sleepStore.controller ? sleepStore.controller.signal : undefined,
         })
         if (!response.ok) return
@@ -1856,61 +1861,6 @@ if (moduleLoader) moduleLoader.load({
     }
 
     /**
-     * Reload the page ONCE per browser session.
-     *
-     * A page that was opened BEFORE the plugin was updated has no gesture
-     * ticket at all (the ticket is injected into the HTML the host serves),
-     * so a real click cannot be proven. Reloading the page is the only way to
-     * get a fresh ticket — there is deliberately no HTTP route that hands one
-     * out, because that would let any script arm the machine.
-     *
-     * The flag in sessionStorage survives the reload, so the page cannot
-     * reload itself for ever: the second attempt returns false and the
-     * button offers the refresh the user has to click.
-     *
-     * @returns {boolean} true when a reload was started, false when this
-     *   session already reloaded itself once
-     */
-    function reloadPageOnce() {
-      if (typeof window === 'undefined' || !window.location) return false
-      let already = false
-      try {
-        already = Boolean(window.sessionStorage)
-          && window.sessionStorage.getItem(SLEEP_RELOAD_FLAG) === '1'
-      } catch {
-        already = false
-      }
-      if (already) return false
-      try {
-        if (window.sessionStorage) window.sessionStorage.setItem(SLEEP_RELOAD_FLAG, '1')
-      } catch {
-        // Without a sessionStorage the reload may happen twice — never more.
-      }
-      try {
-        window.location.reload()
-      } catch {
-        // A page that cannot reload still shows the refresh button.
-      }
-      return true
-    }
-
-    /**
-     * Reload the page because the user asked for it.
-     *
-     * The Electron shell has no usable Ctrl+R / F5, so the refresh button
-     * under the moon button is the way out — it always reloads.
-     */
-    function reloadPageNow() {
-      if (typeof window === 'undefined' || !window.location) return false
-      try {
-        window.location.reload()
-      } catch {
-        // Nothing else to try.
-      }
-      return true
-    }
-
-    /**
      * The current sleep status, re-rendered whenever the shared poll lands. */
     function useSleepStatus() {
       const [status, setStatus] = useState(sleepStore.info)
@@ -2022,31 +1972,14 @@ if (moduleLoader) moduleLoader.load({
       '  line-height:15px;',
       '  text-align:left;',
       '}',
-      // The way out of a page without a gesture ticket: refresh it.
-      '.dsh-autorestart-sleep-button__refresh{',
-      '  display:flex;',
-      '  align-items:center;',
-      '  flex-wrap:wrap;',
-      '  gap:4px 6px;',
+      // The hint that says what to do when the page has no gesture ticket.
+      '.dsh-autorestart-sleep-button__hint{',
       '  max-width:100%;',
+      '  padding:0 2px;',
       '  color:var(--dsw-alias-label-secondary);',
       '  font-size:11.5px;',
       '  line-height:15px;',
       '  text-align:left;',
-      '}',
-      '.dsh-autorestart-sleep-button__refresh-button{',
-      '  padding:1px 8px;',
-      '  border:1px solid var(--dsw-alias-border-l1);',
-      '  border-radius:6px;',
-      '  background:transparent;',
-      '  color:var(--dsw-alias-label-primary);',
-      '  font:inherit;',
-      '  font-size:11.5px;',
-      '  line-height:16px;',
-      '  cursor:pointer;',
-      '}',
-      '.dsh-autorestart-sleep-button__refresh-button:hover{',
-      '  background:var(--dsw-alias-interactive-bg-hover);',
       '}',
       '.dsh-autorestart-sleep-button__spinner{',
       '  width:12px;',
@@ -2176,6 +2109,20 @@ if (moduleLoader) moduleLoader.load({
       '.dsh-autorestart-sleep-waiting__list{margin:0 0 6px;padding-left:2px;list-style:none;}',
       '.dsh-autorestart-sleep-waiting__list li{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
       '.dsh-autorestart-sleep-waiting__none{margin:0 0 6px;opacity:.8;}',
+      // The command a rehearsal WOULD have run: it has to stay readable,
+      // whatever the shell command looks like.
+      '.dsh-autorestart-sleep-dryrun__command{',
+      '  display:block;',
+      '  margin:0 0 8px;',
+      '  padding:6px 8px;',
+      '  border-radius:8px;',
+      '  background:var(--dsw-alias-bg-layer-2,color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent));',
+      '  color:var(--dsw-alias-label-primary);',
+      '  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;',
+      '  font-size:11.5px;',
+      '  line-height:17px;',
+      '  word-break:break-all;',
+      '}',
       '.dsh-autorestart-sleep-waiting__count{margin:0 0 8px;opacity:.8;}',
       '.dsh-autorestart-sleep-waiting__cancel{',
       '  min-height:28px;',
@@ -2324,9 +2271,9 @@ if (moduleLoader) moduleLoader.load({
       const status = useSleepStatus()
       const [arming, setArming] = useState(false)
       const [error, setError] = useState('')
-      // The page needs a refresh before the button can work again (it was
-      // opened before the plugin was updated, or it spent its ticket).
-      const [refreshNeeded, setRefreshNeeded] = useState(false)
+      // The page has no usable gesture ticket: a restart of DSH is the only
+      // way out, and the button says so.
+      const [ticketHint, setTicketHint] = useState(false)
       const t = translate ?? ((name) => name)
 
       // The Host's truth decides, and an UNKNOWN truth decides NOTHING: before
@@ -2368,16 +2315,15 @@ if (moduleLoader) moduleLoader.load({
        * then counts down.
        *
        * The Host only accepts a REAL gesture: the one-time ticket the page
-       * got from the host plus the timestamp of a trusted `pointerdown` that
+       * got from the host plus the timestamp of a trusted pointerdown that
        * happened a moment ago. Without them the host refuses the request
        * (403) and nothing is armed — so the button does not even send a
        * request it knows would be refused.
        *
        * A page that was opened BEFORE the plugin was updated has no ticket
        * at all (the host injects it into the HTML it serves). Then there is
-       * nothing to send: the page reloads itself once (that is the only way
-       * to get a ticket — there is no HTTP route that hands one out) and the
-       * button offers a refresh the user can click.
+       * nothing to send, and there is deliberately no route that hands out a
+       * ticket — so the button only says what to do: restart DSH.
        */
       const arm = async () => {
         if (arming) return
@@ -2385,9 +2331,8 @@ if (moduleLoader) moduleLoader.load({
         setError('')
         try {
           if (!sleepTicket()) {
-            // The page is too old for a gesture ticket: reload it once.
-            setRefreshNeeded(true)
-            reloadPageOnce()
+            // No ticket at all: this page cannot arm the machine.
+            setTicketHint(true)
             return
           }
           const headers = gestureHeaders()
@@ -2404,12 +2349,11 @@ if (moduleLoader) moduleLoader.load({
           setError(failure && failure.reason
             ? fill(t('sleep.refused'), { message })
             : fill(t('sleep.error'), { message }))
-          // A ticket that is too old, too fresh or already spent is fixed by
-          // a fresh page: offer it and reload once.
+          // A ticket that is too old, too fresh or already spent means the
+          // page has no usable ticket any more: only a restart helps.
           if (failure && typeof failure.reason === 'string'
-            && SLEEP_REFRESHABLE_REASONS.indexOf(failure.reason) !== -1) {
-            setRefreshNeeded(true)
-            reloadPageOnce()
+            && SLEEP_STALE_TICKET_REASONS.indexOf(failure.reason) !== -1) {
+            setTicketHint(true)
           }
         } finally {
           setArming(false)
@@ -2484,35 +2428,24 @@ if (moduleLoader) moduleLoader.load({
 
       // A refused request (no gesture, an expired ticket, ...) is never
       // silent: the reason is written under the button.
-      if (!wide || (error === '' && !refreshNeeded)) return button
+      if (!wide || (error === '' && !ticketHint)) return button
       return h(
         'div',
         { className: 'dsh-autorestart-sleep-button__wrap' },
         button,
-        error === ''
-          ? null
+        // The hint replaces the raw reason: it is the one thing the user can
+        // act on (restart DSH — there is no ticket to fetch over HTTP).
+        ticketHint
+          ? h(
+            'span',
+            { className: 'dsh-autorestart-sleep-button__hint', role: 'alert' },
+            t('sleep.ticketHint'),
+          )
           : h(
             'span',
             { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
             error,
           ),
-        // The way out: a fresh page carries a fresh ticket.
-        refreshNeeded
-          ? h(
-            'span',
-            { className: 'dsh-autorestart-sleep-button__refresh' },
-            h('span', null, t('sleep.refresh.hint')),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-autorestart-sleep-button__refresh-button',
-                onClick: () => { reloadPageNow() },
-              },
-              t('sleep.refresh.button'),
-            ),
-          )
-          : null,
       )
     }
 
@@ -2718,10 +2651,27 @@ if (moduleLoader) moduleLoader.load({
       // notice, and a screen that stays for too long offers the same exit.
       const [dismissed, setDismissed] = useState(false)
       const [stuck, setStuck] = useState(false)
+      // The note of a finished rehearsal: what the host WOULD have run. It
+      // folds away on its own (or when the user closes it).
+      const [dryNotice, setDryNotice] = useState(null)
       const t = translate ?? ((name) => name)
 
       const phase = status && typeof status === 'object' && typeof status.phase === 'string'
         ? status.phase
+        : ''
+
+      // The last run the host reports. A REHEARSAL (dry run) says what it
+      // would have done and executed nothing; a real failure says what went
+      // wrong. The two never look alike, so the notice can never mistake one
+      // for the other.
+      const lastRun = status && typeof status === 'object' && status.lastRun && typeof status.lastRun === 'object'
+        ? status.lastRun
+        : null
+      const dryRunAt = lastRun !== null && lastRun.dryRun === true && typeof lastRun.at === 'string'
+        ? lastRun.at
+        : ''
+      const planned = lastRun !== null && typeof lastRun.command === 'string' && lastRun.command !== ''
+        ? [lastRun.command].concat(Array.isArray(lastRun.args) ? lastRun.args : []).join(' ')
         : ''
 
       // The shared poll runs every 2s, but the big number has to move every
@@ -2739,6 +2689,17 @@ if (moduleLoader) moduleLoader.load({
       useEffect(() => {
         if (phase === 'countdown') setHidden(false)
       }, [phase])
+
+      // A finished rehearsal leaves a note: the command it WOULD have run.
+      // Without it the user would see nothing at all and could not tell a
+      // rehearsal from a real shutdown. The note folds away after eight
+      // seconds (or when the user closes it); a new rehearsal shows it again.
+      useEffect(() => {
+        if (dryRunAt === '') return undefined
+        setDryNotice({ at: dryRunAt, command: planned })
+        const timer = setTimeout(() => setDryNotice(null), SLEEP_DRY_RUN_NOTICE_MS)
+        return () => clearTimeout(timer)
+      }, [dryRunAt])
 
       /**
        * The time safety net of the "good night" screen.
@@ -2915,13 +2876,7 @@ if (moduleLoader) moduleLoader.load({
         if (dismissed) return null
         // A dry run never powers the machine off, so the screen must say so
         // and offer the way out right away.
-        const lastRun = status && typeof status === 'object' && status.lastRun && typeof status.lastRun === 'object'
-          ? status.lastRun
-          : null
-        const dryRun = (status && status.dryRun === true) || (lastRun !== null && lastRun.dryRun === true)
-        const planned = lastRun !== null && typeof lastRun.command === 'string' && lastRun.command !== ''
-          ? [lastRun.command].concat(Array.isArray(lastRun.args) ? lastRun.args : []).join(' ')
-          : ''
+        const dryRun = (status && status.dryRun === true) || dryRunAt !== ''
         const closeButton = (dryRun || stuck)
           ? h(
             'button',
@@ -2956,6 +2911,42 @@ if (moduleLoader) moduleLoader.load({
           ),
           h('p', { className: 'dsh-autorestart-sleep-overlay__hint' }, t('sleep.shuttingDown.body')),
           closeButton,
+        )
+      }
+
+      // The machine is idle again. A finished rehearsal leaves its note:
+      // the command it WOULD have run. A real failure has no dryRun marker
+      // and therefore never ends up here (the host says so in `message`).
+      if (dryNotice !== null) {
+        ensureSleepStyle()
+        return h(
+          'div',
+          {
+            className: 'dsh-autorestart-sleep-waiting dsh-autorestart-sleep-dryrun',
+            role: 'status',
+            'aria-live': 'polite',
+            'data-dsh-autorestart-sleep-dryrun': 'true',
+            // The note is a FLOATING card: it never covers the interface and
+            // it never eats a click — only its close button does.
+            style: { pointerEvents: 'none' },
+          },
+          h('p', { className: 'dsh-autorestart-sleep-waiting__title' }, t('sleep.dryRun.title')),
+          h('p', { className: 'dsh-autorestart-sleep-waiting__body' }, t('sleep.dryRun.body')),
+          h(
+            'code',
+            { className: 'dsh-autorestart-sleep-dryrun__command' },
+            dryNotice.command,
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-autorestart-sleep-waiting__cancel',
+              onClick: () => setDryNotice(null),
+              style: { pointerEvents: 'auto' },
+            },
+            t('sleep.dryRun.close'),
+          ),
         )
       }
 

@@ -733,13 +733,14 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(res.statusCode, 200)
   const payload = JSON.parse(res.body)
   assert.deepEqual(Object.keys(payload).sort(), [
-    'armed', 'blockers', 'countdownSeconds', 'dryRun', 'host', 'humanOnly', 'lastRun', 'message', 'ok', 'phase', 'remainingMs', 'showSleepButton',
+    'armed', 'blockers', 'countdownSeconds', 'dryRun', 'host', 'humanOnly', 'lastRun', 'message', 'ok', 'phase', 'remainingMs', 'showSleepButton', 'ticketReady',
   ])
   assert.equal(payload.ok, true)
   assert.equal(payload.phase, 'idle')
   assert.equal(payload.armed, false)
   assert.equal(payload.showSleepButton, true)
   assert.equal(payload.humanOnly, true, 'the state must say that a human click is needed')
+  assert.equal(payload.ticketReady, false, 'a page without a ticket must be visible in the state')
   assert.equal(payload.countdownSeconds, 20)
   assert.equal(payload.remainingMs, 0)
   assert.deepEqual(payload.blockers, [])
@@ -921,6 +922,31 @@ test('a cross-site request is refused', async () => {
   assert.equal(res.statusCode, 403)
   assert.equal(JSON.parse(res.body).reason, 'cross-site')
   assert.equal(currentStatus(host.routes).armed, false)
+})
+
+test('the state says whether the calling page has a usable ticket', async () => {
+  const host = createGestureHost('ticket-ready')
+  const grant = ticketFromPage(host.taps)
+  const route = sleepRoute(host.routes)
+
+  const withTicket = fakeResponse()
+  route.handler(fakeRequest('GET', undefined, { 'x-dsh-sleep-ticket': grant.ticket }), withTicket)
+  await settle()
+  const payload = JSON.parse(withTicket.body)
+  assert.equal(payload.humanOnly, true, 'the state keeps saying that a human click is needed')
+  assert.equal(payload.ticketReady, true, 'a page with a fresh ticket must be visible in the state')
+
+  // A page without a ticket (it was opened before the plugin was updated).
+  const withoutTicket = fakeResponse()
+  route.handler(fakeRequest('GET'), withoutTicket)
+  await settle()
+  assert.equal(JSON.parse(withoutTicket.body).ticketReady, false)
+
+  // The status request must not spend the ticket.
+  const again = fakeResponse()
+  route.handler(fakeRequest('GET', undefined, { 'x-dsh-sleep-ticket': grant.ticket }), again)
+  await settle()
+  assert.equal(JSON.parse(again.body).ticketReady, true, 'the status request must not spend the ticket')
 })
 
 test('a real click arms the machine, and the ticket is consumed', async () => {
@@ -1319,6 +1345,7 @@ function mountClient({
   ticket = null,
   refuseArm = null,
   sessionStorage = createStorage(),
+  fakeTimers = false,
 } = {}) {
   const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   let definition = null
@@ -1327,6 +1354,19 @@ function mountClient({
   const state = { status }
   // How often the page reloaded itself (the self-heal of a stale page).
   const reloads = { count: 0 }
+  // The timers the client scheduled (only with `fakeTimers`): a test fires
+  // them by hand instead of waiting for the real clock.
+  const timers = []
+  let timerId = 0
+  const fakeSetTimeout = (fn, ms) => {
+    timerId += 1
+    timers.push({ id: timerId, fn, ms })
+    return timerId
+  }
+  const fakeClearTimeout = (id) => {
+    const index = timers.findIndex((entry) => entry.id === id)
+    if (index !== -1) timers.splice(index, 1)
+  }
   const sandbox = {
     window: {
       __ModuleLoader__: { load: (value) => { definition = value } },
@@ -1364,8 +1404,8 @@ function mountClient({
       return Promise.resolve({ ok: true, status: 200, json: async () => body })
     },
     console,
-    setTimeout,
-    clearTimeout,
+    setTimeout: fakeTimers ? fakeSetTimeout : setTimeout,
+    clearTimeout: fakeTimers ? fakeClearTimeout : clearTimeout,
     // The shared poll: the callback is kept, so a test can deliver a new
     // status without waiting for the real 2s tick.
     setInterval: (fn) => { polls.push(fn); return polls.length },
@@ -1403,6 +1443,14 @@ function mountClient({
     dictionaries,
     slots,
     reloads,
+    timers,
+    // Fire every timer the client scheduled with this delay.
+    fireTimers: (ms) => {
+      const due = timers.filter((entry) => entry.ms === ms)
+      timers.length = 0
+      for (const entry of due) entry.fn()
+      return due.length
+    },
     setStatus: (next) => { state.status = next },
     // Deliver the new status the way the shared poll would.
     poll: async () => {
@@ -1704,9 +1752,9 @@ test('a real click alone arms the machine', async () => {
 test('a page without a gesture ticket does not arm: it reloads itself and offers a refresh', async () => {
   // The page was opened before the plugin was updated: it has no ticket at
   // all. There is no HTTP route that hands one out, so the only way out is a
-  // fresh page.
+  // fresh page (in a browser).
   const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], platform: 'web' },
     ticket: null,
   })
   await mounted.poll()
@@ -1719,60 +1767,19 @@ test('a page without a gesture ticket does not arm: it reloads itself and offers
     .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
     .filter((call) => JSON.parse(call.init.body).action === 'arm')
   assert.equal(armed.length, 0, 'without a ticket nothing may be armed')
-  assert.equal(mounted.reloads.count, 1, 'the page reloads itself once')
+  assert.equal(mounted.reloads.count, 0, 'the page must not reload itself')
 
-  // The button offers the way out: a refresh the user can click. A reload
-  // the user asked for always happens.
+  // The button only says what to do — there is nothing to click and the
+  // page does nothing on its own.
   const after = mounted.render('sidebar.footer.action')
   const shown = textOf(after)
-  assert.ok(shown.includes('刷新'), `the refresh entry must be visible, got: ${shown}`)
-  const refresh = walk(after).find((node) => node.type === 'button' && textOf(node).includes('刷新'))
-  assert.ok(refresh, 'there must be a clickable refresh button')
-  refresh.props.onClick()
-  await settleClient()
-  assert.equal(mounted.reloads.count, 2, 'the refresh the user asked for happens')
+  assert.ok(shown.includes('重启一次 DSH'), `the hint must be visible, got: ${shown}`)
+  const buttons = walk(after).filter((node) => node.type === 'button')
+  assert.equal(buttons.length, 1, 'the moon button must be the only button')
+  assert.equal(buttons[0].props['data-dsh-autorestart-sleep-button'], 'true')
 })
 
-test('the page never reloads itself for ever', async () => {
-  // The flag in sessionStorage survives the reload: the second attempt only
-  // shows the refresh button.
-  const sessionStorage = createStorage()
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
-    ticket: null,
-    sessionStorage,
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-
-  button.props.onPointerDown({ isTrusted: true })
-  button.props.onClick()
-  await settleClient()
-  assert.equal(mounted.reloads.count, 1, 'the first click reloads the page')
-  assert.equal(sessionStorage.getItem('dsh-autorestart-sleep-ticket-reload'), '1')
-
-  // The reloaded page has no ticket either (the test keeps the same page).
-  const again = mounted.render('sidebar.footer.action')
-  const againButton = walk(again).find(
-    (node) => node.props && node.props['data-dsh-autorestart-sleep-button'] === 'true',
-  )
-  assert.ok(againButton, 'the button must still be there')
-  againButton.props.onPointerDown({ isTrusted: true })
-  againButton.props.onClick()
-  await settleClient()
-  assert.equal(mounted.reloads.count, 1, 'the second click must not reload again')
-
-  // The button still offers the refresh the user can click.
-  const after = mounted.render('sidebar.footer.action')
-  assert.ok(textOf(after).includes('刷新'), 'the refresh entry stays visible')
-  const refresh = walk(after).find((node) => node.type === 'button' && textOf(node).includes('刷新'))
-  assert.ok(refresh, 'the refresh button stays clickable')
-  refresh.props.onClick()
-  await settleClient()
-  assert.equal(mounted.reloads.count, 2, 'a refresh the user asked for always happens')
-})
-
-test('a spent ticket is fixed by a fresh page', async () => {
+test('a spent ticket says the same thing', async () => {
   const mounted = mountClient({
     status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
     ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
@@ -1784,9 +1791,11 @@ test('a spent ticket is fixed by a fresh page', async () => {
   button.props.onClick()
   await settleClient()
 
-  assert.equal(mounted.reloads.count, 1, 'a spent ticket reloads the page once')
+  assert.equal(mounted.reloads.count, 0, 'the page must not reload itself')
   const after = mounted.render('sidebar.footer.action')
-  assert.ok(textOf(after).includes('刷新'), 'the refresh entry must be visible')
+  assert.ok(textOf(after).includes('重启一次 DSH'), 'the hint must be visible')
+  const buttons = walk(after).filter((node) => node.type === 'button')
+  assert.equal(buttons.length, 1, 'there must be no action button')
 })
 
 test('a refused request is shown, never silent', async () => {
@@ -1808,4 +1817,71 @@ test('a refused request is shown, never silent', async () => {
     `the refusal must be visible, got: ${shown} / ${after.props.title}`,
   )
   assert.equal(mounted.reloads.count, 0, 'a stale gesture is not fixed by a reload')
+})
+
+/* ------------------------------------------------------------------ *
+ * The rehearsal (dry run): the user must see what WOULD have run.
+ * ------------------------------------------------------------------ */
+
+/** A status that reports a finished rehearsal. */
+function rehearsalStatus(extra = {}) {
+  return {
+    ok: true,
+    phase: 'idle',
+    showSleepButton: true,
+    blockers: [],
+    lastRun: {
+      at: '2026-01-01T00:00:00.000Z',
+      command: 'shutdown.exe',
+      args: ['/s', '/f', '/t', '0'],
+      executed: false,
+      dryRun: true,
+      error: null,
+      ...extra,
+    },
+  }
+}
+
+test('a finished rehearsal says what it WOULD have run', async () => {
+  const mounted = mountClient({ status: rehearsalStatus(), fakeTimers: true })
+  await mounted.poll()
+  await mounted.settled('shell.overlay')
+  const notice = mounted.render('shell.overlay')
+  assert.ok(notice, 'the rehearsal must leave a note')
+  const shown = textOf(notice)
+  assert.ok(shown.includes('试运行'), `the note must say what it is, got: ${shown}`)
+  assert.ok(shown.includes('shutdown.exe'), 'the command must be shown')
+  assert.ok(shown.includes('/s'), 'the arguments must be shown')
+  assert.equal(notice.props.style.pointerEvents, 'none', 'the note must never eat a click')
+})
+
+test('the note of a rehearsal can be closed', async () => {
+  const mounted = mountClient({ status: rehearsalStatus(), fakeTimers: true })
+  await mounted.poll()
+  await mounted.settled('shell.overlay')
+  const notice = mounted.render('shell.overlay')
+  const close = walk(notice).find((node) => node.type === 'button' && textOf(node).includes('知道了'))
+  assert.ok(close, 'the note must offer a close button')
+  close.props.onClick()
+  await settleClient()
+  assert.equal(mounted.render('shell.overlay'), null, 'the note must be gone')
+})
+
+test('the note of a rehearsal goes away after eight seconds', async () => {
+  const mounted = mountClient({ status: rehearsalStatus(), fakeTimers: true })
+  await mounted.poll()
+  await mounted.settled('shell.overlay')
+  assert.ok(mounted.render('shell.overlay'), 'the note must be on screen')
+  assert.equal(mounted.fireTimers(8000), 1, 'the note must disappear after eight seconds')
+  assert.equal(mounted.render('shell.overlay'), null, 'the note must be gone')
+})
+
+test('a real failure is never reported as a rehearsal', async () => {
+  const mounted = mountClient({
+    status: rehearsalStatus({ dryRun: undefined, executed: false, error: 'spawn-failed' }),
+    fakeTimers: true,
+  })
+  await mounted.poll()
+  await mounted.settled('shell.overlay')
+  assert.equal(mounted.render('shell.overlay'), null, 'a failure must not leave a note')
 })

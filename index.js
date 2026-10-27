@@ -3644,13 +3644,34 @@ function createSleepService(ctx, runtime, config, options = {}) {
 }
 
 /**
+ * Whether a ticket is still usable — WITHOUT consuming it.
+ *
+ * The store only offers `verify` (which spends a good ticket), so the check
+ * runs with a gesture that can never be fresh: everything before the
+ * gesture (signature, registration, single use, expiry) is still checked,
+ * and a good ticket answers 'stale-gesture'.
+ *
+ * @param {{ verify: (input: object) => { ok: boolean, reason?: string } }} store
+ * @param {string} ticket
+ * @returns {boolean}
+ */
+function ticketIsUsable(store, ticket) {
+  if (!store || typeof store.verify !== 'function') return false
+  if (typeof ticket !== 'string' || ticket === '') return false
+  const verdict = store.verify({ ticket, gesture: 0, headers: {}, host: '' })
+  return verdict.ok === true || verdict.reason === 'stale-gesture'
+}
+
+/**
  * The state of the graceful sleep, in the shape the client renders it.
  *
  * @param {{ plan: object, controller: object, invocation: () => object }} sleep
  * @param {object} config
+ * @param {object} runtime
+ * @param {string} [ticket] the ticket the calling page holds (if any)
  * @returns {object}
  */
-function sleepStatusPayload(sleep, config) {
+function sleepStatusPayload(sleep, config, runtime, ticket) {
   const status = sleep.controller.status()
   const invocation = sleep.invocation()
   return {
@@ -3665,6 +3686,15 @@ function sleepStatusPayload(sleep, config) {
      * automated script).
      */
     humanOnly: config.sleepHumanOnly !== false,
+    /**
+     * Whether the page that asked has a usable gesture ticket.
+     *
+     * The ticket lives in the page (the host injects it into the HTML it
+     * serves), so a page that was opened before the plugin was updated has
+     * none — and then the button can only say "restart DSH". This flag makes
+     * that state machine-readable for troubleshooting (and for agents).
+     */
+    ticketReady: ticketIsUsable(runtime && runtime.sleepTickets, ticket),
     remainingMs: status.remainingMs,
     blockers: status.blockers,
     host: {
@@ -3715,8 +3745,12 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
         res.end(JSON.stringify(payload))
       }
       const method = req && typeof req.method === 'string' ? req.method.toUpperCase() : 'GET'
+      // The ticket the calling page holds: it is NOT spent here, it only says
+      // whether this page could arm the machine at all.
+      const headers = req && req.headers && typeof req.headers === 'object' ? req.headers : {}
+      const pageTicket = typeof headers['x-dsh-sleep-ticket'] === 'string' ? headers['x-dsh-sleep-ticket'] : ''
       if (method === 'GET') {
-        answer(sleepStatusPayload(sleep, config))
+        answer(sleepStatusPayload(sleep, config, runtime, pageTicket))
         return
       }
       if (method !== 'POST') {
@@ -3735,14 +3769,11 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
           // the same machine cannot get that ticket, so it is refused here —
           // BEFORE anything is armed, counted down or switched off.
           if (config.sleepHumanOnly !== false) {
-            const headers = req && req.headers && typeof req.headers === 'object' ? req.headers : {}
             const verdict = runtime.sleepTickets.verify({
               ticket: headers['x-dsh-sleep-ticket'],
               gesture: headers['x-dsh-sleep-gesture'],
               headers,
-              host: req && typeof req.headers === 'object' && typeof req.headers.host === 'string'
-                ? req.headers.host
-                : '',
+              host: typeof headers.host === 'string' ? headers.host : '',
             })
             if (verdict.ok !== true) {
               const reason = typeof verdict.reason === 'string' ? verdict.reason : 'no-ticket'
@@ -3766,7 +3797,7 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
           }, 400)
           return
         }
-        answer(sleepStatusPayload(sleep, config))
+        answer(sleepStatusPayload(sleep, config, runtime))
       }).catch((error) => {
         answer({ ok: false, error: describeError(error) }, 400)
       })

@@ -782,15 +782,107 @@ test('cancelling stops the countdown and releases the timer', async () => {
 /**
  * The ticket the host injected into the served page.
  *
+ * It travels in a `<meta>` tag, not in a script: the CSP of the host
+ * (`script-src 'nonce-…'`) never runs an inline script without that
+ * nonce, so a ticket in a script would never arrive.
+ *
  * @param {Function[]} taps the index taps the plugin registered
  * @returns {{ ticket: string, issuedAt: number }}
  */
 function ticketFromPage(taps) {
   const html = taps.map((fn) => fn('<html><head></head></html>')).join('')
-  const match = /window\.__DSH_SLEEP_TICKET__=(\{[^}]*\});/.exec(html)
+  const match = /<meta name="dsh-autorestart-sleep-ticket" content="([^"]*)">/.exec(html)
   assert.ok(match, 'the page must carry a ticket')
-  return JSON.parse(match[1])
+  return JSON.parse(unescapeHtmlAttribute(match[1]))
 }
+
+/**
+ * Undo the HTML escaping of an attribute value.
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function unescapeHtmlAttribute(value) {
+  return String(value)
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+}
+
+test('the page ticket travels in a META tag, not in a script (the CSP forbids inline scripts)', async () => {
+  const { file } = tempStateFile('meta')
+  const { ctx, routes, taps } = createContext()
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'human' })
+
+  const html = taps
+    .map((fn) => fn('<html><head><title>DSH</title></head><body>app</body></html>'))
+    .join('')
+
+  // A <meta> is not script: the CSP (`script-src 'nonce-…'`) lets it through.
+  assert.match(html, /<meta name="dsh-autorestart-sleep-ticket" content="[^"]+">/)
+  assert.ok(
+    !/<script[^>]*dsh-autorestart-sleep-ticket/.test(html),
+    'the ticket must not be injected as an inline script',
+  )
+  assert.ok(!html.includes('__DSH_SLEEP_TICKET__'), 'the old window variable is not injected any more')
+
+  // The tag sits before </head> …
+  assert.ok(
+    html.indexOf('dsh-autorestart-sleep-ticket') < html.indexOf('</head>'),
+    'the meta tag belongs into the head',
+  )
+  // … and its content is a parseable JSON with the ticket.
+  const grant = ticketFromPage(taps)
+  assert.equal(typeof grant.ticket, 'string')
+  assert.ok(grant.ticket.length > 0)
+  assert.equal(typeof grant.issuedAt, 'number')
+
+  // Idempotent: tapping the same document twice does not add a second tag.
+  const ticketTap = taps[0]
+  const twice = ticketTap(ticketTap('<html><head></head><body>app</body></html>'))
+  assert.equal(
+    twice.split('dsh-autorestart-sleep-ticket').length - 1,
+    1,
+    'the ticket tag must be injected only once',
+  )
+})
+
+test('the client reads the ticket out of the META tag and arms with it', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human' },
+    meta: { ticket: 'nonce.signature', issuedAt: 1_700_000_000_000 },
+  })
+  await mounted.poll()
+  const button = await mounted.settled('sidebar.footer.action')
+  button.props.onClick()
+  await settleClient()
+
+  const arms = mounted.fetches
+    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
+    .filter((call) => JSON.parse(call.init.body).action === 'arm')
+  assert.equal(arms.length, 1, 'the click must arm the machine')
+  assert.equal(arms[0].init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
+  assert.equal(mounted.reloads.count, 0, 'a page with a ticket never reloads')
+})
+
+test('the client still understands the old window variable', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human' },
+    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
+  })
+  await mounted.poll()
+  const button = await mounted.settled('sidebar.footer.action')
+  button.props.onClick()
+  await settleClient()
+
+  const arms = mounted.fetches
+    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
+    .filter((call) => JSON.parse(call.init.body).action === 'arm')
+  assert.equal(arms.length, 1, 'the fallback must still work')
+  assert.equal(arms[0].init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
+})
 
 test('in the human mode a request without the page ticket is refused, and nothing changes', async () => {
   const { file } = tempStateFile('human-no-ticket')
@@ -1234,13 +1326,14 @@ const settleClient = () => new Promise((resolve) => setTimeout(resolve, 5))
 /**
  * Load the classic client script in a sandbox and mount its surfaces.
  *
- * @param {{ status?: object, storage?: object, language?: string, ticket?: object, refuseArm?: object, sessionStorage?: object, fakeTimers?: boolean }} options
+ * @param {{ status?: object, storage?: object, language?: string, ticket?: object, meta?: object, refuseArm?: object, sessionStorage?: object, fakeTimers?: boolean }} options
  */
 function mountClient({
   status = null,
   storage = createStorage(),
   language = 'zh',
   ticket = null,
+  meta = null,
   refuseArm = null,
   sessionStorage = createStorage(),
   fakeTimers = false,
@@ -1281,6 +1374,14 @@ function mountClient({
       getElementById: () => null,
       createElement: (tag) => ({ tag, id: '', textContent: '', parentNode: null, setAttribute: () => {}, appendChild: () => {} }),
       head: { appendChild: (node) => { node.parentNode = sandbox.document.head; return node }, removeChild: () => {} },
+      // The ticket the host injected into the page: the real host puts it
+      // into a <meta> tag (the CSP would never run an inline script).
+      querySelector: (selector) => {
+        if (meta === null) return null
+        if (selector !== 'meta[name="dsh-autorestart-sleep-ticket"]') return null
+        const content = typeof meta === 'string' ? meta : JSON.stringify(meta)
+        return { getAttribute: (name) => (name === 'content' ? content : null) }
+      },
     },
     fetch: (url, init) => {
       fetches.push({ url: String(url), init })
@@ -1674,7 +1775,7 @@ test('after the reload there is still no ticket: the hint appears, nothing else 
 
   const after = await mounted.settled('sidebar.footer.action')
   assert.ok(
-    textOf(after).includes('刷新一次页面'),
+    textOf(after).includes('点一下会自动刷新一次'),
     `the hint must be visible, got: ${textOf(after)}`,
   )
 })

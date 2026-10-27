@@ -500,8 +500,10 @@ test('the served index gets a boot-token heartbeat for dsh web pages', () => {
   assert.match(html, /data-dsh-autorestart-heartbeat/)
   assert.match(html, /__DSH_AUTORESTART_BOOT__/)
   assert.match(html, /\/__dsh_autorestart\/health/)
-  assert.match(html, /data-dsh-autorestart-sleep-ticket/)
-  assert.match(html, /__DSH_SLEEP_TICKET__/)
+  // The page ticket travels in a <meta> tag: the CSP never runs an inline
+  // script without its nonce.
+  assert.match(html, /<meta name="dsh-autorestart-sleep-ticket" content="[^"]+">/)
+  assert.ok(!html.includes('__DSH_SLEEP_TICKET__'), 'the ticket is not injected as a script')
   assert.ok(html.indexOf('data-dsh-autorestart-heartbeat') < html.indexOf('</head>'))
   // Idempotent: tapping the same document twice must not duplicate the script.
   assert.equal(
@@ -533,7 +535,7 @@ test('autoReloadPage: false suppresses the heartbeat but keeps the health route'
   assert.equal(taps.length, 1, 'only the page ticket is injected without the heartbeat')
   const html = taps[0]('<html><head></head><body>app</body></html>')
   assert.doesNotMatch(html, /data-dsh-autorestart-heartbeat/, 'the heartbeat must stay off')
-  assert.match(html, /data-dsh-autorestart-sleep-ticket/, 'the page ticket is always there')
+  assert.match(html, /<meta name="dsh-autorestart-sleep-ticket"/, 'the page ticket is always there')
 })
 
 test('every exported default key is present in cordis.patch.yml (no dead knobs)', () => {

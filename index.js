@@ -2921,20 +2921,43 @@ function injectPageHeartbeat(html, bootId, routePath) {
  * served: a shell script on the same machine cannot read it out of the
  * page, so it cannot drive the shutdown in the `human` mode.
  *
+ * It travels in a `<meta>` tag, NOT in an inline `<script>`: the host sends
+ * `content-security-policy: … script-src 'nonce-…'`, so an inline script
+ * without that nonce is never executed — the ticket would stay undefined
+ * and the button could never arm anything. A `<meta>` is not script, so the
+ * CSP does not touch it.
+ *
  * @param {string} html
  * @param {{ ticket: string, issuedAt: number }} grant
  * @returns {string}
  */
 function injectSleepTicket(html, grant) {
   if (typeof html !== 'string') return html
-  if (html.includes('data-dsh-autorestart-sleep-ticket')) return html
+  if (html.includes('name="dsh-autorestart-sleep-ticket"')) return html
   if (!grant || typeof grant.ticket !== 'string' || grant.ticket === '') return html
-  const script = [
-    '<script data-dsh-autorestart-sleep-ticket>',
-    `window.__DSH_SLEEP_TICKET__=${JSON.stringify({ ticket: grant.ticket, issuedAt: grant.issuedAt })};`,
-    '</script>',
-  ].join('')
-  return html.includes('</head>') ? html.replace('</head>', `${script}</head>`) : `${script}${html}`
+  const payload = escapeHtmlAttribute(JSON.stringify({
+    ticket: grant.ticket,
+    issuedAt: grant.issuedAt,
+  }))
+  const meta = `<meta name="dsh-autorestart-sleep-ticket" content="${payload}">`
+  return html.includes('</head>') ? html.replace('</head>', `${meta}</head>`) : `${meta}${html}`
+}
+
+/**
+ * Escape a value for an HTML attribute.
+ *
+ * `&`, `<`, `>` and the quotes must not end the attribute (or the tag).
+ *
+ * @param {string} value
+ * @returns {string}
+ */
+function escapeHtmlAttribute(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 /**

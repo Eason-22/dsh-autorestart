@@ -202,7 +202,7 @@ const ZH = {
   'sleep.button.titleImmediate': '等所有会话收工后立即关机（不倒数）',
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
-  'sleep.ticketHint': '这个页面没有拿到票据，刷新一次页面就能用了。',
+  'sleep.ticketHint': '这个页面还没拿到票据，点一下会自动刷新一次。',
   'sleep.dryRun.title': '试运行：不会真的关机',
   'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
   'sleep.dryRun.close': '知道了',
@@ -314,7 +314,7 @@ const EN = {
   'sleep.button.titleImmediate': 'Waits for every session to finish, then powers off right away (no countdown)',
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
-  'sleep.ticketHint': 'This page has no ticket yet — refresh the page once and it works.',
+  'sleep.ticketHint': 'This page has no ticket yet — click once and it refreshes itself.',
   'sleep.dryRun.title': 'Dry run: the machine stays on',
   'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
   'sleep.dryRun.close': 'Got it',
@@ -1711,12 +1711,50 @@ if (moduleLoader) moduleLoader.load({
      *
      * @returns {{ ticket: string, issuedAt: number }|null}
      */
+    /**
+     * The one-time ticket of this page.
+     *
+     * The host puts it into a `<meta>` tag, because the CSP of the host
+     * (`script-src 'nonce-…'`) never executes an inline script without that
+     * nonce — a ticket in a script would simply never arrive. A `<meta>` is
+     * not script, so it gets through.
+     *
+     * `window.__DSH_SLEEP_TICKET__` stays as a fallback for a host that
+     * still injects the old way.
+     *
+     * @returns {{ ticket: string, issuedAt: number }|null}
+     */
     function sleepTicket() {
+      const fromMeta = readTicketFromMeta()
+      if (fromMeta) return fromMeta
       if (typeof window === 'undefined') return null
       const grant = window.__DSH_SLEEP_TICKET__
       if (!grant || typeof grant !== 'object') return null
       if (typeof grant.ticket !== 'string' || grant.ticket === '') return null
       return { ticket: grant.ticket, issuedAt: Number(grant.issuedAt) || 0 }
+    }
+
+    /**
+     * The ticket out of the `<meta>` tag the host injected.
+     *
+     * @returns {{ ticket: string, issuedAt: number }|null}
+     */
+    function readTicketFromMeta() {
+      try {
+        if (typeof document === 'undefined') return null
+        if (typeof document.querySelector !== 'function') return null
+        const meta = document.querySelector('meta[name="dsh-autorestart-sleep-ticket"]')
+        if (!meta || typeof meta.getAttribute !== 'function') return null
+        const raw = meta.getAttribute('content')
+        if (typeof raw !== 'string' || raw === '') return null
+        const grant = JSON.parse(raw)
+        if (!grant || typeof grant !== 'object') return null
+        if (typeof grant.ticket !== 'string' || grant.ticket === '') return null
+        return { ticket: grant.ticket, issuedAt: Number(grant.issuedAt) || 0 }
+      } catch {
+        // A broken tag is no ticket: the click then takes the reload path.
+        return null
+      }
     }
 
     /**

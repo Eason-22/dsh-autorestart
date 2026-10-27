@@ -56,8 +56,8 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 | 类型 | 具体占用 |
 | --- | --- |
 | Agent 工具（6 个） | `continuum_restart`、`continuum_status`、`continuum_cancel_restart`、`continuum_park_goal`、`continuum_recover_now`、`continuum_handoff` |
-| HTTP 路由（6 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`、`GET /sleep`、`POST /sleep`（收工关机——`human` 模式下只有页面里的按钮能驱动它）；只接受本机回环或已认证的浏览器 |
-| 前端槽位（4 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`）、`sidebar.footer.action`（收工关机的月亮按钮，id `autorestart-sleep-button`）、`shell.overlay`（倒数浮动卡片） |
+| HTTP 路由（6 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`、`GET /sleep`、`POST /sleep`（收工关机——桌面端和 web 端走的是同一条路由）；只接受本机回环或已认证的浏览器 |
+| 前端槽位（5 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`）、`sidebar.footer.action`（收工关机的月亮按钮，id `autorestart-sleep-button`）、`shell.overlay`（倒数浮动卡片）、`settings.section`（设置页里的「自动重启与关机」分区，id `dsh-autorestart`） |
 | 系统提示词 | 一段「重启政策」说明，告诉 agent 怎么请求重启、插件会做什么 |
 | 宿主事件 | `agent/status`（跟踪哪些会话在忙）、`tools/pre-execute`（拦下"手动杀/重启 DSH"的 shell 命令）、启动时的恢复流程 |
 | profile 行 | 一条 bundle 行：`dsh-autorestart` |
@@ -84,8 +84,8 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 - **只问一次**：只有 `localStorage['dsh-autorestart:backup-choice-v1']` 缺失时才渲染；点任一项都会写下这个键，之后不再出现。
 - **关掉也算作答**：按 `×` 或 `Esc` 与点选项写的是同一个「已作答」标记，这个浏览器此后**不会再被问**；关掉等于保留默认（配置 + 已安装插件）。
 - **不打扰**：面板是 `role="status"` 的普通块，放在输入框下方的 dock 里；可聚焦、键盘可达、`Esc` 关闭。
-- **答案存在哪**：宿主用官方 `configEditor` Service 写进 profile 配置（就是设置页里那个 `backupIncludePlugins` 键，**只有一份真相**）。万一这个服务不可用，才退化到写 `<DSH_HOME>/storages/dsh-autorestart/install-choice.json` 并在日志里 `warn`。**托管 profile 如果自己没有声明 `dsh-autorestart` 行**，就没有行可写，答案同样落在这个文件里而不是 profile 里 —— 声明那一行（见「平台与部署」）才能让 profile 配置保持唯一真相。
-- **想改主意**：设置 → 插件 → dsh-autorestart → `backupIncludePlugins`。`continuum_status` 里随时能看到当前生效值（`backupIncludePlugins: true | false`）。
+- **答案存在哪**：宿主用官方 `configEditor` Service 写进 profile 配置（就是设置分区里那个 `backupIncludePlugins` 键，**只有一份真相**）。万一这个服务不可用，才退化到写 `<DSH_HOME>/storages/dsh-autorestart/install-choice.json` 并在日志里 `warn`。**托管 profile 如果自己没有声明 `dsh-autorestart` 行**，就没有行可写，答案同样落在这个文件里而不是 profile 里 —— 声明那一行（见「平台与部署」）才能让 profile 配置保持唯一真相。
+- **想改主意**：设置 → 自动重启与关机 → `backupIncludePlugins`。`continuum_status` 里随时能看到当前生效值（`backupIncludePlugins: true | false`）。
 
 ## 工作方式
 
@@ -155,6 +155,10 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 | `blockManualRestart` | `true` | 硬拦截 agent 用 shell 命令手动杀掉/重启 DSH，并引导到 `continuum_restart` |
 | `healthPath` | `/__dsh_autorestart/health` | 健康检查路由（返回 bootId/pid/phase/自检标志） |
 | `continuationText` | `''` | 覆盖默认续接提示文本 |
+| `backupOnRestart` | `true` | 每次重启前给 profile 拍快照；重启后起不来时能自动回退 |
+| `backupIncludePlugins` | `true` | 快照里是否带上已安装插件目录（本机约 117 MB、多约 3 秒）；关掉就只备配置文件 |
+| `maxBackups` | `2` | 保留几份快照；写新的时自动删旧的 |
+| `rollbackTimeoutMs` | `90000` | 看护脚本等新宿主多久（毫秒），超时就回退快照并再拉起一次 |
 | `showSleepButton` | `true` | 收工关机的月亮按钮是否显示在左侧栏最底部、设置按钮旁边 |
 | `sleepCountdownSeconds` | `20` | 收工关机在真正关机前倒数几秒——**下拉框：0 / 10 / 20 / 30 / 60 秒**，默认 20；`0` 表示**不倒数、立即关机**（仍会先等所有会话收工） |
 | `sleepCommand` | `''` | 收工关机的自定义关机命令；留空 = 自动识别宿主（Windows 用 `cmd.exe /c …`，其它平台用 `/bin/sh -c …`） |
@@ -202,7 +206,7 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 **倒计时不遮界面。** 倒数是角落里的一张**浮动卡片**，不是全屏遮罩：它不压暗页面、不锁滚动、也不吃掉任何点击——卡片外面照常能读正文、能滚动、能点侧栏切会话，卡片自己**只有那个「算了，别关」按钮能点**。切换会话或切换页面也**不会打断或重置**倒数：秒数来自宿主的轮询，不是来自当前打开的那个视图。
 
-**倒数多长由设置页决定。** `sleepCountdownSeconds` 是一个**下拉框**：0 / 10 / 20 / 30 / 60 秒，默认 20 秒。`0` = **不倒数、立即关机**：所有会话一收工、闸门一开就直接关机（忙着的会话照样挡住它），屏幕上**不会出现倒计时卡片**。配置里还留着下拉框之外的老数值（15、45…）时，会自动吸附到最近的一档（15→20、45→60），不会把插件弄坏。
+**倒数多长由设置分区决定。** `sleepCountdownSeconds` 是一个**下拉框**：0 / 10 / 20 / 30 / 60 秒，默认 20 秒。`0` = **不倒数、立即关机**：所有会话一收工、闸门一开就直接关机（忙着的会话照样挡住它），屏幕上**不会出现倒计时卡片**。配置里还留着下拉框之外的老数值（15、45…）时，会自动吸附到最近的一档（15→20、45→60），不会把插件弄坏。这个下拉框就在**设置 → 自动重启与关机**分区里。
 
 **点一下就够了。** 月亮按钮按下就武装：宿主等所有忙会话收工，在角落里倒数 **20 秒**（浮动卡片，不遮挡界面），然后关掉整台机器。**再点一下**（或点卡片上的「算了，别关」）就取消。除此之外什么都不用用户做：没有确认框、不用点第二次。
 
@@ -237,17 +241,17 @@ WSL 的判定依据：`WSL_DISTRO_NAME`、`WSL_INTEROP`、`/proc/version` 里出
 | `sleepCountdownSeconds` | `20` | 真正关机前倒数几秒——**下拉框：0 / 10 / 20 / 30 / 60 秒**，默认 20；`0` = 不倒数、立即关机（仍会先等会话收工） |
 | `sleepCommand` | `''` | 自定义关机命令；留空 = 自动识别宿主，填了就用这条命令代替（Windows 走 `cmd.exe /c …`，其它平台走 `/bin/sh -c …`） |
 
-**设置面板（设置 → 插件 → dsh-autorestart）只有三样东西。**
+**设置分区（设置 → 自动重启与关机）里只有三样东西。** 这个分区是设置页侧栏里的**独立一栏**（排在「Agent预设」下面），点进去直接就是这三个控件——不用先去插件详情页，也不用再展开任何一层。
 
 | 控件 | 配置键 | 说明 |
 | --- | --- | --- |
-| 倒计时秒数（下拉） | `sleepCountdownSeconds` | 0 / 10 / 20 / 30 / 60 秒 |
+| 倒计时秒数（下拉） | `sleepCountdownSeconds` | 0 / 10 / 20 / 30 / 60 秒；`0` = 不倒数、立即关机 |
 | 重启前备份（开关） | `backupOnRestart` | 关掉就完全不做重启前快照 |
 | 备份包含已安装插件（开关） | `backupIncludePlugins` | 关掉后只备份 DSH 自身状态，不含 profile 里的插件目录；**「重启前备份」关掉时它置灰** |
 
-改完立刻写进 profile 配置（走插件自己的 choice 路由，用官方 `configEditor` Service），并且**从宿主回读**，所以面板上永远不会出现宿主没接受的值。**非法值一律 400、一个字节都不写。**
+改完立刻写进 profile 配置（走插件自己的 choice 路由，用官方 `configEditor` Service），并且**从宿主回读**，所以分区里永远不会出现宿主没接受的值。**非法值一律 400、一个字节都不写。**
 
-**首次安装会问一次「按钮要不要留着」。** 答完写进 profile 配置的 `showSleepButton` 键（用官方 `configEditor` Service，和备份范围那次问询同一条路），所以设置页和问询看到的永远是同一个值。
+**首次安装会问一次「按钮要不要留着」。** 答完写进 profile 配置的 `showSleepButton` 键（用官方 `configEditor` Service，和备份范围那次问询同一条路），所以设置分区和问询看到的永远是同一个值。
 
 **想空跑、不真关机。** 给宿主进程的环境变量设 `DSH_AUTORESTART_SLEEP_DRYRUN=1`：插件只报告"本来会执行什么命令"，**一条都不执行**。
 
@@ -583,7 +587,7 @@ or by requesting the health path with ?gate=1.
 
 同一个 profile 行也是首次安装那次提问的落点：**托管 profile 如果自己没有 `dsh-autorestart` 行**，
 `configEditor` 就没有行可写，答案会退到 `<DSH_HOME>/storages/dsh-autorestart/install-choice.json`
-而不是 profile 配置；声明这一行才能让 profile（以及设置页）保持唯一真相。
+而不是 profile 配置；声明这一行才能让 profile（以及设置分区）保持唯一真相。
 
 - **浏览器侧的「待重启」小胶囊**依赖 `GET <healthPath>?state=1` 这条状态路由。这条路由现在接受
   **loopback 调用者**，*或* **宿主 connection 服务判定为「已认证浏览器」的请求**

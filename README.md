@@ -55,8 +55,8 @@ what it adds before you install it.
 | Kind | What it adds |
 | --- | --- |
 | Agent tools (6) | `continuum_restart`, `continuum_status`, `continuum_cancel_restart`, `continuum_park_goal`, `continuum_recover_now`, `continuum_handoff` |
-| HTTP routes (6) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`, `GET /sleep` and `POST /sleep` (the graceful shutdown — in the `human` mode only the page's button may drive it). Loopback or an authenticated browser only |
-| Client slots (4) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`); `sidebar.footer.action` — the moon button of the graceful shutdown (`autorestart-sleep-button`); `shell.overlay` — its countdown card |
+| HTTP routes (6) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`, `GET /sleep` and `POST /sleep` (the graceful shutdown — the desktop client and the hosted web client drive the very same route). Loopback or an authenticated browser only |
+| Client slots (5) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`); `sidebar.footer.action` — the moon button of the graceful shutdown (`autorestart-sleep-button`); `shell.overlay` — its countdown card; `settings.section` — the section "Auto-restart & shut down" in the settings page (`dsh-autorestart`) |
 | System prompt | One "Restart policy" section that tells the agent how to ask for a restart and what the plugin will do |
 | Harness hooks | `agent/status` (tracks which conversations are busy), `tools/pre-execute` (blocks a shell command that would kill or relaunch DSH by hand), and the boot pass that resumes interrupted sessions |
 | Profile row | One bundle row, `dsh-autorestart` |
@@ -226,13 +226,13 @@ addition to it, never a rival of it.
   stays usable, nothing is modal, and the panel does not disappear on its own. It is keyboard
   reachable and `Esc` closes it.
 - **Where the answer goes.** The host writes it into the profile configuration with the official
-  `configEditor` service — the same `backupIncludePlugins` key the settings page edits, so there is
+  `configEditor` service — the same `backupIncludePlugins` key the settings section edits, so there is
   one source of truth. If that service is unavailable the answer degrades to
   `<DSH_HOME>/storages/dsh-autorestart/install-choice.json` and a warning is logged. The same fallback
   happens in a hosted profile that declares no `dsh-autorestart` row of its own: there is no row for the
   editor to write, so the answer lands in that file instead of the profile. Declare the row (see
   *Hosted `dsh web` deployments* below) to keep the profile configuration as the single source of truth.
-- **How to change your mind later:** Settings → Plugins → dsh-autorestart → `backupIncludePlugins`.
+- **How to change your mind later:** Settings → Auto-restart & shut down → `backupIncludePlugins`.
   `continuum_status` always reports the value that is in effect right now
   (`backupIncludePlugins: true | false`).
 
@@ -301,18 +301,19 @@ curl -s -X POST http://127.0.0.1:<port>/__dsh_autorestart/sleep \
 **The one-time install question.** The first time the plugin is used, the composer dock asks once
 more whether the button should stay. The answer is written into the profile configuration
 (`showSleepButton`) through the same `configEditor` service the backup question uses, so the
-settings page and the prompt always show the same value.
+settings section and the prompt always show the same value.
 
-**The configuration page.** In *Settings → Plugins → dsh-autorestart* the plugin row carries the
-three settings that matter:
+**The settings section.** *Settings → Auto-restart & shut down* is a section of its own in the
+settings sidebar (right below the Agent presets). It carries the three settings that matter:
 
-- **Countdown seconds** — the dropdown `0` / `10` / `20` / `30` / `60`.
+- **Countdown seconds** — the dropdown `0` / `10` / `20` / `30` / `60`. `0` means "no countdown":
+  the machine is switched off as soon as every conversation is idle.
 - **Backup before a restart** (`backupOnRestart`) — whether the pre-restart snapshot is taken at all.
 - **Include the installed plugins in the backup** (`backupIncludePlugins`) — whether that snapshot
   also contains the plugin directory of the profile. It is greyed out when the backup itself is off.
 
 A change is written into the profile configuration at once (through the plugin's own choice route)
-and is read back from the host, so the page never shows a value the host did not take. A malformed
+and is read back from the host, so the section never shows a value the host did not take. A malformed
 value is refused with a **400** and **nothing** is written.
 
 **Trying it without switching anything off.** Set `DSH_AUTORESTART_SLEEP_DRYRUN=1` in the host
@@ -385,7 +386,7 @@ when the host is started by hand. `continuum_status` keeps reporting the pending
 The same profile row is what the one-time install question writes into: a hosted profile that declares no
 `dsh-autorestart` row has no row for the `configEditor` service to edit, so the answer falls back to
 `<DSH_HOME>/storages/dsh-autorestart/install-choice.json` instead of the profile configuration. Declaring the
-row keeps the profile (and therefore the settings page) as the single source of truth.
+row keeps the profile (and therefore the settings section) as the single source of truth.
 
 ## Verify
 

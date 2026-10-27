@@ -24,6 +24,12 @@
       "value": "{n} seconds",
       "hint": "After the button: wait for every conversation to be done, count down this many seconds and switch off. \"No countdown\" switches off as soon as the conversations are done."
     },
+    "grace": {
+      "label": "Wait a few more seconds after the work is done",
+      "immediate": "Do not wait (restart/switch off right away)",
+      "value": "{n} seconds",
+      "hint": "After the last conversation finished, wait this long before the host is really restarted or switched off — this plugin only sees the DSH conversations, not the work other plugins queue with a timer. If a conversation starts working again while waiting, the timer starts over."
+    },
     "backup": {
       "label": "Backup before a restart",
       "hint": "Take a snapshot of the current configuration before every restart, so a host that cannot boot again is rolled back automatically."

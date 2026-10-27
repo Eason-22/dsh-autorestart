@@ -92,6 +92,9 @@ function hostedConfig(stateFile, overrides = {}) {
     restartMode: 'command',
     restartCommand: 'restart-the-host',
     settleMs: 0,
+    // The grace window (the extra wait after the last conversation) is a
+    // different knob; these tests are about the snapshot, so it is off.
+    restartGraceMs: 0,
     backupOnRestart: true,
     backupIncludePlugins: true,
     ...overrides,

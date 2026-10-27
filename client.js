@@ -114,6 +114,19 @@ const SLEEP_DEFAULT_COUNTDOWN_SECONDS = 20
 /** How long the note of a finished rehearsal stays on screen (ms). */
 const SLEEP_DRY_RUN_NOTICE_MS = 8_000
 
+/**
+ * The grace window the settings page offers (a dropdown, in seconds).
+ *
+ * It is the extra wait after the last conversation finished, so that work
+ * other plugins queue with a timer (a memory plugin writing its notes, a
+ * summary) still gets its chance — this plugin cannot see that work.
+ */
+const GRACE_CHOICES_SECONDS = Object.freeze([0, 3, 5, 10, 20, 30])
+
+/** The grace window used when the Host did not report one (ms / seconds). */
+const GRACE_DEFAULT_MS = 10_000
+const GRACE_DEFAULT_SECONDS = 10
+
 const ZH = {
   label: '待重启',
   busyPrefix: ' · 等待 ',
@@ -140,7 +153,7 @@ const ZH = {
   // One line per blocker: a session and a subagent are told apart, and
   // neither of them is ever shown as a raw session id.
   panelBlockedSession: '会话「{label}」正在运行',
-  panelBlockedSubagent: '子智能体（{label}）正在运行',
+  panelBlockedSubagent: '{name}正在运行',
   panelBlockedSubagentGeneric: '有一个子智能体正在运行',
   panelGoalActiveLine: '占用会话「{title}」：goal 正在自动续跑（goal-active）',
   panelGoalExhaustedLine: '占用会话「{title}」：goal 轮次额度已用完，无法继续（goal-exhausted）',
@@ -182,6 +195,10 @@ const ZH = {
   'settings.seconds.immediate': '不倒数（立即关机）',
   'settings.seconds.value': '{n} 秒',
   'settings.seconds.hint': '按下按钮后，等所有会话收工，再倒数这么多秒才关机；「不倒数」表示会话一收工就关机。',
+  'settings.grace.label': '收工后再等几秒（给记忆/总结类插件留时间）',
+  'settings.grace.hint': '最后一个会话收工后，再等这么久才真正重启或关机——我们只看得见 DSH 的会话，看不见别的插件用定时器排队的活。等待期间如果又有会话开始干活，会重新计时。',
+  'settings.grace.value': '{n} 秒',
+  'settings.grace.immediate': '不等（立即重启/关机）',
   'settings.backup.label': '重启前备份',
   'settings.backup.hint': '每次重启前先快照一次当前配置；万一重启后起不来，能自动回退。',
   'settings.backupPlugins.label': '备份包含已安装插件',
@@ -279,7 +296,7 @@ const EN = {
   // One line per blocker: a session and a subagent are told apart, and
   // neither of them is ever shown as a raw session id.
   panelBlockedSession: 'Session "{label}" is running',
-  panelBlockedSubagent: 'Subagent of "{label}" is running',
+  panelBlockedSubagent: '{name} is running',
   panelBlockedSubagentGeneric: 'One subagent is running',
   panelGoalActiveLine: 'Blocking session "{title}": the goal keeps driving rounds by itself (goal-active)',
   panelGoalExhaustedLine: 'Blocking session "{title}": the goal ran out of rounds and cannot continue (goal-exhausted)',
@@ -321,6 +338,10 @@ const EN = {
   'settings.seconds.immediate': 'No countdown (switch off right away)',
   'settings.seconds.value': '{n} seconds',
   'settings.seconds.hint': 'After the button: wait for every conversation to be done, count down this many seconds and switch off. "No countdown" switches off as soon as the conversations are done.',
+  'settings.grace.label': 'Wait a few more seconds after the work is done',
+  'settings.grace.hint': 'After the last conversation finished, wait this long before the host is really restarted or switched off — this plugin only sees the DSH conversations, not the work other plugins queue with a timer. If a conversation starts working again while waiting, the timer starts over.',
+  'settings.grace.value': '{n} seconds',
+  'settings.grace.immediate': 'Do not wait (restart/switch off right away)',
   'settings.backup.label': 'Backup before a restart',
   'settings.backup.hint': 'Take a snapshot of the current configuration before every restart, so a host that cannot boot again is rolled back automatically.',
   'settings.backupPlugins.label': 'Include the installed plugins in the backup',
@@ -747,9 +768,12 @@ if (moduleLoader) moduleLoader.load({
      * The line of one blocker: a session and a subagent are told apart, and
      * neither of them is ever shown as a raw session id.
      *
-     * The Host says WHAT the blocker is (`kind`) and HOW it is called
-     * (`label`: the title of the session, or of the session that created the
-     * subagent). A blocker without a name gets a generic line.
+     * The Host says WHAT the blocker is (`kind`) and HOW it is called: a
+     * session by its own title (`label`), a subagent by the whole phrase
+     * (`name`: "写代码的会话的子智能体"). The phrase is used as it is — it
+     * reads as a sentence, while a bracketed label would read like an
+     * annotation. A subagent whose parent title is unknown has no name of its
+     * own, so it gets the generic line instead of an empty bracket.
      *
      * @param {any} entry the blocker the Host reported
      * @returns {string}
@@ -759,9 +783,9 @@ if (moduleLoader) moduleLoader.load({
       const kind = entry && entry.kind === 'subagent' ? 'subagent' : 'session'
       const label = entry && typeof entry.label === 'string' ? entry.label.trim() : ''
       if (kind === 'subagent') {
-        return label === ''
-          ? t('panelBlockedSubagentGeneric')
-          : fill(t('panelBlockedSubagent'), { label })
+        const name = entry && typeof entry.name === 'string' ? entry.name.trim() : ''
+        if (name === '' || label === '') return t('panelBlockedSubagentGeneric')
+        return fill(t('panelBlockedSubagent'), { name })
       }
       return label === ''
         ? t('panelBlockedGeneric')
@@ -2333,6 +2357,15 @@ if (moduleLoader) moduleLoader.load({
       const backupIncludePlugins = status && typeof status === 'object' && typeof status.backupIncludePlugins === 'boolean'
         ? status.backupIncludePlugins
         : true
+      // The grace window: how long the host waits after the last conversation
+      // finished. The Host reports it in milliseconds; the dropdown works in
+      // seconds.
+      const reportedGraceMs = status && typeof status === 'object' && typeof status.graceMs === 'number'
+        ? status.graceMs
+        : GRACE_DEFAULT_MS
+      const graceSeconds = GRACE_CHOICES_SECONDS.indexOf(Math.round(reportedGraceMs / 1000)) === -1
+        ? GRACE_DEFAULT_SECONDS
+        : Math.round(reportedGraceMs / 1000)
 
       /**
        * Write one change into the profile configuration.
@@ -2399,6 +2432,33 @@ if (moduleLoader) moduleLoader.load({
             )),
           ),
           h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.seconds.hint')),
+        ),
+        h(
+          'label',
+          { className: 'dsh-autorestart-settings__field' },
+          h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.grace.label')),
+          h(
+            'select',
+            {
+              className: 'dsh-autorestart-settings__select',
+              value: String(graceSeconds),
+              disabled: busy,
+              'data-dsh-autorestart-setting': 'restartGraceMs',
+              onChange: (event) => {
+                const value = Number(event && event.target ? event.target.value : NaN)
+                if (!Number.isFinite(value) || value === graceSeconds) return
+                void save({ restartGraceMs: value * 1000 })
+              },
+            },
+            GRACE_CHOICES_SECONDS.map((choice) => h(
+              'option',
+              { key: String(choice), value: String(choice) },
+              choice === 0
+                ? t('settings.grace.immediate')
+                : fill(t('settings.grace.value'), { n: choice }),
+            )),
+          ),
+          h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.grace.hint')),
         ),
         h(
           'label',
@@ -2928,7 +2988,16 @@ if (moduleLoader) moduleLoader.load({
           h('p', { className: 'dsh-autorestart-sleep-waiting__title' }, t('sleep.waiting.title')),
           h('p', { className: 'dsh-autorestart-sleep-waiting__body' }, t('sleep.waiting.body')),
           blockers.length === 0
-            ? h('p', { className: 'dsh-autorestart-sleep-waiting__none' }, t('sleep.waiting.none'))
+            ? h(
+              'p',
+              { className: 'dsh-autorestart-sleep-waiting__none' },
+              // The Host's own message explains WHY the machine waits (the
+              // grace window for work this plugin cannot see); the generic
+              // line is only the fallback.
+              typeof status.message === 'string' && status.message !== ''
+                ? status.message
+                : t('sleep.waiting.none'),
+            )
             : h(
               'ul',
               { className: 'dsh-autorestart-sleep-waiting__list' },

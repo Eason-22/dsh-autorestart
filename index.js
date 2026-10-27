@@ -84,6 +84,47 @@ import {
 } from './lib/sleep.js'
 
 /**
+ * The grace window: how long the host waits after the LAST conversation
+ * finished before it is really restarted or switched off.
+ *
+ * This plugin can only see the DSH agents. Other plugins (a memory plugin
+ * that writes its notes a few seconds after the conversation ended, a summary,
+ * an MCP callback) queue their work with a timer of their own — work that is
+ * invisible here. A short, configurable grace window is left for it.
+ *
+ * The values are the ones the settings page offers (in milliseconds).
+ */
+const GRACE_CHOICES_MS = Object.freeze([0, 3000, 5000, 10000, 20000, 30000])
+
+/** The grace window that is used when nothing was configured. */
+const DEFAULT_GRACE_MS = 10000
+
+/**
+ * Snap a grace value onto the nearest offered choice.
+ *
+ * A profile that carries a value that is not offered (a hand-edited row, an
+ * older build) must not break the boot: the value is snapped onto the
+ * nearest choice, exactly like the countdown length is.
+ *
+ * @param {unknown} value
+ * @returns {number} one of {@link GRACE_CHOICES_MS}
+ */
+function snapGraceChoice(value) {
+  const raw = Number(value)
+  if (!Number.isFinite(raw) || raw < 0) return DEFAULT_GRACE_MS
+  let best = GRACE_CHOICES_MS[0]
+  let bestDistance = Math.abs(raw - best)
+  for (const choice of GRACE_CHOICES_MS) {
+    const distance = Math.abs(raw - choice)
+    if (distance < bestDistance) {
+      best = choice
+      bestDistance = distance
+    }
+  }
+  return best
+}
+
+/**
  * The version of this plugin, as a fallback.
  *
  * The real version is read from the plugin's own package.json (see
@@ -281,6 +322,12 @@ function buildConfigSchema() {
       // quiet window that must pass after the last conversation activity
       settleMs: schemastery.number().min(0).default(2000)
         .description('Milliseconds the host must stay quiet after the last conversation activity before a restart may fire.'),
+      // The grace window: the extra wait after the last conversation finished.
+      // Other plugins queue work with timers of their own (a memory plugin
+      // writing its notes, a summary, an MCP callback) and that work is
+      // invisible here — so a short, configurable grace window is left for it.
+      restartGraceMs: schemastery.number().min(0).default(DEFAULT_GRACE_MS)
+        .description('Milliseconds to wait after the last conversation finished before the host is really restarted or switched off: the grace window for work other plugins queue with a timer (0 / 3 / 5 / 10 / 20 / 30 seconds, default 10).'),
       autoReloadPage: schemastery.boolean().default(true)
         .description('Reload the web page automatically when the host boot token changes.'),
       blockManualRestart: schemastery.boolean().default(true)
@@ -347,6 +394,7 @@ const DEFAULTS = {
   restartCommand: '',
   relaunchDelaySeconds: 2,
   settleMs: 2000,
+  restartGraceMs: DEFAULT_GRACE_MS,
   autoReloadPage: true,
   blockManualRestart: true,
   healthPath: '/__dsh_autorestart/health',
@@ -393,6 +441,9 @@ function normalizeConfig(raw) {
   // profile that still carries an old value (15, 45, …) is snapped onto the
   // nearest one instead of breaking, and 0 means "no countdown at all".
   config.sleepCountdownSeconds = snapCountdownChoice(config.sleepCountdownSeconds)
+  // The grace window is one of the offered choices as well: a hand-edited
+  // profile value is snapped onto the nearest one instead of breaking.
+  config.restartGraceMs = snapGraceChoice(config.restartGraceMs)
   if (typeof config.sleepCommand !== 'string') config.sleepCommand = ''
   if (typeof config.showSleepButton !== 'boolean') config.showSleepButton = true
   return config
@@ -673,7 +724,7 @@ const INSTALL_CHOICE_FILE = 'install-choice.json'
  * Read the recorded install choice from the fallback file.
  *
  * @param {string} stateDir
- * @returns {{ includePlugins: boolean|null, backupOnRestart: boolean|null, showSleepButton: boolean|null, sleepCountdownSeconds: number|null }|null}
+ * @returns {{ includePlugins: boolean|null, backupOnRestart: boolean|null, showSleepButton: boolean|null, sleepCountdownSeconds: number|null, restartGraceMs: number|null }|null}
  */
 function readInstallChoice(stateDir) {
   try {
@@ -687,6 +738,7 @@ function readInstallChoice(stateDir) {
       sleepCountdownSeconds: typeof parsed.sleepCountdownSeconds === 'number'
         ? parsed.sleepCountdownSeconds
         : null,
+      restartGraceMs: typeof parsed.restartGraceMs === 'number' ? parsed.restartGraceMs : null,
     }
   } catch {
     return null
@@ -700,7 +752,7 @@ function readInstallChoice(stateDir) {
  * erase the recorded backup scope (and the other way round).
  *
  * @param {string} stateDir
- * @param {{ includePlugins?: boolean, backupOnRestart?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number }} values
+ * @param {{ includePlugins?: boolean, backupOnRestart?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number, restartGraceMs?: number }} values
  * @returns {string} the file that was written
  */
 function writeInstallChoice(stateDir, values) {
@@ -710,6 +762,7 @@ function writeInstallChoice(stateDir, values) {
     backupOnRestart: null,
     showSleepButton: null,
     sleepCountdownSeconds: null,
+    restartGraceMs: null,
   }
   const payload = {
     includePlugins: typeof values.includePlugins === 'boolean' ? values.includePlugins : current.includePlugins,
@@ -718,6 +771,9 @@ function writeInstallChoice(stateDir, values) {
     sleepCountdownSeconds: typeof values.sleepCountdownSeconds === 'number'
       ? values.sleepCountdownSeconds
       : current.sleepCountdownSeconds,
+    restartGraceMs: typeof values.restartGraceMs === 'number'
+      ? values.restartGraceMs
+      : current.restartGraceMs,
     at: new Date().toISOString(),
   }
   fs.mkdirSync(stateDir, { recursive: true })
@@ -1571,12 +1627,30 @@ export function createRuntime(ctx, config, options = {}) {
 
   const anyAgentRunning = () => busyAgents().length > 0
 
-  /** The two-layer restart gate: no busy conversation AND a quiet settle window. */
+  /** How long the host has been quiet (no conversation activity at all). */
+  const quietForMs = () => Math.max(0, Date.now() - lastActivityAt)
+
+  /**
+   * The grace window: how much longer the host waits after the last
+   * conversation finished, so that work other plugins queue with a timer (a
+   * memory plugin writing its notes, a summary) still gets its chance.
+   */
+  const graceMs = () => config.restartGraceMs
+
+  /**
+   * The quiet window the restart gate really uses.
+   *
+   * It is the settle window, but never shorter than the grace window: the
+   * grace is the *extra* wait on top of the settle, not a replacement.
+   */
+  const effectiveSettleMs = () => Math.max(config.settleMs, config.restartGraceMs)
+
+  /** The two-layer restart gate: no busy conversation AND a quiet window. */
   const gate = () => restartGate(state, {
     busyAgents: busyAgents(),
     lastActivityAt,
     now: Date.now(),
-    settleMs: config.settleMs,
+    settleMs: effectiveSettleMs(),
   })
 
   /**
@@ -1892,7 +1966,7 @@ export function createRuntime(ctx, config, options = {}) {
       anyAgentRunning: busy.length > 0,
       busyAgents: busy,
       lastActivityAt,
-      settleMs: config.settleMs,
+      settleMs: effectiveSettleMs(),
       now,
       softMs: config.deferSoftMs,
       hardMs: config.deferHardMs,
@@ -1937,7 +2011,7 @@ export function createRuntime(ctx, config, options = {}) {
    * is unavailable the choice degrades to a file in the plugin's state
    * directory and a warning is logged, so the choice is never silently lost.
    *
-   * @param {{ backupOnRestart?: boolean, backupIncludePlugins?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number }} changes
+   * @param {{ backupOnRestart?: boolean, backupIncludePlugins?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number, restartGraceMs?: number }} changes
    * @returns {Promise<{ applied: 'config'|'fallback-file' }>}
    */
   const persistConfigChoice = async (changes) => {
@@ -1961,6 +2035,10 @@ export function createRuntime(ctx, config, options = {}) {
     if (typeof changes.sleepCountdownSeconds === 'number') {
       wanted.sleepCountdownSeconds = changes.sleepCountdownSeconds
       fallback.sleepCountdownSeconds = changes.sleepCountdownSeconds
+    }
+    if (typeof changes.restartGraceMs === 'number') {
+      wanted.restartGraceMs = changes.restartGraceMs
+      fallback.restartGraceMs = changes.restartGraceMs
     }
     const editor = resolveConfigEditor(ctx)
     if (editor !== null) {
@@ -2153,6 +2231,25 @@ export function createRuntime(ctx, config, options = {}) {
     stopPolling,
     tick,
     anyAgentRunning,
+    /**
+     * How long the host has been quiet (no conversation activity at all).
+     *
+     * @returns {number}
+     */
+    quietForMs,
+    /**
+     * The grace window: the extra wait after the last conversation finished.
+     *
+     * @returns {number} milliseconds
+     */
+    graceMs,
+    /**
+     * The quiet window the restart gate really uses: the settle window, but
+     * never shorter than the grace window.
+     *
+     * @returns {number} milliseconds
+     */
+    effectiveSettleMs,
     executeRestart,
     flushSessions,
     releaseRequesters,
@@ -2861,7 +2958,9 @@ function registerTools(ctx, runtime, config) {
       'Report the dsh-autorestart lifecycle: whether a restart is pending, which sessions were '
       + 'checkpointed as interrupted or continuation-pending, why each blocking session blocks '
       + '("goal-active" = an armed goal keeps it busy, "goal-exhausted" = its goal can no longer be '
-      + 'resumed), the goals this plugin disarmed, the last recovery action/detail per session, '
+      + 'resumed), the goals this plugin disarmed, how long the host has been quiet and how long '
+      + 'the grace window is (the extra wait after the last conversation finished, for work other '
+      + 'plugins queue with a timer), the last recovery action/detail per session, '
       + 'whether a session was handed off to a fresh session (target session id and time) or is over '
       + 'the model context window (such a session is never auto-resumed), whether the pre-restart '
       + 'backup also snapshots the installed plugins (backupIncludePlugins), the '
@@ -2887,6 +2986,8 @@ function registerTools(ctx, runtime, config) {
           pendingRestart: { type: 'boolean' },
           gateAllow: { type: 'boolean' },
           quietForMs: { type: 'number' },
+          graceMs: { type: 'number' },
+          effectiveSettleMs: { type: 'number' },
           blockedBy: {
             type: 'array',
             items: {
@@ -2933,6 +3034,10 @@ function registerTools(ctx, runtime, config) {
         pendingRestart: state.restart !== null,
         gateAllow: verdict.allow,
         quietForMs: Math.round(verdict.quietForMs),
+        // The grace window (the extra wait after the last conversation
+        // finished) and the quiet window the gate really uses.
+        graceMs: runtime.graceMs(),
+        effectiveSettleMs: runtime.effectiveSettleMs(),
         blockedBy: blockingDetails(verdict.blockedBy),
         parkedGoals: parkedGoalDetails(),
         recovery: recoveryList(state),
@@ -3780,7 +3885,8 @@ function buildChoiceRoute(ctx, runtime, config) {
         const hasBackup = Object.prototype.hasOwnProperty.call(body, 'backupOnRestart')
         const hasShow = Object.prototype.hasOwnProperty.call(body, 'showSleepButton')
         const hasSeconds = Object.prototype.hasOwnProperty.call(body, 'sleepCountdownSeconds')
-        if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasSeconds) {
+        const hasGrace = Object.prototype.hasOwnProperty.call(body, 'restartGraceMs')
+        if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasSeconds && !hasGrace) {
           // No key was asked for: there is nothing to persist.
           res.statusCode = 400
           res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -3788,7 +3894,7 @@ function buildChoiceRoute(ctx, runtime, config) {
           res.end(JSON.stringify({
             ok: false,
             error: 'no-choice',
-            instruction: 'Send { "includePlugins": true | false } and/or { "backupIncludePlugins": true | false } and/or { "backupOnRestart": true | false } and/or { "showSleepButton": true | false } and/or { "sleepCountdownSeconds": 0 | 10 | 20 | 30 | 60 }.',
+            instruction: 'Send { "includePlugins": true | false } and/or { "backupIncludePlugins": true | false } and/or { "backupOnRestart": true | false } and/or { "showSleepButton": true | false } and/or { "sleepCountdownSeconds": 0 | 10 | 20 | 30 | 60 } and/or { "restartGraceMs": 0 | 3000 | 5000 | 10000 | 20000 | 30000 }.',
           }))
           return
         }
@@ -3849,6 +3955,17 @@ function buildChoiceRoute(ctx, runtime, config) {
           }))
           return
         }
+        if (hasGrace && GRACE_CHOICES_MS.indexOf(body.restartGraceMs) === -1) {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'restartGraceMs-must-be-offered',
+            instruction: `Send { "restartGraceMs": ${GRACE_CHOICES_MS.join(' | ')} }.`,
+          }))
+          return
+        }
         const changes = {}
         // The route field is `includePlugins`, the configuration key is
         // `backupIncludePlugins` (the profile row keeps the plugin's own name).
@@ -3857,6 +3974,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         if (hasBackup) changes.backupOnRestart = body.backupOnRestart === true
         if (hasShow) changes.showSleepButton = body.showSleepButton === true
         if (hasSeconds) changes.sleepCountdownSeconds = body.sleepCountdownSeconds
+        if (hasGrace) changes.restartGraceMs = body.restartGraceMs
         const result = await runtime.applyConfigChoice(changes)
         // The one-time install prompt explained the features to the user, so
         // the announcement of a fresh installation must not follow it.
@@ -3877,6 +3995,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         if (hasBackup) answer.backupOnRestart = body.backupOnRestart === true
         if (hasShow) answer.showSleepButton = body.showSleepButton === true
         if (hasSeconds) answer.sleepCountdownSeconds = body.sleepCountdownSeconds
+        if (hasGrace) answer.restartGraceMs = body.restartGraceMs
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
@@ -3914,11 +4033,16 @@ function sleepDryRun() {
  * happened). The sleep feature counts down on screen itself, so it only needs
  * the busy check — and it keeps `settleMs` out of the picture entirely.
  *
+ * The GRACE window is the exception: it is not a settle window but the extra
+ * wait for work this plugin cannot see (a memory plugin writing its notes a
+ * few seconds after the conversation ended). It is honoured BEFORE the
+ * countdown starts, so the countdown is never pushed back by it.
+ *
  * The restart gate itself is untouched: the restart feature keeps its quiet
- * window exactly as it was.
+ * window exactly as it was (plus the same grace).
  *
  * @param {object} runtime
- * @returns {{ allow: boolean, reason: 'busy'|'quiet', blockedBy: any[] }}
+ * @returns {{ allow: boolean, reason: 'busy'|'grace'|'quiet', blockedBy: any[] }}
  */
 function sleepGate(runtime) {
   let busy = []
@@ -3929,6 +4053,16 @@ function sleepGate(runtime) {
   }
   const list = Array.isArray(busy) ? busy : []
   if (list.length > 0) return { allow: false, reason: 'busy', blockedBy: list }
+  // The grace window: the last conversation may have finished a moment ago,
+  // and other plugins still have work queued that this plugin cannot see.
+  let quiet = 0
+  let grace = 0
+  try { quiet = Number(runtime.quietForMs()) } catch { quiet = 0 }
+  try { grace = Number(runtime.graceMs()) } catch { grace = 0 }
+  if (!Number.isFinite(quiet) || quiet < 0) quiet = 0
+  if (Number.isFinite(grace) && grace > 0 && quiet < grace) {
+    return { allow: false, reason: 'grace', blockedBy: [] }
+  }
   return { allow: true, reason: 'quiet', blockedBy: [] }
 }
 
@@ -4010,6 +4144,11 @@ function createSleepService(ctx, runtime, config, options = {}) {
     busyAgents: () => runtime.busyAgents(),
     gate,
     titleOf: (sessionId) => runtime.sessionTitle(sessionId),
+    // The grace window: after the last conversation finished the machine
+    // waits a little longer, so that work this plugin cannot see (a memory
+    // plugin writing its notes, a summary) still gets its chance.
+    quietForMs: () => runtime.quietForMs(),
+    graceMs: () => runtime.graceMs(),
     countdownSeconds: seconds,
     hostLabel: final.shortLabel,
     supported: final.supported,
@@ -4066,9 +4205,10 @@ function createSleepService(ctx, runtime, config, options = {}) {
  *
  * @param {{ plan: object, controller: object, invocation: () => object }} sleep
  * @param {object} config
+ * @param {object} [runtime] the runtime (for the quiet window)
  * @returns {object}
  */
-function sleepStatusPayload(sleep, config) {
+function sleepStatusPayload(sleep, config, runtime) {
   const status = sleep.controller.status()
   const invocation = sleep.invocation()
   return {
@@ -4077,6 +4217,10 @@ function sleepStatusPayload(sleep, config) {
     armed: status.armed,
     showSleepButton: config.showSleepButton !== false,
     countdownSeconds: status.countdownSeconds,
+    // The grace window and how long the host has been quiet: both are needed
+    // to tell "the machine is waiting for the grace" from "somebody is busy".
+    graceMs: config.restartGraceMs,
+    quietForMs: runtime && typeof runtime.quietForMs === 'function' ? runtime.quietForMs() : 0,
     /**
      * The pre-restart backup scope, straight from the effective configuration:
      * the settings page reads its two switches from here.
@@ -4138,7 +4282,7 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
       }
       const method = req && typeof req.method === 'string' ? req.method.toUpperCase() : 'GET'
       if (method === 'GET') {
-        answer(sleepStatusPayload(sleep, config))
+        answer(sleepStatusPayload(sleep, config, runtime))
         return
       }
       if (method !== 'POST') {
@@ -4164,7 +4308,7 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
         } else {
           sleep.controller.cancel()
         }
-        answer(sleepStatusPayload(sleep, config))
+        answer(sleepStatusPayload(sleep, config, runtime))
       }).catch((error) => {
         answer({ ok: false, error: describeError(error) }, 400)
       })
@@ -4213,6 +4357,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
           generation: state.generation,
           pendingRestart: state.restart !== null,
           settleMs: config.settleMs,
+          // The grace window and the quiet window the gate really uses: both
+          // are needed to tell "waiting for the grace" from "somebody is busy".
+          graceMs: config.restartGraceMs,
+          effectiveSettleMs: runtime.effectiveSettleMs(),
+          quietForMs: typeof verdict.quietForMs === 'number' ? verdict.quietForMs : 0,
           busyCount: verdict.blockedBy.length,
           agentCount,
         })
@@ -4276,6 +4425,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             allowRestart: verdict.allow === true,
             quietForMs: typeof verdict.quietForMs === 'number' ? verdict.quietForMs : 0,
             settleMs: config.settleMs,
+            // The grace window and the quiet window the gate really uses.
+            graceMs: config.restartGraceMs,
+            effectiveSettleMs: runtime.effectiveSettleMs(),
             updatedAt: live.updatedAt,
             // The park route, so the client never has to guess the prefix, and
             // the goals this plugin already disarmed (they are re-armed after

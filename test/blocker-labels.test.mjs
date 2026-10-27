@@ -547,8 +547,14 @@ test('the waiting card tells a session and a subagent apart', async () => {
       phase: 'waiting',
       showSleepButton: true,
       blockers: [
-        { sessionId: 'sess-a', kind: 'session', label: '写代码', title: '写代码' },
-        { sessionId: 'sess-child', kind: 'subagent', label: '写代码', title: '写代码' },
+        { sessionId: 'sess-a', kind: 'session', label: '写代码', name: '写代码', title: '写代码' },
+        {
+          sessionId: 'sess-child',
+          kind: 'subagent',
+          label: '写代码',
+          name: '写代码的子智能体',
+          title: '写代码',
+        },
       ],
     },
   })
@@ -557,7 +563,8 @@ test('the waiting card tells a session and a subagent apart', async () => {
   assert.ok(card, 'the waiting card must be shown')
   const text = textOf(card)
   assert.match(text, /会话「写代码」正在运行/, `the session must be named: ${text}`)
-  assert.match(text, /子智能体（写代码）正在运行/, `the subagent must be named: ${text}`)
+  assert.match(text, /写代码的子智能体正在运行/, `the subagent must be named: ${text}`)
+  assert.doesNotMatch(text, /子智能体（/, 'the subagent is not an annotation')
   assert.doesNotMatch(text, /sess-/, 'a raw session id must never be shown')
   // The count is about tasks, and it says how many of them are subagents.
   assert.match(text, /还有 2 个任务在干活/, `the count must talk about tasks: ${text}`)

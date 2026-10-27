@@ -169,6 +169,7 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 | `restartCommand` | `''` | 自定义重启命令，支持 `{pid}` `{ppid}` `{app}` 占位符 |
 | `relaunchDelaySeconds` | `2` | 脱离的 helper 在杀掉应用**之前**等几秒（`ping -n 3`，约 2 秒） |
 | `settleMs` | `2000` | 静默窗口（ms）：最后一次会话活动之后，宿主要安静这么久，重启才允许开始 |
+| `restartGraceMs` | `10000` | 宽限期（ms）：最后一个会话收工后，再等这么久才真正重启/关机——**下拉框：0 / 3 / 5 / 10 / 20 / 30 秒**，默认 10；`0` = 不额外等 |
 | `autoReloadPage` | `true` | `dsh web`：host 重启（bootId 变化）后让页面自动 reload |
 | `blockManualRestart` | `true` | 硬拦截 agent 用 shell 命令手动杀掉/重启 DSH，并引导到 `continuum_restart` |
 | `healthPath` | `/__dsh_autorestart/health` | 健康检查路由（返回 bootId/pid/phase/自检标志） |
@@ -180,6 +181,18 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 | `showSleepButton` | `true` | 收工关机的月亮按钮是否显示在左侧栏最底部、设置按钮旁边 |
 | `sleepCountdownSeconds` | `20` | 收工关机在真正关机前倒数几秒——**下拉框：0 / 10 / 20 / 30 / 60 秒**，默认 20；`0` 表示**不倒数、立即关机**（仍会先等所有会话收工） |
 | `sleepCommand` | `''` | 收工关机的自定义关机命令；留空 = 自动识别宿主（Windows 用 `cmd.exe /c …`，其它平台用 `/bin/sh -c …`） |
+
+### 为什么收工后还要多等几秒
+
+**我们只看得到 DSH 的会话。** 这个插件知道的是：某个会话还在不在跑、有没有排队的 inbox 消息、最后一个是什么时候闲下来的。它**看不到别的插件用定时器排队的活** —— 比如记忆插件在会话结束后过几秒才把这次对话写进记忆、比如一次总结、一次 MCP 回调、一次日志落盘。对我们来说这些活是不存在的，所以「所有 agent 都闲了」并不等于「现在真的没有事情在发生」。
+
+**宽限期就是为这件事留的。** `restartGraceMs`（默认 **10 秒**）的意思是：**最后一个会话收工后，再额外等这么久，才真正重启 / 关机**。这是一层普通的、可配置的保险，**不针对任何具体插件**。
+
+- **两条路都守它**：重启闸门等的是 `max(settleMs, restartGraceMs)` 的安静；收工关机也在**开始倒数之前**先等满这个宽限期（所以宽限期不会把已经在走的倒计时顶回去一轮）。
+- **等待期间又有活，重新计时**：宽限期永远跟着「最后一次活动」走 —— 会话又开始干活，就从那一刻重新等。
+- **`0` 就是「和以前一样」**：`restartGraceMs: 0` 时行为与 0.4.0 完全一致。
+- **在哪改**：设置 → 自动重启与关机 → 「收工后再等几秒（给记忆/总结类插件留时间）」。
+- **怎么排障**：状态接口都带着它 —— `GET /health?state=1`、`GET /health?gate=1`、`continuum_status`、`GET /sleep` 都会报 `graceMs`（配了多宽限期）和 `quietForMs`（已经安静了多久）。
 
 ## Agent 工具与"它怎么知道该用插件"
 

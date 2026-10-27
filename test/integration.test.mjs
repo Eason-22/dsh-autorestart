@@ -740,7 +740,9 @@ test('the ?gate=1 probe refuses a restart while a conversation has queued inbox 
 test('the ?gate=1 probe allows the restart once every conversation is idle and quiet', () => {
   const { file } = tempStateFile('gate-idle');
   const { fake, routes } = contextWithRoutes();
-  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, settleMs: 0 });
+  // The grace window is a different knob: this probe is about the idle gate,
+  // so the extra wait is off here.
+  apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, settleMs: 0, restartGraceMs: 0 });
   const res = fakeResponse();
   routes[0].handler({ url: '/__dsh_autorestart/health?gate=1', socket: { remoteAddress: '127.0.0.1' } }, res);
   const payload = JSON.parse(res.body);
@@ -749,6 +751,7 @@ test('the ?gate=1 probe allows the restart once every conversation is idle and q
   assert.deepEqual(payload.gate.blockedBy, []);
   assert.equal(payload.busyCount, 0);
   assert.equal(payload.settleMs, 0);
+  assert.equal(payload.graceMs, 0, 'the grace window is reported');
 
   // The normal health payload is unchanged for non-gate requests.
   const normal = fakeResponse();

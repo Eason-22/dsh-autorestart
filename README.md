@@ -144,6 +144,7 @@ show up in the Plugin Manager and in the config editor.
 | `restartCommand` | `''` | Custom restart command. Supports the `{pid}`, `{ppid}` and `{app}` placeholders. |
 | `relaunchDelaySeconds` | `2` | How long the detached helper waits before it kills the app (`ping -n 3`, roughly 2 seconds). |
 | `settleMs` | `2000` | Quiet window in milliseconds: the host must stay silent this long after the last conversation activity before a restart may start. |
+| `restartGraceMs` | `10000` | Grace window in milliseconds: how long the host waits after the last conversation finished before it is really restarted or switched off — a dropdown: `0` / `3` / `5` / `10` / `20` / `30` seconds. `0` means "no extra wait". |
 | `autoReloadPage` | `true` | `dsh web`: reload the page automatically when the host boot token changes. |
 | `blockManualRestart` | `true` | Hard-block an agent that tries to kill or restart DSH with a shell command, and point it at `continuum_restart` instead. |
 | `healthPath` | `/__dsh_autorestart/health` | Health check route. Returns the boot id, the pid, the phase and the self-check flags. |
@@ -164,6 +165,30 @@ The two waits are independent of each other, and both default to two seconds:
 
 Both can be overridden separately in the profile config. A larger `settleMs` is the more
 conservative choice, because it is less likely to cut a session short that has just started.
+
+### Why the host waits a few more seconds after the work is done
+
+**The blind spot.** This plugin can only see the **DSH agents**: it knows whether a conversation is
+running, whether it has queued inbox work, and when the last of them went idle. It cannot see the
+work other plugins queue with a timer of their own — a memory plugin that writes its notes a few
+seconds after the conversation ended, a summary, an MCP callback, a log flush. That work is
+invisible here, so "every agent is idle" does not mean "nothing is happening any more".
+
+**The grace window.** `restartGraceMs` (default **10 seconds**) is the extra wait for exactly
+that: after the LAST conversation finished, the host waits this long before it is really restarted
+or switched off. It is a plain, configurable insurance — not a special case for any particular
+plugin.
+
+- **Both paths use it.** The restart gate waits `max(settleMs, restartGraceMs)` of quiet, and the
+  graceful shutdown waits the same grace **before** its countdown starts (so the grace never pushes
+  a countdown that is already running back by a round).
+- **New activity restarts the timer.** If a conversation starts working again while the host is
+  waiting, the grace starts over — the wait always follows the last activity.
+- **`0` means "as before".** With `restartGraceMs: 0` the behaviour is exactly the one of 0.4.0.
+- **Where to change it.** Settings → Auto-restart & shut down → *Wait a few more seconds after the
+  work is done*. The status interfaces report it too: `GET /health?state=1`, `GET /health?gate=1`,
+  `continuum_status` and `GET /sleep` all carry `graceMs` (the configured window) and `quietForMs`
+  (how long the host has actually been quiet).
 
 ### Platform note
 

@@ -1105,7 +1105,9 @@ const settleClient = () => new Promise((resolve) => setTimeout(resolve, 5))
 /**
  * Load the classic client script in a sandbox and mount its surfaces.
  *
- * @param {{ status?: object, storage?: object, language?: string, refuseArm?: object, failChoice?: boolean, sessionStorage?: object, fakeTimers?: boolean }} options
+ * @param {{ status?: object, storage?: object, language?: string, refuseArm?: object, failChoice?: boolean, sessionStorage?: object, fakeTimers?: boolean, sections?: { id: string, order: number }[] }} options
+ *   `sections` are the settings sections other plugins registered before this
+ *   one (the section order is computed from them).
  */
 function mountClient({
   status = null,
@@ -1115,6 +1117,7 @@ function mountClient({
   failChoice = false,
   sessionStorage = createStorage(),
   fakeTimers = false,
+  sections = [],
 } = {}) {
   const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   let definition = null
@@ -1216,6 +1219,12 @@ function mountClient({
   const module = definition.factory(() => harness.React)
   const dictionaries = {}
   const slots = new Map()
+  // The entries other plugins registered in a slot before this one: the
+  // section order is computed from them (the messager algorithm).
+  const presetEntries = sections.map((entry) => ({
+    options: { name: 'settings.section', id: entry.id, order: entry.order },
+  }))
+  const registeredEntries = []
   module.apply({
     effect: (fn) => { fn(); return () => {} },
     locale: {
@@ -1226,14 +1235,43 @@ function mountClient({
       },
     },
     slots: {
-      inject: (name, thunk) => { slots.set(name, thunk) },
-      register: (registration, Component) => ({ registration, Component }),
+      inject: (name, thunk) => { slots.set(name, { thunk, done: false, result: undefined }) },
+      // The DSH slots service: `entries(key)` returns the entries of that
+      // slot, `register(options, component)` records one and returns its
+      // disposer.
+      entries: (key) => [
+        ...presetEntries.filter((entry) => entry.options.name === key),
+        ...registeredEntries.filter((entry) => entry.options.name === key),
+      ],
+      register: (registration, Component) => {
+        const entry = { options: registration, Component }
+        registeredEntries.push(entry)
+        const dispose = () => {
+          const index = registeredEntries.indexOf(entry)
+          if (index !== -1) registeredEntries.splice(index, 1)
+        }
+        // The real `register()` returns its disposer; the tests need the
+        // entry too, so the disposer carries it.
+        dispose.entry = entry
+        return dispose
+      },
     },
   })
   const componentOf = (name) => {
-    const thunk = slots.get(name)
-    assert.ok(thunk, `the slot ${name} must be registered`)
-    return thunk()
+    const slot = slots.get(name)
+    assert.ok(slot, `the slot ${name} must be registered`)
+    if (!slot.done) {
+      const produced = slot.thunk()
+      // The thunk may be a GENERATOR (the messager pattern): the DSH slots
+      // service runs it through `ctx.effect`, which iterates the yielded
+      // disposers. The first yield is the registration itself.
+      slot.result = (produced && typeof produced.next === 'function')
+        ? produced.next().value
+        : produced
+      slot.done = true
+    }
+    assert.ok(slot.result && slot.result.entry, `the slot ${name} must yield its registration`)
+    return slot.result.entry
   }
   return {
     fetches,
@@ -1256,6 +1294,10 @@ function mountClient({
       await settleClient()
     },
     render: (name, props) => harness.render(componentOf(name).Component, props || {}),
+    // The registration options of a slot (the entry the Host would read).
+    slot: (name) => componentOf(name).options,
+    // The registration options of the settings section.
+    section: () => componentOf('settings.section').options,
     // Render, let the shared poll deliver the status, render again.
     settled: async (name, props) => {
       harness.render(componentOf(name).Component, props || {})
@@ -1334,7 +1376,7 @@ test('the button lives at the foot of the sidebar, not in the conversation heade
     mounted.slots.has('sidebar.footer.action'),
     'the button must be registered in sidebar.footer.action',
   )
-  const registration = mounted.slots.get('sidebar.footer.action')().registration
+  const registration = mounted.slot('sidebar.footer.action')
   assert.equal(registration.name, 'sidebar.footer.action')
   assert.equal(registration.id, 'autorestart-sleep-button', 'the list slot needs its own id')
   assert.equal(typeof registration.order, 'number', 'the list slot needs an order')
@@ -1498,19 +1540,67 @@ test('a refused request is shown, never silent', async () => {
   assert.equal(mounted.reloads.count, 0, 'a failure never reloads the page')
 })
 
-test('the plugin registers a configuration page for its own row', async () => {
+test('the plugin registers a section of its own in the settings page', async () => {
   const mounted = mountClient({
     status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], countdownSeconds: 20 },
   })
-  const entry = mounted.slots.get('plugins.row.config')
-  assert.ok(entry, 'the configuration slot must be registered')
-  const registration = entry().registration
-  assert.equal(registration.name, 'plugins.row.config')
-  assert.equal(registration.key, 'dsh-autorestart#dsh-autorestart')
+  const slot = mounted.slots.get('settings.section')
+  assert.ok(slot, 'the settings.section slot must be registered')
+  const registration = mounted.section()
+  assert.equal(registration.name, 'settings.section')
+  assert.equal(registration.id, 'dsh-autorestart')
   assert.equal(registration.locale, 'dshAutorestart')
+  assert.equal(typeof registration.order, 'number')
+  assert.equal(typeof registration.label, 'function')
+  assert.equal(registration.label(), '自动重启与关机', 'the section carries the Chinese label')
+  assert.equal(typeof registration.inject, 'function', 'the section injects its own props')
+  assert.equal(typeof registration.inject().t, 'function', 'the translator is injected')
 })
 
-test('the configuration page shows exactly the three settings, with the Host values', async () => {
+test('the section carries the English label in an English UI', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], countdownSeconds: 20 },
+    language: 'en',
+  })
+  assert.equal(mounted.section().label(), 'Auto-restart & shut down')
+})
+
+test('the old plugin-details panel is gone — there is only ONE entrance', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], countdownSeconds: 20 },
+  })
+  assert.equal(
+    mounted.slots.has('plugins.row.config'),
+    false,
+    'the row-config panel must not be registered any more',
+  )
+  assert.ok(mounted.slots.has('settings.section'), 'the settings section must be there instead')
+})
+
+test('the section sits right below the Agent presets', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
+    sections: [{ id: 'agent-presets', order: 10 }],
+  })
+  assert.equal(mounted.section().order, 11, 'the section follows the Agent presets')
+})
+
+test('without the Agent presets the section follows the sections that are there', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
+    sections: [{ id: 'other', order: 5 }],
+  })
+  assert.equal(mounted.section().order, 6, 'the section follows the last one')
+})
+
+test('an empty settings page puts the section at the end', async () => {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
+  })
+  assert.equal(mounted.section().order, 1000, 'the fallback order is the big number')
+})
+
+test('the section shows exactly the three settings, with the Host values', async () => {
   const mounted = mountClient({
     status: {
       ok: true,
@@ -1522,19 +1612,19 @@ test('the configuration page shows exactly the three settings, with the Host val
       backupIncludePlugins: false,
     },
   })
-  const panel = await mounted.settled('plugins.row.config')
-  assert.ok(panel, 'the configuration page must be rendered')
+  const panel = await mounted.settled('settings.section')
+  assert.ok(panel, 'the settings section must be rendered')
 
   // 1. the countdown dropdown
   const selects = walk(panel).filter((node) => node.type === 'select')
-  assert.equal(selects.length, 1, 'the page has exactly one dropdown')
+  assert.equal(selects.length, 1, 'the section has exactly one dropdown')
   assert.equal(selects[0].props.value, '30', 'the dropdown shows the countdown the Host reports')
   const secondsOptions = walk(selects[0]).filter((node) => node.type === 'option').map((node) => node.props.value)
   assert.deepEqual(secondsOptions, ['0', '10', '20', '30', '60'])
 
   // 2. and 3. the two backup switches
   const switches = walk(panel).filter((node) => node.type === 'input')
-  assert.equal(switches.length, 2, 'the page has exactly two switches')
+  assert.equal(switches.length, 2, 'the section has exactly two switches')
   const byKey = new Map(switches.map((node) => [node.props['data-dsh-autorestart-setting'], node]))
   assert.deepEqual([...byKey.keys()], ['backupOnRestart', 'backupIncludePlugins'])
   assert.equal(byKey.get('backupOnRestart').props.checked, true)
@@ -1552,7 +1642,7 @@ test('the countdown length is written into the profile configuration and read ba
   const mounted = mountClient({
     status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], countdownSeconds: 20 },
   })
-  const panel = await mounted.settled('plugins.row.config')
+  const panel = await mounted.settled('settings.section')
   const selects = walk(panel).filter((node) => node.type === 'select')
   selects[0].props.onChange({ target: { value: '60' } })
   await settleClient()
@@ -1562,7 +1652,7 @@ test('the countdown length is written into the profile configuration and read ba
   )
   assert.equal(posts.length, 1)
   assert.deepEqual(JSON.parse(posts[0].init.body), { sleepCountdownSeconds: 60 })
-  const after = mounted.render('plugins.row.config')
+  const after = mounted.render('settings.section')
   const again = walk(after).filter((node) => node.type === 'select')
   assert.equal(again[0].props.value, '60')
 })
@@ -1579,7 +1669,7 @@ test('the pre-restart backup switch is written into the profile configuration an
       backupIncludePlugins: true,
     },
   })
-  const panel = await mounted.settled('plugins.row.config')
+  const panel = await mounted.settled('settings.section')
   const switches = walk(panel).filter((node) => node.type === 'input')
   const backup = switches.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupOnRestart')
   backup.props.onChange({ target: { checked: false } })
@@ -1592,7 +1682,7 @@ test('the pre-restart backup switch is written into the profile configuration an
   assert.deepEqual(JSON.parse(posts[0].init.body), { backupOnRestart: false })
 
   // The new value is read back from the Host.
-  const after = mounted.render('plugins.row.config')
+  const after = mounted.render('settings.section')
   const again = walk(after).filter((node) => node.type === 'input')
   const againBackup = again.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupOnRestart')
   assert.equal(againBackup.props.checked, false, 'the page must show the value the Host took')
@@ -1610,7 +1700,7 @@ test('the backup scope switch is written into the profile configuration and read
       backupIncludePlugins: true,
     },
   })
-  const panel = await mounted.settled('plugins.row.config')
+  const panel = await mounted.settled('settings.section')
   const switches = walk(panel).filter((node) => node.type === 'input')
   const plugins = switches.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupIncludePlugins')
   plugins.props.onChange({ target: { checked: false } })
@@ -1622,7 +1712,7 @@ test('the backup scope switch is written into the profile configuration and read
   assert.equal(posts.length, 1, 'the change must be written once')
   assert.deepEqual(JSON.parse(posts[0].init.body), { backupIncludePlugins: false })
 
-  const after = mounted.render('plugins.row.config')
+  const after = mounted.render('settings.section')
   const again = walk(after).filter((node) => node.type === 'input')
   const againPlugins = again.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupIncludePlugins')
   assert.equal(againPlugins.props.checked, false, 'the page must show the value the Host took')
@@ -1640,7 +1730,7 @@ test('without a pre-restart backup the plugin scope is greyed out', async () => 
       backupIncludePlugins: true,
     },
   })
-  const panel = await mounted.settled('plugins.row.config')
+  const panel = await mounted.settled('settings.section')
   const switches = walk(panel).filter((node) => node.type === 'input')
   const backup = switches.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupOnRestart')
   const plugins = switches.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupIncludePlugins')
@@ -1648,17 +1738,17 @@ test('without a pre-restart backup the plugin scope is greyed out', async () => 
   assert.equal(plugins.props.disabled, true, 'the plugin scope is greyed out without a backup')
 })
 
-test('a failed save shows the error on the configuration page', async () => {
+test('a failed save shows the error in the section', async () => {
   const mounted = mountClient({
     status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], countdownSeconds: 20 },
     failChoice: true,
   })
-  const panel = await mounted.settled('plugins.row.config')
+  const panel = await mounted.settled('settings.section')
   const selects = walk(panel).filter((node) => node.type === 'select')
   selects[0].props.onChange({ target: { value: '60' } })
   await settleClient()
 
-  const after = mounted.render('plugins.row.config')
+  const after = mounted.render('settings.section')
   const shown = textOf(after)
   assert.ok(shown.includes('没能保存设置'), `the failure must be visible: ${shown}`)
   assert.ok(shown.includes('config-write-failed'), `the reason must be visible: ${shown}`)

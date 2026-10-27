@@ -17,7 +17,7 @@
     "dismissAria": "Close this one-time prompt"
   },
   "settings": {
-    "summary": "Stand-by: {seconds} countdown",
+    "nav": "Auto-restart & shut down",
     "seconds": {
       "label": "Countdown seconds",
       "immediate": "No countdown (switch off right away)",

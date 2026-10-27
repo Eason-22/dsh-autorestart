@@ -171,7 +171,8 @@ const ZH = {
   'sleep.button.titleImmediate': '等所有会话收工后立即关机（不倒数）',
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
-  'settings.summary': '收工关机：倒数 {seconds}',
+  // The settings section: the entry in the settings sidebar.
+  'nav': '自动重启与关机',
   'settings.seconds.label': '倒计时秒数',
   'settings.seconds.immediate': '不倒数（立即关机）',
   'settings.seconds.value': '{n} 秒',
@@ -292,7 +293,8 @@ const EN = {
   'sleep.button.titleImmediate': 'Waits for every session to finish, then powers off right away (no countdown)',
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
-  'settings.summary': 'Stand-by: {seconds} countdown',
+  // The settings section: the entry in the settings sidebar.
+  'nav': 'Auto-restart & shut down',
   'settings.seconds.label': 'Countdown seconds',
   'settings.seconds.immediate': 'No countdown (switch off right away)',
   'settings.seconds.value': '{n} seconds',
@@ -2071,7 +2073,6 @@ if (moduleLoader) moduleLoader.load({
       '}',
       // The configuration page of the plugin row.
       '.dsh-autorestart-settings{display:flex;flex-direction:column;gap:14px;}',
-      '.dsh-autorestart-settings__summary{margin:0;font-size:13px;line-height:18px;}',
       '.dsh-autorestart-settings__field{display:flex;flex-direction:column;gap:4px;}',
       '.dsh-autorestart-settings__label{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary);}',
       '.dsh-autorestart-settings__select{',
@@ -2226,10 +2227,12 @@ if (moduleLoader) moduleLoader.load({
      * @param {{ wide?: boolean }} [props] the sidebar's column state
      */
     /**
-     * The configuration page of the plugin (the "Plugins → Autorestart" row).
+     * The settings section of the plugin (the "Auto-restart & shut down" entry
+     * in the settings sidebar).
      *
-     * The Host renders this page for the row `dsh-autorestart#dsh-autorestart`.
-     * It carries exactly the three settings that matter:
+     * The Host renders this section for the slot `settings.section` with the
+     * id `dsh-autorestart`. It carries exactly the three settings that
+     * matter:
      *
      *   - how long the countdown runs (a dropdown),
      *   - whether the pre-restart backup is taken at all (a switch),
@@ -2237,13 +2240,12 @@ if (moduleLoader) moduleLoader.load({
      *
      * A change is written to the profile configuration at once (through the
      * plugin's own choice route, which uses the official `configEditor`
-     * service), and the panel reads the new values back from the Host.
+     * service), and the section reads the new values back from the Host.
      *
      * @param {object} props the Host's props: `t` (the translator of the
-     *   registered locale) and `view` ('page' for the form, 'summary' for the
-     *   one-line version under the title)
+     *   registered locale, injected by the section registration)
      */
-    function SleepSettingsPanel(props) {
+    function AutorestartSection(props) {
       const status = useSleepStatus()
       const info = useSharedInfo(true)
       const [busy, setBusy] = useState(false)
@@ -2267,19 +2269,6 @@ if (moduleLoader) moduleLoader.load({
       const backupIncludePlugins = status && typeof status === 'object' && typeof status.backupIncludePlugins === 'boolean'
         ? status.backupIncludePlugins
         : true
-
-      const secondsText = seconds === 0
-        ? t('settings.seconds.immediate')
-        : fill(t('settings.seconds.value'), { n: seconds })
-
-      // The summary view: one line under the title.
-      if (props && props.view === 'summary') {
-        return h(
-          'p',
-          { className: 'dsh-autorestart-settings__summary' },
-          fill(t('settings.summary'), { seconds: secondsText }),
-        )
-      }
 
       /**
        * Write one change into the profile configuration.
@@ -3054,14 +3043,33 @@ if (moduleLoader) moduleLoader.load({
         // sidebar hands the column state to it, so the collapsed rail shows
         // the icon only.
         ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'autorestart-sleep-button', order: 10, locale: NS }, SleepButton))
-        // The configuration page of the row `dsh-autorestart#dsh-autorestart`
-        // (the row id comes from the profile patch): how long the countdown
-        // runs, and the scope of the pre-restart backup.
-        ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
-          name: 'plugins.row.config',
-          key: 'dsh-autorestart#dsh-autorestart',
-          locale: NS,
-        }, SleepSettingsPanel))
+        // The settings section of the plugin: an entry of its own in the
+        // settings sidebar ("Auto-restart & shut down"), right below the
+        // Agent presets. The three controls live inside it, so the user does
+        // not have to dig through the plugin details.
+        //
+        // The order is computed at registration time: right after
+        // `agent-presets` when that section exists, otherwise after the
+        // sections that are registered already; 1000 when there is none.
+        // That is "naturally last" without hard-coding a number.
+        ctx.slots.inject('settings.section', function* () {
+          const existing = ctx.slots.entries('settings.section')
+          const agentPresets = existing.find((entry) => entry.options.id === 'agent-presets')
+          const maxOrder = existing.reduce((max, entry) => Math.max(max, entry.options.order ?? 0), 0)
+          const order = agentPresets !== undefined
+            ? (agentPresets.options.order ?? 0) + 1
+            : existing.length > 0
+              ? maxOrder + 1
+              : 1000
+          yield ctx.slots.register({
+            name: 'settings.section',
+            id: 'dsh-autorestart',
+            order,
+            label: () => t('nav'),
+            locale: NS,
+            inject: () => ({ t }),
+          }, AutorestartSection)
+        })
         // The countdown overlay: a frame-wide floating layer above every
         // column.
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-sleep-overlay', order: 60 }, SleepOverlay))

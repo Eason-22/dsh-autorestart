@@ -17,18 +17,20 @@
     "dismissAria": "Close this one-time prompt"
   },
   "settings": {
-    "summary": "Stand-by: {controller} · {seconds} countdown",
-    "controller": {
-      "label": "Who may use this button",
-      "human": "Only I may click it",
-      "anyone": "AI and scripts may use it too",
-      "hint": "With \"only I may click it\": scripts and the AI can neither switch the machine off nor cancel a running countdown."
-    },
+    "summary": "Stand-by: {seconds} countdown",
     "seconds": {
       "label": "Countdown seconds",
       "immediate": "No countdown (switch off right away)",
       "value": "{n} seconds",
       "hint": "After the button: wait for every conversation to be done, count down this many seconds and switch off. \"No countdown\" switches off as soon as the conversations are done."
+    },
+    "backup": {
+      "label": "Backup before a restart",
+      "hint": "Take a snapshot of the current configuration before every restart, so a host that cannot boot again is rolled back automatically."
+    },
+    "backupPlugins": {
+      "label": "Include the installed plugins in the backup",
+      "hint": "Off: only the state of DSH itself is backed up — the plugin directory of the profile is left out."
     },
     "error": "Could not save the settings: {message}"
   },
@@ -42,7 +44,6 @@
       "busy": "Getting ready…"
     },
     "error": "Could not reach the sleep service: {message}",
-    "ticketHint": "This page has no ticket yet — click once and it refreshes itself.",
     "dryRun": {
       "title": "Dry run: the machine stays on",
       "body": "The rehearsal is over. This is the command it WOULD have run (nothing was executed):",

@@ -114,37 +114,6 @@ const SLEEP_DEFAULT_COUNTDOWN_SECONDS = 20
 /** How long the note of a finished rehearsal stays on screen (ms). */
 const SLEEP_DRY_RUN_NOTICE_MS = 8_000
 
-/**
- * The sessionStorage keys of the single-click flow.
- *
- * `pendingArm` / `pendingCancel` carry the intent of a click that could not
- * be carried out (the page had no ticket), `reloaded` remembers that the
- * page already reloaded itself once — that is what keeps the flow from
- * looping.
- */
-const PENDING_ARM_KEY = 'dsh-autorestart-pending-arm'
-const PENDING_CANCEL_KEY = 'dsh-autorestart-pending-cancel'
-const RELOADED_KEY = 'dsh-autorestart-reloaded'
-
-/**
- * The reasons that mean: the page needs a fresh ticket.
- *
- * The ticket lives in the page and is good for one request, so a spent or
- * expired one is fixed by a fresh page — not by another attempt.
- */
-const SLEEP_TICKET_REASONS = ['no-ticket', 'bad-ticket', 'expired-ticket', 'replayed-ticket']
-
-/**
- * Whether a refusal means "this page has no usable ticket".
- *
- * @param {object} failure the error of the refused request
- * @returns {boolean}
- */
-function isTicketProblem(failure) {
-  if (!failure || typeof failure.reason !== 'string') return false
-  return SLEEP_TICKET_REASONS.indexOf(failure.reason) !== -1
-}
-
 const ZH = {
   label: '待重启',
   busyPrefix: ' · 被 ',
@@ -202,17 +171,16 @@ const ZH = {
   'sleep.button.titleImmediate': '等所有会话收工后立即关机（不倒数）',
   'sleep.button.busy': '准备中…',
   'sleep.error': '没能联系上关机服务：{message}',
-  'settings.summary': '收工关机：{controller} · 倒数 {seconds}',
-  'settings.controller.label': '谁能用这个按钮',
-  'settings.controller.human': '只有我能点',
-  'settings.controller.anyone': 'AI 和脚本也能用',
-  'settings.controller.hint': '「只有我能点」时：脚本和 AI 点不动这个按钮，也取消不了正在进行的倒数。',
+  'settings.summary': '收工关机：倒数 {seconds}',
   'settings.seconds.label': '倒计时秒数',
   'settings.seconds.immediate': '不倒数（立即关机）',
   'settings.seconds.value': '{n} 秒',
   'settings.seconds.hint': '按下按钮后，等所有会话收工，再倒数这么多秒才关机；「不倒数」表示会话一收工就关机。',
+  'settings.backup.label': '重启前备份',
+  'settings.backup.hint': '每次重启前先快照一次当前配置；万一重启后起不来，能自动回退。',
+  'settings.backupPlugins.label': '备份包含已安装插件',
+  'settings.backupPlugins.hint': '关闭后只备份 DSH 自身状态，不含 profile 里的插件目录。',
   'settings.error': '没能保存设置：{message}',
-  'sleep.ticketHint': '这个页面还没拿到票据，点一下会自动刷新一次。',
   'sleep.dryRun.title': '试运行：不会真的关机',
   'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
   'sleep.dryRun.close': '知道了',
@@ -324,17 +292,16 @@ const EN = {
   'sleep.button.titleImmediate': 'Waits for every session to finish, then powers off right away (no countdown)',
   'sleep.button.busy': 'Getting ready…',
   'sleep.error': 'Could not reach the sleep service: {message}',
-  'settings.summary': 'Stand-by: {controller} · {seconds} countdown',
-  'settings.controller.label': 'Who may use this button',
-  'settings.controller.human': 'Only I may click it',
-  'settings.controller.anyone': 'AI and scripts may use it too',
-  'settings.controller.hint': 'With "only I may click it": scripts and the AI can neither switch the machine off nor cancel a running countdown.',
+  'settings.summary': 'Stand-by: {seconds} countdown',
   'settings.seconds.label': 'Countdown seconds',
   'settings.seconds.immediate': 'No countdown (switch off right away)',
   'settings.seconds.value': '{n} seconds',
   'settings.seconds.hint': 'After the button: wait for every conversation to be done, count down this many seconds and switch off. "No countdown" switches off as soon as the conversations are done.',
+  'settings.backup.label': 'Backup before a restart',
+  'settings.backup.hint': 'Take a snapshot of the current configuration before every restart, so a host that cannot boot again is rolled back automatically.',
+  'settings.backupPlugins.label': 'Include the installed plugins in the backup',
+  'settings.backupPlugins.hint': 'Off: only the state of DSH itself is backed up — the plugin directory of the profile is left out.',
   'settings.error': 'Could not save the settings: {message}',
-  'sleep.ticketHint': 'This page has no ticket yet — click once and it refreshes itself.',
   'sleep.dryRun.title': 'Dry run: the machine stays on',
   'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
   'sleep.dryRun.close': 'Got it',
@@ -1714,184 +1681,20 @@ if (moduleLoader) moduleLoader.load({
       timer: null,
       inFlight: false,
       controller: null,
-      // The static hint under the button (the page has no ticket and the
-      // reload did not help).
-      hint: false,
       // When the current status was received: the countdown runs on this
       // clock, so the big number keeps moving between two polls.
       at: 0,
     }
 
     /**
-     * The one-time ticket the host injected into this page.
-     *
-     * In the `human` mode the host only accepts a request that carries it,
-     * so a shell script can neither switch the machine off nor cancel a
-     * running countdown.
-     *
-     * @returns {{ ticket: string, issuedAt: number }|null}
-     */
-    /**
-     * The one-time ticket of this page.
-     *
-     * The host puts it into a `<meta>` tag, because the CSP of the host
-     * (`script-src 'nonce-…'`) never executes an inline script without that
-     * nonce — a ticket in a script would simply never arrive. A `<meta>` is
-     * not script, so it gets through.
-     *
-     * `window.__DSH_SLEEP_TICKET__` stays as a fallback for a host that
-     * still injects the old way.
-     *
-     * @returns {{ ticket: string, issuedAt: number }|null}
-     */
-    function sleepTicket() {
-      const fromMeta = readTicketFromMeta()
-      if (fromMeta) return fromMeta
-      if (typeof window === 'undefined') return null
-      const grant = window.__DSH_SLEEP_TICKET__
-      if (!grant || typeof grant !== 'object') return null
-      if (typeof grant.ticket !== 'string' || grant.ticket === '') return null
-      return { ticket: grant.ticket, issuedAt: Number(grant.issuedAt) || 0 }
-    }
-
-    /**
-     * The ticket out of the `<meta>` tag the host injected.
-     *
-     * @returns {{ ticket: string, issuedAt: number }|null}
-     */
-    function readTicketFromMeta() {
-      try {
-        if (typeof document === 'undefined') return null
-        if (typeof document.querySelector !== 'function') return null
-        const meta = document.querySelector('meta[name="dsh-autorestart-sleep-ticket"]')
-        if (!meta || typeof meta.getAttribute !== 'function') return null
-        const raw = meta.getAttribute('content')
-        if (typeof raw !== 'string' || raw === '') return null
-        const grant = JSON.parse(raw)
-        if (!grant || typeof grant !== 'object') return null
-        if (typeof grant.ticket !== 'string' || grant.ticket === '') return null
-        return { ticket: grant.ticket, issuedAt: Number(grant.issuedAt) || 0 }
-      } catch {
-        // A broken tag is no ticket: the click then takes the reload path.
-        return null
-      }
-    }
-
-    /**
-     * The intent the user left behind before the page reloaded itself.
-     *
-     * A page that was opened before the plugin was updated has no ticket, so
-     * the click could not arm the machine. The client writes the intent,
-     * reloads the page once and the new page carries it out — the user
-     * clicks ONCE.
-     *
-     * @returns {'arm'|'cancel'|null} the intent (and clears it)
-     */
-    function readPendingIntent() {
-      try {
-        if (typeof window === 'undefined' || !window.sessionStorage) return null
-        const arm = window.sessionStorage.getItem(PENDING_ARM_KEY) === '1'
-        const cancel = window.sessionStorage.getItem(PENDING_CANCEL_KEY) === '1'
-        if (!arm && !cancel) return null
-        window.sessionStorage.removeItem(PENDING_ARM_KEY)
-        window.sessionStorage.removeItem(PENDING_CANCEL_KEY)
-        return arm ? 'arm' : 'cancel'
-      } catch {
-        return null
-      }
-    }
-
-    /**
-     * Remember the intent and reload the page once.
-     *
-     * @param {'arm'|'cancel'} intent
-     * @returns {boolean} true when the page is reloading now
-     */
-    function deferIntent(intent) {
-      try {
-        if (typeof window === 'undefined' || !window.sessionStorage || !window.location) return false
-        // The page already reloaded itself once for this problem: do not
-        // reload again, that would be a loop.
-        if (window.sessionStorage.getItem(RELOADED_KEY) === '1') return false
-        window.sessionStorage.setItem(RELOADED_KEY, '1')
-        window.sessionStorage.setItem(
-          intent === 'cancel' ? PENDING_CANCEL_KEY : PENDING_ARM_KEY,
-          '1',
-        )
-        window.location.reload()
-        return true
-      } catch {
-        return false
-      }
-    }
-
-    /** The reload marker is only about one reload: a carried-out intent clears it. */
-    function clearReloadMarker() {
-      try {
-        if (typeof window === 'undefined' || !window.sessionStorage) return
-        window.sessionStorage.removeItem(RELOADED_KEY)
-      } catch {
-        // Nothing to clear.
-      }
-    }
-
-    /**
-     * Carry out the intent the page was reloaded for.
-     *
-     * The new page holds a fresh ticket, so the arm (or the cancel) goes
-     * through. If the page still has no ticket the hint is shown instead —
-     * once, without any further action.
-     */
-    async function flushPendingIntent() {
-      const intent = readPendingIntent()
-      if (intent === null) return
-      const grant = sleepTicket()
-      if (!grant) {
-        sleepStore.hint = true
-        return
-      }
-      try {
-        await requestSleep(intent, { 'x-dsh-sleep-ticket': grant.ticket })
-        clearReloadMarker()
-      } catch (failure) {
-        sleepStore.hint = true
-      }
-    }
-
-    /**
      * Carry out one intent ('arm' or 'cancel').
      *
-     * In the `human` mode the host only accepts a request that carries the
-     * page's one-time ticket. Without it the click cannot do anything, so
-     * the client remembers the intent, reloads the page once and the new
-     * page (with a fresh ticket) carries it out — the user clicks ONCE.
-     *
-     * When the reload did not help either, the static hint appears and
-     * nothing else happens.
+     * There is no ticket and no ceremony: the request carries nothing but the
+     * action, so the desktop client and the hosted web client drive exactly
+     * the same route.
      */
     async function driveSleep(intent) {
-      const info = sleepStore.info
-      const controller = info && typeof info === 'object' && typeof info.controller === 'string'
-        ? info.controller
-        : 'human'
-      if (controller === 'anyone') {
-        // Anybody may drive it: no ticket, no reload.
-        return requestSleep(intent)
-      }
-      const grant = sleepTicket()
-      try {
-        if (grant) {
-          return await requestSleep(intent, { 'x-dsh-sleep-ticket': grant.ticket })
-        }
-      } catch (failure) {
-        // The ticket was spent (or it expired): the page needs a fresh one.
-        if (!isTicketProblem(failure)) throw failure
-      }
-      // The page has no (usable) ticket: remember the intent and reload once.
-      if (deferIntent(intent)) return null
-      // The reload did not help: say what to do, without acting again.
-      sleepStore.hint = true
-      return null
+      return requestSleep(intent)
     }
 
     /** Publish a new sleep status to every surface. */
@@ -1911,12 +1714,8 @@ if (moduleLoader) moduleLoader.load({
       if (sleepStore.inFlight) return
       sleepStore.inFlight = true
       try {
-        // The ticket travels with the poll: it is NOT spent by the status
-        // request, it only makes `ticketReady` meaningful for this page.
-        const grant = sleepTicket()
         const response = await fetch(DEFAULT_SLEEP_URL, {
           cache: 'no-store',
-          headers: grant ? { 'x-dsh-sleep-ticket': grant.ticket } : {},
           signal: sleepStore.controller ? sleepStore.controller.signal : undefined,
         })
         if (!response.ok) return
@@ -1969,13 +1768,8 @@ if (moduleLoader) moduleLoader.load({
      * @param {'arm'|'cancel'} action
      * @returns {Promise<object>} the new sleep status
      */
-    async function requestSleep(action, extraHeaders) {
+    async function requestSleep(action) {
       const headers = { 'content-type': 'application/json' }
-      if (extraHeaders && typeof extraHeaders === 'object') {
-        for (const [key, value] of Object.entries(extraHeaders)) {
-          if (typeof value === 'string' && value !== '') headers[key] = value
-        }
-      }
       const response = await fetch(DEFAULT_SLEEP_URL, {
         method: 'POST',
         headers,
@@ -2110,15 +1904,6 @@ if (moduleLoader) moduleLoader.load({
       '  max-width:100%;',
       '  padding:0 2px;',
       '  color:var(--dsw-alias-danger,#d14343);',
-      '  font-size:11.5px;',
-      '  line-height:15px;',
-      '  text-align:left;',
-      '}',
-      // The hint that says what to do when the page holds no ticket.
-      '.dsh-autorestart-sleep-button__hint{',
-      '  max-width:100%;',
-      '  padding:0 2px;',
-      '  color:var(--dsw-alias-label-secondary);',
       '  font-size:11.5px;',
       '  line-height:15px;',
       '  text-align:left;',
@@ -2300,6 +2085,15 @@ if (moduleLoader) moduleLoader.load({
       '  font-size:13px;',
       '}',
       '.dsh-autorestart-settings__hint{font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary);}',
+      // The two backup switches.
+      '.dsh-autorestart-settings__switch{',
+      '  width:16px;',
+      '  height:16px;',
+      '  margin:0;',
+      '  accent-color:var(--dsw-alias-brand-primary,#4d6bfe);',
+      '  cursor:pointer;',
+      '}',
+      '.dsh-autorestart-settings__switch:disabled{cursor:not-allowed;opacity:.5;}',
       '.dsh-autorestart-settings__error{',
       '  margin:0;',
       '  color:var(--dsw-alias-danger,#d14343);',
@@ -2434,12 +2228,16 @@ if (moduleLoader) moduleLoader.load({
     /**
      * The configuration page of the plugin (the "Plugins → Autorestart" row).
      *
-     * The Host renders this page for the row `dsh-autorestart#dsh-autorestart`:
-     * two dropdowns — who may drive the shutdown button, and how long the
-     * countdown runs. A change is written to the profile configuration at once
-     * (through the plugin's own choice route, which uses the official
-     * `configEditor` service), and the panel reads the new values back from
-     * the Host.
+     * The Host renders this page for the row `dsh-autorestart#dsh-autorestart`.
+     * It carries exactly the three settings that matter:
+     *
+     *   - how long the countdown runs (a dropdown),
+     *   - whether the pre-restart backup is taken at all (a switch),
+     *   - whether that backup also snapshots the installed plugins (a switch).
+     *
+     * A change is written to the profile configuration at once (through the
+     * plugin's own choice route, which uses the official `configEditor`
+     * service), and the panel reads the new values back from the Host.
      *
      * @param {object} props the Host's props: `t` (the translator of the
      *   registered locale) and `view` ('page' for the form, 'summary' for the
@@ -2456,19 +2254,20 @@ if (moduleLoader) moduleLoader.load({
 
       // The current values come from the Host, so the panel always shows what
       // is really in effect.
-      const controller = status && typeof status === 'object' && typeof status.controller === 'string'
-        ? status.controller
-        : 'human'
       const reported = status && typeof status === 'object' && typeof status.countdownSeconds === 'number'
         ? status.countdownSeconds
         : SLEEP_DEFAULT_COUNTDOWN_SECONDS
       const seconds = SLEEP_COUNTDOWN_CHOICES.indexOf(reported) === -1
         ? SLEEP_DEFAULT_COUNTDOWN_SECONDS
         : reported
+      // The two backup switches: the Host says what is in effect.
+      const backupOnRestart = status && typeof status === 'object' && typeof status.backupOnRestart === 'boolean'
+        ? status.backupOnRestart
+        : true
+      const backupIncludePlugins = status && typeof status === 'object' && typeof status.backupIncludePlugins === 'boolean'
+        ? status.backupIncludePlugins
+        : true
 
-      const controllerText = controller === 'anyone'
-        ? t('settings.controller.anyone')
-        : t('settings.controller.human')
       const secondsText = seconds === 0
         ? t('settings.seconds.immediate')
         : fill(t('settings.seconds.value'), { n: seconds })
@@ -2478,7 +2277,7 @@ if (moduleLoader) moduleLoader.load({
         return h(
           'p',
           { className: 'dsh-autorestart-settings__summary' },
-          fill(t('settings.summary'), { controller: controllerText, seconds: secondsText }),
+          fill(t('settings.summary'), { seconds: secondsText }),
         )
       }
 
@@ -2486,7 +2285,7 @@ if (moduleLoader) moduleLoader.load({
        * Write one change into the profile configuration.
        *
        * The Host answers with the effective values, and the panel reads them
-       * back with a fresh poll — so the dropdowns never show a value the
+       * back with a fresh poll — so the controls never show a value the
        * Host did not take.
        *
        * @param {object} changes the keys to write
@@ -2526,27 +2325,6 @@ if (moduleLoader) moduleLoader.load({
         h(
           'label',
           { className: 'dsh-autorestart-settings__field' },
-          h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.controller.label')),
-          h(
-            'select',
-            {
-              className: 'dsh-autorestart-settings__select',
-              value: controller,
-              disabled: busy,
-              'data-dsh-autorestart-setting': 'sleepController',
-              onChange: (event) => {
-                const value = event && event.target ? String(event.target.value) : ''
-                if (value !== controller) void save({ sleepController: value })
-              },
-            },
-            h('option', { value: 'human' }, t('settings.controller.human')),
-            h('option', { value: 'anyone' }, t('settings.controller.anyone')),
-          ),
-          h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.controller.hint')),
-        ),
-        h(
-          'label',
-          { className: 'dsh-autorestart-settings__field' },
           h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.seconds.label')),
           h(
             'select',
@@ -2568,6 +2346,50 @@ if (moduleLoader) moduleLoader.load({
             )),
           ),
           h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.seconds.hint')),
+        ),
+        h(
+          'label',
+          { className: 'dsh-autorestart-settings__field' },
+          h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.backup.label')),
+          h(
+            'input',
+            {
+              type: 'checkbox',
+              className: 'dsh-autorestart-settings__switch',
+              checked: backupOnRestart,
+              disabled: busy,
+              'data-dsh-autorestart-setting': 'backupOnRestart',
+              onChange: (event) => {
+                const value = Boolean(event && event.target ? event.target.checked : false)
+                if (value === backupOnRestart) return
+                void save({ backupOnRestart: value })
+              },
+            },
+          ),
+          h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.backup.hint')),
+        ),
+        h(
+          'label',
+          { className: 'dsh-autorestart-settings__field' },
+          h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.backupPlugins.label')),
+          h(
+            'input',
+            {
+              type: 'checkbox',
+              className: 'dsh-autorestart-settings__switch',
+              checked: backupIncludePlugins,
+              // Without a pre-restart backup there is nothing to extend: the
+              // switch is greyed out (and the Host never reads it).
+              disabled: busy || !backupOnRestart,
+              'data-dsh-autorestart-setting': 'backupIncludePlugins',
+              onChange: (event) => {
+                const value = Boolean(event && event.target ? event.target.checked : false)
+                if (value === backupIncludePlugins) return
+                void save({ backupIncludePlugins: value })
+              },
+            },
+          ),
+          h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.backupPlugins.hint')),
         ),
         error === ''
           ? null
@@ -2696,28 +2518,17 @@ if (moduleLoader) moduleLoader.load({
       )
 
       // A refused request is never silent: the reason is written under the
-      // button. The same is true for the hint that says what to do when the
-      // page has no ticket and the reload did not help.
-      const hint = sleepStore.hint ? t('sleep.ticketHint') : ''
-      if (!wide || (error === '' && hint === '')) return button
+      // button.
+      if (!wide || error === '') return button
       return h(
         'div',
         { className: 'dsh-autorestart-sleep-button__wrap' },
         button,
-        error === ''
-          ? null
-          : h(
-            'span',
-            { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
-            error,
-          ),
-        hint === ''
-          ? null
-          : h(
-            'span',
-            { className: 'dsh-autorestart-sleep-button__hint', role: 'alert' },
-            hint,
-          ),
+        h(
+          'span',
+          { className: 'dsh-autorestart-sleep-button__error', role: 'alert' },
+          error,
+        ),
       )
     }
 
@@ -3244,8 +3055,8 @@ if (moduleLoader) moduleLoader.load({
         // the icon only.
         ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register({ name: 'sidebar.footer.action', id: 'autorestart-sleep-button', order: 10, locale: NS }, SleepButton))
         // The configuration page of the row `dsh-autorestart#dsh-autorestart`
-        // (the row id comes from the profile patch): who may drive the
-        // shutdown button and how long the countdown runs.
+        // (the row id comes from the profile patch): how long the countdown
+        // runs, and the scope of the pre-restart backup.
         ctx.slots.inject('plugins.row.config', () => ctx.slots.register({
           name: 'plugins.row.config',
           key: 'dsh-autorestart#dsh-autorestart',
@@ -3254,10 +3065,6 @@ if (moduleLoader) moduleLoader.load({
         // The countdown overlay: a frame-wide floating layer above every
         // column.
         ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-sleep-overlay', order: 60 }, SleepOverlay))
-        // The page was reloaded for a click that could not be carried out
-        // (the old page held no ticket): carry that intent out now, so the
-        // user only had to click ONCE.
-        void flushPendingIntent()
       },
       // The named exports of this module (the client module system hands
       // `factory(require) -> exports` to every importer).

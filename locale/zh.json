@@ -17,18 +17,20 @@
     "dismissAria": "关闭这个一次性提示"
   },
   "settings": {
-    "summary": "收工关机：{controller} · 倒数 {seconds}",
-    "controller": {
-      "label": "谁能用这个按钮",
-      "human": "只有我能点",
-      "anyone": "AI 和脚本也能用",
-      "hint": "「只有我能点」时：脚本和 AI 点不动这个按钮，也取消不了正在进行的倒数。"
-    },
+    "summary": "收工关机：倒数 {seconds}",
     "seconds": {
       "label": "倒计时秒数",
       "immediate": "不倒数（立即关机）",
       "value": "{n} 秒",
       "hint": "按下按钮后，等所有会话收工，再倒数这么多秒才关机；「不倒数」表示会话一收工就关机。"
+    },
+    "backup": {
+      "label": "重启前备份",
+      "hint": "每次重启前先快照一次当前配置；万一重启后起不来，能自动回退。"
+    },
+    "backupPlugins": {
+      "label": "备份包含已安装插件",
+      "hint": "关闭后只备份 DSH 自身状态，不含 profile 里的插件目录。"
     },
     "error": "没能保存设置：{message}"
   },
@@ -42,7 +44,6 @@
       "busy": "准备中…"
     },
     "error": "没能联系上关机服务：{message}",
-    "ticketHint": "这个页面还没拿到票据，点一下会自动刷新一次。",
     "dryRun": {
       "title": "试运行：不会真的关机",
       "body": "彩排结束，本来会执行这条命令（真的什么都没执行）：",

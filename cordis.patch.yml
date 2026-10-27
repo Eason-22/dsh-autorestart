@@ -58,11 +58,6 @@
         # it). The plugin counts down itself, so the operating system is asked
         # to shut down immediately afterwards.
         sleepCountdownSeconds: 20
-        # Who may drive the graceful shutdown: `human` (the default — only the
-        # button in the page can arm it, and only the button can cancel it:
-        # a script or an agent can do neither) or `anyone` (everybody may:
-        # a plain POST arms or cancels).
-        sleepController: human
         # A custom shutdown command. Empty = the host is detected automatically
         # (Windows / WSL / Linux / macOS); a value replaces the detected command.
         sleepCommand: ''

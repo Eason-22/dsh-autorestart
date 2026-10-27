@@ -74,10 +74,6 @@ import {
   scheduleDetachedRestart,
 } from './lib/restart.js'
 import {
-  createGestureTickets,
-  describeTicketReason,
-} from './lib/ticket.js'
-import {
   createSleepController,
   COUNTDOWN_CHOICES,
   DEFAULT_COUNTDOWN_SECONDS,
@@ -266,11 +262,6 @@ function buildConfigSchema() {
         .default(DEFAULT_COUNTDOWN_SECONDS)
         .loose()
         .description('收工关机的倒计时秒数（下拉框：0 / 10 / 20 / 30 / 60 秒，默认 20；0 表示不倒数、立即关机，但仍会先等所有会话收工）。'),
-      // Who may switch the machine off? A union of the offered choices
-      // projects into an enum (the settings page renders a select).
-      sleepController: schemastery.union(['human', 'anyone']).default('human')
-        .loose()
-        .description('谁能触发「收工关机」：human（默认，只有页面里的按钮可以——脚本和 AI 既不能关机也不能取消）；anyone（任何人都可以，脚本直接 POST 就能武装或取消）。'),
       sleepCommand: schemastery.string().default('')
         .description('自定义关机命令：留空表示按系统自动识别（Windows / WSL / Linux / macOS），填了就用这条命令代替自动识别。'),
     })
@@ -317,9 +308,6 @@ const DEFAULTS = {
   // shutdown command (empty = the host is detected automatically).
   showSleepButton: true,
   sleepCountdownSeconds: DEFAULT_COUNTDOWN_SECONDS,
-  // Who may switch the machine off: only the page ('human') or anybody
-  // ('anyone', so a script can drive it too).
-  sleepController: 'human',
   sleepCommand: '',
 }
 
@@ -349,11 +337,6 @@ function normalizeConfig(raw) {
   // profile that still carries an old value (15, 45, …) is snapped onto the
   // nearest one instead of breaking, and 0 means "no countdown at all".
   config.sleepCountdownSeconds = snapCountdownChoice(config.sleepCountdownSeconds)
-  // Who may drive the shutdown: only the page ('human') or anybody
-  // ('anyone'). An old or broken profile value falls back to the safe one.
-  if (config.sleepController !== 'human' && config.sleepController !== 'anyone') {
-    config.sleepController = 'human'
-  }
   if (typeof config.sleepCommand !== 'string') config.sleepCommand = ''
   if (typeof config.showSleepButton !== 'boolean') config.showSleepButton = true
   return config
@@ -619,7 +602,7 @@ const INSTALL_CHOICE_FILE = 'install-choice.json'
  * Read the recorded install choice from the fallback file.
  *
  * @param {string} stateDir
- * @returns {{ includePlugins: boolean|null, showSleepButton: boolean|null, sleepController: string|null, sleepCountdownSeconds: number|null }|null}
+ * @returns {{ includePlugins: boolean|null, backupOnRestart: boolean|null, showSleepButton: boolean|null, sleepCountdownSeconds: number|null }|null}
  */
 function readInstallChoice(stateDir) {
   try {
@@ -628,8 +611,8 @@ function readInstallChoice(stateDir) {
     if (!parsed || typeof parsed !== 'object') return null
     return {
       includePlugins: typeof parsed.includePlugins === 'boolean' ? parsed.includePlugins : null,
+      backupOnRestart: typeof parsed.backupOnRestart === 'boolean' ? parsed.backupOnRestart : null,
       showSleepButton: typeof parsed.showSleepButton === 'boolean' ? parsed.showSleepButton : null,
-      sleepController: typeof parsed.sleepController === 'string' ? parsed.sleepController : null,
       sleepCountdownSeconds: typeof parsed.sleepCountdownSeconds === 'number'
         ? parsed.sleepCountdownSeconds
         : null,
@@ -646,21 +629,21 @@ function readInstallChoice(stateDir) {
  * erase the recorded backup scope (and the other way round).
  *
  * @param {string} stateDir
- * @param {{ includePlugins?: boolean, showSleepButton?: boolean, sleepController?: string, sleepCountdownSeconds?: number }} values
+ * @param {{ includePlugins?: boolean, backupOnRestart?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number }} values
  * @returns {string} the file that was written
  */
 function writeInstallChoice(stateDir, values) {
   const file = path.join(stateDir, INSTALL_CHOICE_FILE)
   const current = readInstallChoice(stateDir) || {
     includePlugins: null,
+    backupOnRestart: null,
     showSleepButton: null,
-    sleepController: null,
     sleepCountdownSeconds: null,
   }
   const payload = {
     includePlugins: typeof values.includePlugins === 'boolean' ? values.includePlugins : current.includePlugins,
+    backupOnRestart: typeof values.backupOnRestart === 'boolean' ? values.backupOnRestart : current.backupOnRestart,
     showSleepButton: typeof values.showSleepButton === 'boolean' ? values.showSleepButton : current.showSleepButton,
-    sleepController: typeof values.sleepController === 'string' ? values.sleepController : current.sleepController,
     sleepCountdownSeconds: typeof values.sleepCountdownSeconds === 'number'
       ? values.sleepCountdownSeconds
       : current.sleepCountdownSeconds,
@@ -694,6 +677,30 @@ export function resolveBackupIncludePlugins(rawConfig, stateDir) {
     return { includePlugins: fallback.includePlugins, source: 'fallback-file' }
   }
   return { includePlugins: DEFAULTS.backupIncludePlugins, source: 'default' }
+}
+
+/**
+ * Resolve the effective `backupOnRestart` value and where it came from.
+ *
+ * The same rule as the backup scope: the profile row config wins, the degraded
+ * fallback file fills the gap, and the built-in default applies when neither
+ * says anything.
+ *
+ * @param {object|null|undefined} rawConfig the loader row config, as received
+ * @param {string} stateDir
+ * @returns {{ backupOnRestart: boolean, source: 'config'|'fallback-file'|'default' }}
+ */
+export function resolveBackupOnRestart(rawConfig, stateDir) {
+  if (rawConfig && typeof rawConfig === 'object'
+    && Object.prototype.hasOwnProperty.call(rawConfig, 'backupOnRestart')
+    && typeof rawConfig.backupOnRestart === 'boolean') {
+    return { backupOnRestart: rawConfig.backupOnRestart, source: 'config' }
+  }
+  const fallback = typeof stateDir === 'string' && stateDir !== '' ? readInstallChoice(stateDir) : null
+  if (fallback !== null && fallback.backupOnRestart !== null) {
+    return { backupOnRestart: fallback.backupOnRestart, source: 'fallback-file' }
+  }
+  return { backupOnRestart: DEFAULTS.backupOnRestart, source: 'default' }
 }
 
 /**
@@ -1780,7 +1787,7 @@ export function createRuntime(ctx, config, options = {}) {
    * is unavailable the choice degrades to a file in the plugin's state
    * directory and a warning is logged, so the choice is never silently lost.
    *
-   * @param {{ backupIncludePlugins?: boolean, showSleepButton?: boolean, sleepController?: string, sleepCountdownSeconds?: number }} changes
+   * @param {{ backupOnRestart?: boolean, backupIncludePlugins?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number }} changes
    * @returns {Promise<{ applied: 'config'|'fallback-file' }>}
    */
   const persistConfigChoice = async (changes) => {
@@ -1793,13 +1800,13 @@ export function createRuntime(ctx, config, options = {}) {
       wanted.backupIncludePlugins = changes.backupIncludePlugins
       fallback.includePlugins = changes.backupIncludePlugins
     }
+    if (typeof changes.backupOnRestart === 'boolean') {
+      wanted.backupOnRestart = changes.backupOnRestart
+      fallback.backupOnRestart = changes.backupOnRestart
+    }
     if (typeof changes.showSleepButton === 'boolean') {
       wanted.showSleepButton = changes.showSleepButton
       fallback.showSleepButton = changes.showSleepButton
-    }
-    if (typeof changes.sleepController === 'string') {
-      wanted.sleepController = changes.sleepController
-      fallback.sleepController = changes.sleepController
     }
     if (typeof changes.sleepCountdownSeconds === 'number') {
       wanted.sleepCountdownSeconds = changes.sleepCountdownSeconds
@@ -1888,16 +1895,9 @@ export function createRuntime(ctx, config, options = {}) {
     log,
     persist,
     /**
-     * The one-time page tickets of this host start: the page gets one with
-     * every page load, and the host spends it when the button is used.
-     */
-    sleepTickets: typeof options.sleepTickets === 'object' && options.sleepTickets !== null
-      ? options.sleepTickets
-      : createGestureTickets(),
-    /**
      * Persist one or more user choices into the profile row of this plugin.
      *
-     * @param {{ backupIncludePlugins?: boolean, showSleepButton?: boolean }} changes
+     * @param {{ backupOnRestart?: boolean, backupIncludePlugins?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number }} changes
      * @returns {Promise<{ applied: 'config'|'fallback-file' }>}
      */
     applyConfigChoice: (changes) => persistConfigChoice(changes),
@@ -2936,52 +2936,6 @@ function injectPageHeartbeat(html, bootId, routePath) {
 }
 
 /**
- * Inject the one-time page ticket into the served index.
- *
- * The ticket is the proof that a request comes from a page this host
- * served: a shell script on the same machine cannot read it out of the
- * page, so it cannot drive the shutdown in the `human` mode.
- *
- * It travels in a `<meta>` tag, NOT in an inline `<script>`: the host sends
- * `content-security-policy: … script-src 'nonce-…'`, so an inline script
- * without that nonce is never executed — the ticket would stay undefined
- * and the button could never arm anything. A `<meta>` is not script, so the
- * CSP does not touch it.
- *
- * @param {string} html
- * @param {{ ticket: string, issuedAt: number }} grant
- * @returns {string}
- */
-function injectSleepTicket(html, grant) {
-  if (typeof html !== 'string') return html
-  if (html.includes('name="dsh-autorestart-sleep-ticket"')) return html
-  if (!grant || typeof grant.ticket !== 'string' || grant.ticket === '') return html
-  const payload = escapeHtmlAttribute(JSON.stringify({
-    ticket: grant.ticket,
-    issuedAt: grant.issuedAt,
-  }))
-  const meta = `<meta name="dsh-autorestart-sleep-ticket" content="${payload}">`
-  return html.includes('</head>') ? html.replace('</head>', `${meta}</head>`) : `${meta}${html}`
-}
-
-/**
- * Escape a value for an HTML attribute.
- *
- * `&`, `<`, `>` and the quotes must not end the attribute (or the tag).
- *
- * @param {string} value
- * @returns {string}
- */
-function escapeHtmlAttribute(value) {
-  return String(value)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
-/**
  * The system-prompt section that makes the restart policy discoverable to every agent:
  * call `continuum_restart` instead of killing the app by hand. This is a real Host hook,
  * so it applies without touching any AGENTS.md.
@@ -3452,13 +3406,14 @@ function buildHandoffRoute(ctx, runtime, config) {
  * Build the POST `/choice` route: persist the one-time install choice of the
  * user (whether the pre-restart backup also snapshots the installed plugins),
  * the answer to the one-time question whether the graceful-sleep button is
- * shown, and the two settings of the configuration page (who may drive the
- * shutdown and how long the countdown runs).
+ * shown, and the settings of the configuration page (how long the countdown
+ * runs, whether the pre-restart backup is taken at all and whether that
+ * backup includes the installed plugins).
  *
  * It sits next to the health route and uses the same authentication rule
  * (loopback OR a request the connection service admits). Body:
- * `{ "includePlugins"?: boolean, "showSleepButton"?: boolean,
- *   "sleepController"?: "human" | "anyone",
+ * `{ "includePlugins"?: boolean, "backupIncludePlugins"?: boolean,
+ *   "backupOnRestart"?: boolean, "showSleepButton"?: boolean,
  *   "sleepCountdownSeconds"?: 0 | 10 | 20 | 30 | 60 }` — at least one
  * of the keys must be present, and a key that IS present must carry a valid
  * value. Anything else is refused with a 400 and NOTHING is written.
@@ -3466,8 +3421,8 @@ function buildHandoffRoute(ctx, runtime, config) {
  * The answer is `{ ok: true, applied: 'config' | 'fallback-file', ... }`:
  * `applied` says where the choice landed — the profile configuration (the
  * official path) or the degraded fallback file. Only the keys that were asked
- * for are echoed back, plus the effective `controller` and
- * `countdownSeconds` so the settings page can read them back at once.
+ * for are echoed back, plus the effective `countdownSeconds` so the settings
+ * page can read them back at once.
  */
 function buildChoiceRoute(ctx, runtime, config) {
   const routePath = resolveChoicePath(config)
@@ -3496,10 +3451,11 @@ function buildChoiceRoute(ctx, runtime, config) {
       void readJsonBody(req).then(async (payload) => {
         const body = payload && typeof payload === 'object' ? payload : {}
         const hasInclude = Object.prototype.hasOwnProperty.call(body, 'includePlugins')
+        const hasBackupInclude = Object.prototype.hasOwnProperty.call(body, 'backupIncludePlugins')
+        const hasBackup = Object.prototype.hasOwnProperty.call(body, 'backupOnRestart')
         const hasShow = Object.prototype.hasOwnProperty.call(body, 'showSleepButton')
-        const hasController = Object.prototype.hasOwnProperty.call(body, 'sleepController')
         const hasSeconds = Object.prototype.hasOwnProperty.call(body, 'sleepCountdownSeconds')
-        if (!hasInclude && !hasShow && !hasController && !hasSeconds) {
+        if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasSeconds) {
           // No key was asked for: there is nothing to persist.
           res.statusCode = 400
           res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -3507,7 +3463,7 @@ function buildChoiceRoute(ctx, runtime, config) {
           res.end(JSON.stringify({
             ok: false,
             error: 'no-choice',
-            instruction: 'Send { "includePlugins": true | false } and/or { "showSleepButton": true | false } and/or { "sleepController": "human" | "anyone" } and/or { "sleepCountdownSeconds": 0 | 10 | 20 | 30 | 60 }.',
+            instruction: 'Send { "includePlugins": true | false } and/or { "backupIncludePlugins": true | false } and/or { "backupOnRestart": true | false } and/or { "showSleepButton": true | false } and/or { "sleepCountdownSeconds": 0 | 10 | 20 | 30 | 60 }.',
           }))
           return
         }
@@ -3524,6 +3480,28 @@ function buildChoiceRoute(ctx, runtime, config) {
           }))
           return
         }
+        if (hasBackupInclude && typeof body.backupIncludePlugins !== 'boolean') {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'backupIncludePlugins-must-be-boolean',
+            instruction: 'Send { "backupIncludePlugins": true | false }.',
+          }))
+          return
+        }
+        if (hasBackup && typeof body.backupOnRestart !== 'boolean') {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'backupOnRestart-must-be-boolean',
+            instruction: 'Send { "backupOnRestart": true | false }.',
+          }))
+          return
+        }
         if (hasShow && typeof body.showSleepButton !== 'boolean') {
           res.statusCode = 400
           res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -3532,17 +3510,6 @@ function buildChoiceRoute(ctx, runtime, config) {
             ok: false,
             error: 'showSleepButton-must-be-boolean',
             instruction: 'Send { "showSleepButton": true | false }.',
-          }))
-          return
-        }
-        if (hasController && body.sleepController !== 'human' && body.sleepController !== 'anyone') {
-          res.statusCode = 400
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.setHeader('cache-control', 'no-store')
-          res.end(JSON.stringify({
-            ok: false,
-            error: 'sleepController-must-be-human-or-anyone',
-            instruction: 'Send { "sleepController": "human" | "anyone" }.',
           }))
           return
         }
@@ -3561,14 +3528,16 @@ function buildChoiceRoute(ctx, runtime, config) {
         // The route field is `includePlugins`, the configuration key is
         // `backupIncludePlugins` (the profile row keeps the plugin's own name).
         if (hasInclude) changes.backupIncludePlugins = body.includePlugins === true
+        if (hasBackupInclude) changes.backupIncludePlugins = body.backupIncludePlugins === true
+        if (hasBackup) changes.backupOnRestart = body.backupOnRestart === true
         if (hasShow) changes.showSleepButton = body.showSleepButton === true
-        if (hasController) changes.sleepController = body.sleepController
         if (hasSeconds) changes.sleepCountdownSeconds = body.sleepCountdownSeconds
         const result = await runtime.applyConfigChoice(changes)
         const answer = { ok: true, applied: result.applied }
         if (hasInclude) answer.includePlugins = body.includePlugins === true
+        if (hasBackupInclude) answer.backupIncludePlugins = body.backupIncludePlugins === true
+        if (hasBackup) answer.backupOnRestart = body.backupOnRestart === true
         if (hasShow) answer.showSleepButton = body.showSleepButton === true
-        if (hasController) answer.sleepController = body.sleepController
         if (hasSeconds) answer.sleepCountdownSeconds = body.sleepCountdownSeconds
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -3759,11 +3728,9 @@ function createSleepService(ctx, runtime, config, options = {}) {
  *
  * @param {{ plan: object, controller: object, invocation: () => object }} sleep
  * @param {object} config
- * @param {object} runtime
- * @param {string} [ticket] the ticket the calling page holds (if any)
  * @returns {object}
  */
-function sleepStatusPayload(sleep, config, runtime, ticket) {
+function sleepStatusPayload(sleep, config) {
   const status = sleep.controller.status()
   const invocation = sleep.invocation()
   return {
@@ -3773,16 +3740,11 @@ function sleepStatusPayload(sleep, config, runtime, ticket) {
     showSleepButton: config.showSleepButton !== false,
     countdownSeconds: status.countdownSeconds,
     /**
-     * Who may drive the shutdown: 'human' (only the page) or 'anyone'.
+     * The pre-restart backup scope, straight from the effective configuration:
+     * the settings page reads its two switches from here.
      */
-    controller: config.sleepController === 'anyone' ? 'anyone' : 'human',
-    /**
-     * Whether the page that asked holds a usable ticket. The check does NOT
-     * spend it — it only answers "could this page drive the shutdown?".
-     */
-    ticketReady: runtime && runtime.sleepTickets
-      ? runtime.sleepTickets.check(ticket).ok === true
-      : false,
+    backupOnRestart: config.backupOnRestart !== false,
+    backupIncludePlugins: config.backupIncludePlugins !== false,
     remainingMs: status.remainingMs,
     blockers: status.blockers,
     host: {
@@ -3808,6 +3770,10 @@ function sleepStatusPayload(sleep, config, runtime, ticket) {
  * It sits next to the health route and uses the same authentication rule
  * (loopback OR a request the connection service admits). Body:
  * `{ "action": "arm" | "cancel" }`; anything else is refused with a 400.
+ *
+ * There is NO ticket and no extra header: the desktop client and the hosted
+ * web client drive the very same route, so a request carries nothing but the
+ * action itself.
  */
 function buildSleepRoute(ctx, runtime, config, sleep) {
   const routePath = resolveSleepPath(config)
@@ -3833,10 +3799,8 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
         res.end(JSON.stringify(payload))
       }
       const method = req && typeof req.method === 'string' ? req.method.toUpperCase() : 'GET'
-      const headers = req && req.headers && typeof req.headers === 'object' ? req.headers : {}
-      const pageTicket = typeof headers['x-dsh-sleep-ticket'] === 'string' ? headers['x-dsh-sleep-ticket'] : ''
       if (method === 'GET') {
-        answer(sleepStatusPayload(sleep, config, runtime, pageTicket))
+        answer(sleepStatusPayload(sleep, config))
         return
       }
       if (method !== 'POST') {
@@ -3857,30 +3821,12 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
           }, 400)
           return
         }
-        // In the 'human' mode only the page may drive the shutdown: BOTH
-        // arming and cancelling need the one-time ticket the host injected
-        // into that page. A shell script (or an agent) can therefore neither
-        // switch the machine off nor take a running countdown back.
-        if (config.sleepController !== 'anyone') {
-          const verdict = runtime.sleepTickets.consume(pageTicket)
-          if (verdict.ok !== true) {
-            const reason = typeof verdict.reason === 'string' ? verdict.reason : 'no-ticket'
-            answer({
-              ok: false,
-              error: 'page-ticket-required',
-              reason,
-              message: describeTicketReason(reason),
-              controller: 'human',
-            }, 403)
-            return
-          }
-        }
         if (action === 'arm') {
           sleep.controller.arm()
         } else {
           sleep.controller.cancel()
         }
-        answer(sleepStatusPayload(sleep, config, runtime))
+        answer(sleepStatusPayload(sleep, config))
       }).catch((error) => {
         answer({ ok: false, error: describeError(error) }, 400)
       })
@@ -4001,6 +3947,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // The route that persists the one-time install choice, plus the
             // value that is effective right now.
             choiceUrl: resolveChoicePath(config),
+            backupOnRestart: config.backupOnRestart !== false,
             backupIncludePlugins: config.backupIncludePlugins !== false,
             parkedGoals: parkedGoalList(runtime),
             recovery: recoveryList(live),
@@ -4017,6 +3964,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             parkUrl: resolveParkPath(config),
             recoverUrl: resolveRecoverPath(config),
             choiceUrl: resolveChoicePath(config),
+            backupOnRestart: config.backupOnRestart !== false,
             backupIncludePlugins: config.backupIncludePlugins !== false,
             parkedGoals: [],
             recovery: [],
@@ -4112,22 +4060,6 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
         target.effect(() => webServer.register(sleepRoute), 'dsh-autorestart: sleep route')
       } catch (error) {
         runtime.log.warn('could not register the sleep route:', String(error))
-      }
-    }
-    if (typeof webServer.tapIndex === 'function') {
-      // The page ticket: every page load gets a fresh one, so only the page
-      // itself can drive the shutdown in the 'human' mode.
-      try {
-        target.effect(
-          () => webServer.tapIndex((html) => {
-            runtime.indexTaps = (runtime.indexTaps ?? 0) + 1
-            return injectSleepTicket(html, runtime.sleepTickets.issue())
-          }),
-          'dsh-autorestart: sleep page ticket',
-        )
-        runtime.sleepTicketTap = true
-      } catch (error) {
-        runtime.log.warn('could not inject the sleep page ticket:', String(error))
       }
     }
     if (config.autoReloadPage !== false && typeof webServer.tapIndex === 'function') {
@@ -4275,15 +4207,16 @@ export function apply(ctx, rawConfig, options = {}) {
   const stateDir = resolveStateDir(config)
   const choice = resolveBackupIncludePlugins(rawConfig, stateDir)
   config.backupIncludePlugins = choice.includePlugins
+  // The same rule for the pre-restart backup itself: the profile row decides,
+  // the fallback file fills the gap, the built-in default applies otherwise.
+  const backupChoice = resolveBackupOnRestart(rawConfig, stateDir)
+  config.backupOnRestart = backupChoice.backupOnRestart
   // The same rule for the graceful-sleep button: the profile row decides, the
   // fallback file fills the gap, the built-in default applies otherwise.
   const sleepChoice = resolveShowSleepButton(rawConfig, stateDir)
   config.showSleepButton = sleepChoice.showSleepButton
   const runtime = createRuntime(ctx, config, {
     backupChoiceSource: choice.source,
-    // The one-time page tickets of this host start. Production creates them
-    // here; a test may bring its own (with a clock it controls).
-    sleepTickets: options.sleepTickets,
   })
   const log = runtime.log
   // The graceful sleep: the host plan and the state machine that waits for the
@@ -4298,6 +4231,7 @@ export function apply(ctx, rawConfig, options = {}) {
     desktopApp: runtime.env.isDesktopApp,
     appExePath: runtime.env.appExePath,
     configSchema: Config !== undefined,
+    backupOnRestart: config.backupOnRestart,
     backupIncludePlugins: config.backupIncludePlugins,
     backupChoiceSource: choice.source,
     showSleepButton: config.showSleepButton,

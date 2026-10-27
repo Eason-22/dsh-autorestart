@@ -214,7 +214,7 @@ test('the settings of the configuration page are written into the profile row', 
 
   const res = fakeResponse()
   choiceRoute(routes).handler(
-    fakeRequest('POST', { sleepController: 'anyone', sleepCountdownSeconds: 30 }),
+    fakeRequest('POST', { sleepCountdownSeconds: 30 }),
     res,
   )
   await settle()
@@ -223,10 +223,8 @@ test('the settings of the configuration page are written into the profile row', 
   const payload = JSON.parse(res.body)
   assert.equal(payload.ok, true)
   assert.equal(payload.applied, 'config')
-  assert.equal(payload.sleepController, 'anyone')
   assert.equal(payload.sleepCountdownSeconds, 30)
   assert.equal(edits.length, 1)
-  assert.equal(edits[0].next.sleepController, 'anyone')
   assert.equal(edits[0].next.sleepCountdownSeconds, 30)
 
   // The running instance takes the new values at once: the status route
@@ -237,8 +235,42 @@ test('the settings of the configuration page are written into the profile row', 
   sleep.handler(fakeRequest('GET'), state)
   await settle()
   const status = JSON.parse(state.body)
-  assert.equal(status.controller, 'anyone')
   assert.equal(status.countdownSeconds, 30)
+})
+
+test('the pre-restart backup scope is written into the profile row', async () => {
+  const { file } = tempStateDir('backup-scope')
+  const edits = []
+  const { ctx, routes } = createContext({ services: { configEditor: createEditor(edits) } })
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const res = fakeResponse()
+  choiceRoute(routes).handler(
+    fakeRequest('POST', { backupOnRestart: false, backupIncludePlugins: false }),
+    res,
+  )
+  await settle()
+
+  assert.equal(res.statusCode, 200)
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.applied, 'config')
+  assert.equal(payload.backupOnRestart, false)
+  assert.equal(payload.backupIncludePlugins, false)
+  assert.equal(edits.length, 1)
+  assert.equal(edits[0].next.backupOnRestart, false)
+  assert.equal(edits[0].next.backupIncludePlugins, false)
+
+  // The running instance takes the new values at once: the status route
+  // reports them (that is where the settings page reads them back from).
+  const state = fakeResponse()
+  const sleep = routes.find((entry) => entry.path === SLEEP_PATH)
+  assert.ok(sleep, 'the sleep route must be registered')
+  sleep.handler(fakeRequest('GET'), state)
+  await settle()
+  const status = JSON.parse(state.body)
+  assert.equal(status.backupOnRestart, false)
+  assert.equal(status.backupIncludePlugins, false)
 })
 
 test('an invalid setting is refused with 400 and nothing is written', async () => {
@@ -248,9 +280,12 @@ test('an invalid setting is refused with 400 and nothing is written', async () =
   apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
 
   for (const body of [
-    { sleepController: 'nobody' },
     { sleepCountdownSeconds: 15 },
     { sleepCountdownSeconds: '20' },
+    { backupOnRestart: 'yes' },
+    { backupOnRestart: 1 },
+    { backupIncludePlugins: 'true' },
+    { backupIncludePlugins: null },
   ]) {
     const res = fakeResponse()
     choiceRoute(routes).handler(fakeRequest('POST', body), res)

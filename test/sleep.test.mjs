@@ -497,22 +497,6 @@ test('the countdown length is a DROPDOWN in the settings page', () => {
   assert.deepEqual([...COUNTDOWN_CHOICES], [0, 10, 20, 30, 60], 'the dropdown offers exactly five values')
 })
 
-test('the controller is a DROPDOWN in the settings page', () => {
-  // The settings page renders a select when the schema key is a union of
-  // constants (the host projects it as an enum), not when it is a string.
-  const source = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
-  const declaration = /sleepController:\s*([^\n]*)\n/.exec(source)
-  assert.ok(declaration, 'the schema must declare sleepController')
-  assert.match(
-    declaration[1],
-    /schemastery\.union\(/,
-    'the controller must be a union of constants (a dropdown), not a string field',
-  )
-  assert.match(declaration[1], /'human'/, 'the union must offer the human mode')
-  assert.match(declaration[1], /'anyone'/, 'the union must offer the anyone mode')
-  assert.match(declaration[1], /default\('human'\)/, 'the safe mode is the default')
-})
-
 test('a countdown of zero seconds switches the machine off right away', () => {
   const harness = createController({ countdownSeconds: 0 })
   const status = harness.controller.arm()
@@ -717,15 +701,15 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(res.statusCode, 200)
   const payload = JSON.parse(res.body)
   assert.deepEqual(Object.keys(payload).sort(), [
-    'armed', 'blockers', 'controller', 'countdownSeconds', 'dryRun', 'host', 'lastRun', 'message', 'ok', 'phase', 'remainingMs', 'showSleepButton', 'ticketReady',
+    'armed', 'backupIncludePlugins', 'backupOnRestart', 'blockers', 'countdownSeconds', 'dryRun', 'host', 'lastRun', 'message', 'ok', 'phase', 'remainingMs', 'showSleepButton',
   ])
   assert.equal(payload.ok, true)
   assert.equal(payload.phase, 'idle')
   assert.equal(payload.armed, false)
   assert.equal(payload.showSleepButton, true)
-  assert.equal(payload.controller, 'human', 'by default only the page may drive the shutdown')
-  assert.equal(payload.ticketReady, false, 'a request without a ticket must be visible in the state')
   assert.equal(payload.countdownSeconds, 20)
+  assert.equal(payload.backupOnRestart, true, 'the pre-restart backup is on by default')
+  assert.equal(payload.backupIncludePlugins, true, 'the plugin tree is part of the backup by default')
   assert.equal(payload.remainingMs, 0)
   assert.deepEqual(payload.blockers, [])
   assert.deepEqual(Object.keys(payload.host).sort(), ['kind', 'label', 'platform', 'source', 'suspect'])
@@ -744,7 +728,7 @@ test('arming waits for the busy conversations and lists them', async () => {
   const { file } = tempStateFile('busy')
   const busy = { id: 'sess-busy', status: 'running' }
   const { ctx, routes, timers } = createContext({ runningAgents: [busy] })
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'anyone' })
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
 
   const res = fakeResponse()
   sleepRoute(routes).handler(fakeRequest('POST', { action: 'arm' }), res)
@@ -761,7 +745,7 @@ test('arming waits for the busy conversations and lists them', async () => {
 test('cancelling stops the countdown and releases the timer', async () => {
   const { file } = tempStateFile('cancel')
   const { ctx, routes, timers } = createContext()
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'anyone' })
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
 
   sleepRoute(routes).handler(fakeRequest('POST', { action: 'arm' }), fakeResponse())
   await settle()
@@ -776,245 +760,13 @@ test('cancelling stops the countdown and releases the timer', async () => {
   assert.ok(timers[0].disposed, 'the timer must be disposed when the sleep is cancelled')
 })
 /* ------------------------------------------------------------------ *
- * The controller: 'human' (only the page) or 'anyone' (everybody).
+ * The route: one plain request arms the machine. No ticket, no header.
  * ------------------------------------------------------------------ */
 
-/**
- * The ticket the host injected into the served page.
- *
- * It travels in a `<meta>` tag, not in a script: the CSP of the host
- * (`script-src 'nonce-…'`) never runs an inline script without that
- * nonce, so a ticket in a script would never arrive.
- *
- * @param {Function[]} taps the index taps the plugin registered
- * @returns {{ ticket: string, issuedAt: number }}
- */
-function ticketFromPage(taps) {
-  const html = taps.map((fn) => fn('<html><head></head></html>')).join('')
-  const match = /<meta name="dsh-autorestart-sleep-ticket" content="([^"]*)">/.exec(html)
-  assert.ok(match, 'the page must carry a ticket')
-  return JSON.parse(unescapeHtmlAttribute(match[1]))
-}
-
-/**
- * Undo the HTML escaping of an attribute value.
- *
- * @param {string} value
- * @returns {string}
- */
-function unescapeHtmlAttribute(value) {
-  return String(value)
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
-}
-
-test('the page ticket travels in a META tag, not in a script (the CSP forbids inline scripts)', async () => {
-  const { file } = tempStateFile('meta')
-  const { ctx, routes, taps } = createContext()
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'human' })
-
-  const html = taps
-    .map((fn) => fn('<html><head><title>DSH</title></head><body>app</body></html>'))
-    .join('')
-
-  // A <meta> is not script: the CSP (`script-src 'nonce-…'`) lets it through.
-  assert.match(html, /<meta name="dsh-autorestart-sleep-ticket" content="[^"]+">/)
-  assert.ok(
-    !/<script[^>]*dsh-autorestart-sleep-ticket/.test(html),
-    'the ticket must not be injected as an inline script',
-  )
-  assert.ok(!html.includes('__DSH_SLEEP_TICKET__'), 'the old window variable is not injected any more')
-
-  // The tag sits before </head> …
-  assert.ok(
-    html.indexOf('dsh-autorestart-sleep-ticket') < html.indexOf('</head>'),
-    'the meta tag belongs into the head',
-  )
-  // … and its content is a parseable JSON with the ticket.
-  const grant = ticketFromPage(taps)
-  assert.equal(typeof grant.ticket, 'string')
-  assert.ok(grant.ticket.length > 0)
-  assert.equal(typeof grant.issuedAt, 'number')
-
-  // Idempotent: tapping the same document twice does not add a second tag.
-  const ticketTap = taps[0]
-  const twice = ticketTap(ticketTap('<html><head></head><body>app</body></html>'))
-  assert.equal(
-    twice.split('dsh-autorestart-sleep-ticket').length - 1,
-    1,
-    'the ticket tag must be injected only once',
-  )
-})
-
-test('the client reads the ticket out of the META tag and arms with it', async () => {
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human' },
-    meta: { ticket: 'nonce.signature', issuedAt: 1_700_000_000_000 },
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-  button.props.onClick()
-  await settleClient()
-
-  const arms = mounted.fetches
-    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
-    .filter((call) => JSON.parse(call.init.body).action === 'arm')
-  assert.equal(arms.length, 1, 'the click must arm the machine')
-  assert.equal(arms[0].init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
-  assert.equal(mounted.reloads.count, 0, 'a page with a ticket never reloads')
-})
-
-test('the client still understands the old window variable', async () => {
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human' },
-    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-  button.props.onClick()
-  await settleClient()
-
-  const arms = mounted.fetches
-    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
-    .filter((call) => JSON.parse(call.init.body).action === 'arm')
-  assert.equal(arms.length, 1, 'the fallback must still work')
-  assert.equal(arms[0].init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
-})
-
-test('in the human mode a request without the page ticket is refused, and nothing changes', async () => {
-  const { file } = tempStateFile('human-no-ticket')
-  const { ctx, routes } = createContext()
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'human' })
-
-  const res = fakeResponse()
-  sleepRoute(routes).handler(fakeRequest('POST', { action: 'arm' }), res)
-  await settle()
-  assert.equal(res.statusCode, 403)
-  const payload = JSON.parse(res.body)
-  assert.equal(payload.ok, false)
-  assert.equal(payload.reason, 'no-ticket')
-  assert.equal(payload.controller, 'human')
-  assert.equal(typeof payload.message, 'string', 'the refusal must explain itself')
-
-  // The state is untouched: nothing is armed, no countdown runs.
-  const state = fakeResponse()
-  sleepRoute(routes).handler(fakeRequest('GET'), state)
-  await settle()
-  const status = JSON.parse(state.body)
-  assert.equal(status.armed, false)
-  assert.equal(status.phase, 'idle')
-})
-
-test('in the human mode the page ticket arms the machine — once', async () => {
-  const { file } = tempStateFile('human-ticket')
-  const { ctx, routes, taps } = createContext()
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'human' })
-
-  const grant = ticketFromPage(taps)
-  const res = fakeResponse()
-  sleepRoute(routes).handler(
-    fakeRequest('POST', { action: 'arm' }, { 'x-dsh-sleep-ticket': grant.ticket }),
-    res,
-  )
-  await settle()
-  assert.equal(res.statusCode, 200)
-  assert.equal(JSON.parse(res.body).armed, true)
-
-  // The ticket is spent: the same one cannot drive a second request.
-  const again = fakeResponse()
-  sleepRoute(routes).handler(
-    fakeRequest('POST', { action: 'cancel' }, { 'x-dsh-sleep-ticket': grant.ticket }),
-    again,
-  )
-  await settle()
-  assert.equal(again.statusCode, 403)
-  assert.equal(JSON.parse(again.body).reason, 'replayed-ticket')
-})
-
-test('in the human mode a script can neither cancel a running countdown nor arm it', async () => {
-  const { file } = tempStateFile('human-script')
-  const { ctx, routes, taps } = createContext()
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'human' })
-
-  // The page arms it (with its ticket) …
-  const grant = ticketFromPage(taps)
-  sleepRoute(routes).handler(
-    fakeRequest('POST', { action: 'arm' }, { 'x-dsh-sleep-ticket': grant.ticket }),
-    fakeResponse(),
-  )
-  await settle()
-
-  // … a script without a ticket cannot take it back.
-  const cancel = fakeResponse()
-  sleepRoute(routes).handler(fakeRequest('POST', { action: 'cancel' }), cancel)
-  await settle()
-  assert.equal(cancel.statusCode, 403)
-  assert.equal(JSON.parse(cancel.body).reason, 'no-ticket')
-
-  // The countdown is still running.
-  const state = fakeResponse()
-  sleepRoute(routes).handler(fakeRequest('GET'), state)
-  await settle()
-  const status = JSON.parse(state.body)
-  assert.equal(status.armed, true, 'the countdown must not be cancelled by a script')
-  assert.ok(status.phase === 'countdown' || status.phase === 'waiting')
-})
-
-test('in the anyone mode a bare request arms and cancels the machine', async () => {
-  const { file } = tempStateFile('anyone')
-  const { ctx, routes } = createContext()
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'anyone' })
-
-  // No header, no ticket: a script may drive it.
-  const res = fakeResponse()
-  sleepRoute(routes).handler(fakeRequest('POST', { action: 'arm' }), res)
-  await settle()
-  assert.equal(res.statusCode, 200)
-  const payload = JSON.parse(res.body)
-  assert.equal(payload.armed, true)
-  assert.equal(payload.controller, 'anyone')
-
-  const cancel = fakeResponse()
-  sleepRoute(routes).handler(fakeRequest('POST', { action: 'cancel' }), cancel)
-  await settle()
-  assert.equal(cancel.statusCode, 200)
-  assert.equal(JSON.parse(cancel.body).armed, false)
-})
-
-test('the state says whether the calling page holds a usable ticket — without spending it', async () => {
-  const { file } = tempStateFile('ticket-ready')
-  const { ctx, routes, taps } = createContext()
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'human' })
-
-  const grant = ticketFromPage(taps)
-  const res = fakeResponse()
-  sleepRoute(routes).handler(
-    fakeRequest('GET', undefined, { 'x-dsh-sleep-ticket': grant.ticket }),
-    res,
-  )
-  await settle()
-  assert.equal(res.statusCode, 200)
-  const payload = JSON.parse(res.body)
-  assert.equal(payload.ticketReady, true, 'the page holds a ticket')
-  assert.equal(payload.controller, 'human')
-
-  // The check does not spend it: the ticket still arms the machine.
-  const arm = fakeResponse()
-  sleepRoute(routes).handler(
-    fakeRequest('POST', { action: 'arm' }, { 'x-dsh-sleep-ticket': grant.ticket }),
-    arm,
-  )
-  await settle()
-  assert.equal(arm.statusCode, 200)
-})
-
-test('in the anyone mode a bare arm request arms the machine', async () => {
+test('a bare arm request arms the machine — no ticket, no header', async () => {
   const { file } = tempStateFile('bare-arm')
   const { ctx, routes } = createContext()
-  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, sleepController: 'anyone' })
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
 
   // Nothing but the action: no headers, no ticket, no ceremony.
   const res = fakeResponse()
@@ -1028,6 +780,33 @@ test('in the anyone mode a bare arm request arms the machine', async () => {
     payload.phase === 'countdown' || payload.phase === 'waiting',
     `the machine must be armed, got: ${payload.phase}`,
   )
+})
+
+test('a bare cancel request takes the machine back', async () => {
+  const { file } = tempStateFile('bare-cancel')
+  const { ctx, routes } = createContext()
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  sleepRoute(routes).handler(fakeRequest('POST', { action: 'arm' }), fakeResponse())
+  await settle()
+
+  const cancel = fakeResponse()
+  sleepRoute(routes).handler(fakeRequest('POST', { action: 'cancel' }), cancel)
+  await settle()
+  assert.equal(cancel.statusCode, 200)
+  assert.equal(JSON.parse(cancel.body).armed, false)
+})
+
+test('the plugin never injects a ticket into the page', async () => {
+  const { file } = tempStateFile('no-ticket')
+  const { ctx, taps } = createContext()
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const html = taps
+    .map((fn) => fn('<html><head><title>DSH</title></head><body>app</body></html>'))
+    .join('')
+  assert.ok(!html.includes('dsh-autorestart-sleep-ticket'), 'there is no ticket any more')
+  assert.ok(!html.includes('__DSH_SLEEP_TICKET__'), 'there is no ticket variable any more')
 })
 
 /* ------------------------------------------------------------------ *
@@ -1326,14 +1105,12 @@ const settleClient = () => new Promise((resolve) => setTimeout(resolve, 5))
 /**
  * Load the classic client script in a sandbox and mount its surfaces.
  *
- * @param {{ status?: object, storage?: object, language?: string, ticket?: object, meta?: object, refuseArm?: object, failChoice?: boolean, sessionStorage?: object, fakeTimers?: boolean }} options
+ * @param {{ status?: object, storage?: object, language?: string, refuseArm?: object, failChoice?: boolean, sessionStorage?: object, fakeTimers?: boolean }} options
  */
 function mountClient({
   status = null,
   storage = createStorage(),
   language = 'zh',
-  ticket = null,
-  meta = null,
   refuseArm = null,
   failChoice = false,
   sessionStorage = createStorage(),
@@ -1368,21 +1145,12 @@ function mountClient({
       addEventListener: () => {},
       removeEventListener: () => {},
       location: { reload: () => { reloads.count += 1 } },
-      // The one-time ticket the host injected into this page.
-      __DSH_SLEEP_TICKET__: ticket,
     },
     document: {
       getElementById: () => null,
       createElement: (tag) => ({ tag, id: '', textContent: '', parentNode: null, setAttribute: () => {}, appendChild: () => {} }),
       head: { appendChild: (node) => { node.parentNode = sandbox.document.head; return node }, removeChild: () => {} },
-      // The ticket the host injected into the page: the real host puts it
-      // into a <meta> tag (the CSP would never run an inline script).
-      querySelector: (selector) => {
-        if (meta === null) return null
-        if (selector !== 'meta[name="dsh-autorestart-sleep-ticket"]') return null
-        const content = typeof meta === 'string' ? meta : JSON.stringify(meta)
-        return { getAttribute: (name) => (name === 'content' ? content : null) }
-      },
+      querySelector: () => null,
     },
     fetch: (url, init) => {
       fetches.push({ url: String(url), init })
@@ -1401,9 +1169,14 @@ function mountClient({
         }
         const written = JSON.parse(init.body)
         const next = { ...(state.status || {}) }
-        if (typeof written.sleepController === 'string') next.controller = written.sleepController
         if (typeof written.sleepCountdownSeconds === 'number') {
           next.countdownSeconds = written.sleepCountdownSeconds
+        }
+        if (typeof written.backupOnRestart === 'boolean') {
+          next.backupOnRestart = written.backupOnRestart
+        }
+        if (typeof written.backupIncludePlugins === 'boolean') {
+          next.backupIncludePlugins = written.backupIncludePlugins
         }
         state.status = next
         return Promise.resolve({
@@ -1417,7 +1190,7 @@ function mountClient({
         return Promise.resolve({
           ok: false,
           status: 403,
-          json: async () => ({ ok: false, error: 'page-ticket-required', ...refuseArm }),
+          json: async () => ({ ok: false, error: 'refused', ...refuseArm }),
         })
       }
       const body = isSleep
@@ -1494,7 +1267,7 @@ function mountClient({
 
 test('the countdown overlay comes back after a cancellation', async () => {
   const mounted = mountClient({
-    status: { ok: true, phase: 'countdown', showSleepButton: true, remainingMs: 8000, blockers: [], controller: 'anyone' },
+    status: { ok: true, phase: 'countdown', showSleepButton: true, remainingMs: 8000, blockers: [] },
   })
   const first = await mounted.settled('shell.overlay')
   assert.ok(first, 'the countdown must be on screen')
@@ -1595,7 +1368,7 @@ test('the collapsed sidebar shows the icon only, the wide one the label', async 
 
 test('the moon button is a toggle: an armed shutdown is cancelled by the same click', async () => {
   const mounted = mountClient({
-    status: { ok: true, phase: 'countdown', armed: true, showSleepButton: true, remainingMs: 8000, blockers: [], controller: 'anyone' },
+    status: { ok: true, phase: 'countdown', armed: true, showSleepButton: true, remainingMs: 8000, blockers: [] },
   })
   const button = await mounted.settled('sidebar.footer.action')
   assert.ok(button, 'the button must be rendered')
@@ -1680,9 +1453,9 @@ test('the button title says how long the countdown lasts', async () => {
   assert.match(String(button.props.title), /60/, 'the title must carry the countdown length')
 })
 
-test('in the anyone mode one click arms the machine: one request, no reload', async () => {
+test('one click arms the machine: one request, no header, no reload', async () => {
   const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'anyone' },
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
   })
   await mounted.poll()
   const button = await mounted.settled('sidebar.footer.action')
@@ -1695,138 +1468,20 @@ test('in the anyone mode one click arms the machine: one request, no reload', as
     .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
     .filter((call) => JSON.parse(call.init.body).action === 'arm')
   assert.equal(arms.length, 1, 'one click must send exactly one arm request')
-  // Nobody needs a ticket in this mode.
+  // The desktop client and the hosted web client send exactly the same thing:
+  // the action, and nothing else.
   assert.deepEqual(
     Object.keys(arms[0].init.headers).filter((key) => key.startsWith('x-dsh-')),
     [],
     'the request must not carry any custom header',
   )
+  assert.deepEqual(JSON.parse(arms[0].init.body), { action: 'arm' })
   assert.equal(mounted.reloads.count, 0, 'the button must never reload the page')
-})
-
-test('in the human mode the click sends the page ticket', async () => {
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human' },
-    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-  button.props.onClick()
-  await settleClient()
-
-  const arms = mounted.fetches
-    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
-    .filter((call) => JSON.parse(call.init.body).action === 'arm')
-  assert.equal(arms.length, 1, 'one click must send exactly one arm request')
-  assert.equal(arms[0].init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
-  assert.equal(mounted.reloads.count, 0, 'a page with a ticket never reloads')
-})
-
-test('a click without a ticket writes the intent and reloads the page once', async () => {
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human' },
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-  button.props.onClick()
-  await settleClient()
-
-  assert.equal(mounted.reloads.count, 1, 'the page reloads itself once')
-  assert.equal(
-    mounted.sessionStorage.getItem('dsh-autorestart-pending-arm'),
-    '1',
-    'the intent is remembered for the new page',
-  )
-  const arms = mounted.fetches
-    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
-    .filter((call) => JSON.parse(call.init.body).action === 'arm')
-  assert.equal(arms.length, 0, 'nothing is armed before the page has a ticket')
-})
-
-test('the reloaded page carries the intent out: the user clicked ONCE', async () => {
-  const storage = createStorage({ 'dsh-autorestart-pending-arm': '1' })
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human' },
-    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
-    sessionStorage: storage,
-  })
-  await settleClient()
-
-  const arms = mounted.fetches
-    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
-    .filter((call) => JSON.parse(call.init.body).action === 'arm')
-  assert.equal(arms.length, 1, 'the new page arms the machine by itself')
-  assert.equal(arms[0].init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
-  assert.equal(
-    storage.getItem('dsh-autorestart-pending-arm'),
-    null,
-    'the intent is cleared: it can happen only once',
-  )
-})
-
-test('a cancel that could not be carried out is remembered as a cancel', async () => {
-  const mounted = mountClient({
-    status: { ok: true, phase: 'countdown', armed: true, showSleepButton: true, blockers: [], controller: 'human' },
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-  button.props.onClick()
-  await settleClient()
-
-  assert.equal(mounted.reloads.count, 1, 'the page reloads itself once')
-  assert.equal(
-    mounted.sessionStorage.getItem('dsh-autorestart-pending-cancel'),
-    '1',
-    'the cancel is remembered for the new page',
-  )
-})
-
-test('after the reload there is still no ticket: the hint appears, nothing else happens', async () => {
-  const storage = createStorage({
-    'dsh-autorestart-pending-arm': '1',
-    'dsh-autorestart-reloaded': '1',
-  })
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human' },
-    sessionStorage: storage,
-  })
-  await settleClient()
-
-  const arms = mounted.fetches
-    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
-    .filter((call) => JSON.parse(call.init.body).action === 'arm')
-  assert.equal(arms.length, 0, 'nothing is armed without a ticket')
-  assert.equal(mounted.reloads.count, 0, 'the page must not reload for ever')
-
-  const after = await mounted.settled('sidebar.footer.action')
-  assert.ok(
-    textOf(after).includes('点一下会自动刷新一次'),
-    `the hint must be visible, got: ${textOf(after)}`,
-  )
-})
-
-test('a spent ticket makes the next click reload the page instead of failing', async () => {
-  const mounted = mountClient({
-    status: { ok: true, phase: 'countdown', armed: true, showSleepButton: true, blockers: [], controller: 'human' },
-    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
-    refuseArm: { reason: 'replayed-ticket', message: '这张页面票据已经用过了。', action: 'cancel' },
-  })
-  await mounted.poll()
-  const button = await mounted.settled('sidebar.footer.action')
-  button.props.onClick()
-  await settleClient()
-
-  assert.equal(mounted.reloads.count, 1, 'the page reloads itself to get a fresh ticket')
-  assert.equal(
-    mounted.sessionStorage.getItem('dsh-autorestart-pending-cancel'),
-    '1',
-    'the cancel is remembered for the new page',
-  )
 })
 
 test('a refused request is shown, never silent', async () => {
   const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'anyone' },
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
     refuseArm: { reason: 'not-armed', message: '关机命令没能启动。' },
   })
   await mounted.poll()
@@ -1845,7 +1500,7 @@ test('a refused request is shown, never silent', async () => {
 
 test('the plugin registers a configuration page for its own row', async () => {
   const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 20 },
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], countdownSeconds: 20 },
   })
   const entry = mounted.slots.get('plugins.row.config')
   assert.ok(entry, 'the configuration slot must be registered')
@@ -1855,55 +1510,51 @@ test('the plugin registers a configuration page for its own row', async () => {
   assert.equal(registration.locale, 'dshAutorestart')
 })
 
-test('the configuration page shows both dropdowns with the current values', async () => {
+test('the configuration page shows exactly the three settings, with the Host values', async () => {
   const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 30 },
+    status: {
+      ok: true,
+      phase: 'idle',
+      showSleepButton: true,
+      blockers: [],
+      countdownSeconds: 30,
+      backupOnRestart: true,
+      backupIncludePlugins: false,
+    },
   })
   const panel = await mounted.settled('plugins.row.config')
   assert.ok(panel, 'the configuration page must be rendered')
+
+  // 1. the countdown dropdown
   const selects = walk(panel).filter((node) => node.type === 'select')
-  assert.equal(selects.length, 2, 'the page has two dropdowns')
-  assert.equal(selects[0].props.value, 'human', 'the first dropdown shows who may drive the shutdown')
-  assert.equal(selects[1].props.value, '30', 'the second dropdown shows the countdown length')
-  const controllerOptions = walk(selects[0]).filter((node) => node.type === 'option').map((node) => node.props.value)
-  assert.deepEqual(controllerOptions, ['human', 'anyone'])
-  const secondsOptions = walk(selects[1]).filter((node) => node.type === 'option').map((node) => node.props.value)
+  assert.equal(selects.length, 1, 'the page has exactly one dropdown')
+  assert.equal(selects[0].props.value, '30', 'the dropdown shows the countdown the Host reports')
+  const secondsOptions = walk(selects[0]).filter((node) => node.type === 'option').map((node) => node.props.value)
   assert.deepEqual(secondsOptions, ['0', '10', '20', '30', '60'])
+
+  // 2. and 3. the two backup switches
+  const switches = walk(panel).filter((node) => node.type === 'input')
+  assert.equal(switches.length, 2, 'the page has exactly two switches')
+  const byKey = new Map(switches.map((node) => [node.props['data-dsh-autorestart-setting'], node]))
+  assert.deepEqual([...byKey.keys()], ['backupOnRestart', 'backupIncludePlugins'])
+  assert.equal(byKey.get('backupOnRestart').props.checked, true)
+  assert.equal(byKey.get('backupIncludePlugins').props.checked, false)
+
   // The labels and the explanation are on the page.
   const shown = textOf(panel)
-  assert.ok(shown.includes('谁能用这个按钮'), `the label must be there: ${shown}`)
   assert.ok(shown.includes('倒计时秒数'), `the label must be there: ${shown}`)
-  assert.ok(shown.includes('取消不了'), `the human mode must say what it means: ${shown}`)
+  assert.ok(shown.includes('重启前备份'), `the label must be there: ${shown}`)
+  assert.ok(shown.includes('备份包含已安装插件'), `the label must be there: ${shown}`)
+  assert.ok(shown.includes('不含 profile 里的插件目录'), `the scope must be explained: ${shown}`)
 })
 
-test('choosing a value writes it into the profile configuration and reads it back', async () => {
+test('the countdown length is written into the profile configuration and read back', async () => {
   const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 20 },
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], countdownSeconds: 20 },
   })
   const panel = await mounted.settled('plugins.row.config')
   const selects = walk(panel).filter((node) => node.type === 'select')
-  selects[0].props.onChange({ target: { value: 'anyone' } })
-  await settleClient()
-
-  const posts = mounted.fetches.filter(
-    (call) => String(call.url).includes('/choice') && call.init && call.init.body,
-  )
-  assert.equal(posts.length, 1, 'the change must be written once')
-  assert.deepEqual(JSON.parse(posts[0].init.body), { sleepController: 'anyone' })
-
-  // The new value is read back from the Host.
-  const after = mounted.render('plugins.row.config')
-  const again = walk(after).filter((node) => node.type === 'select')
-  assert.equal(again[0].props.value, 'anyone', 'the page must show the value the Host took')
-})
-
-test('the countdown length is written into the profile configuration too', async () => {
-  const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 20 },
-  })
-  const panel = await mounted.settled('plugins.row.config')
-  const selects = walk(panel).filter((node) => node.type === 'select')
-  selects[1].props.onChange({ target: { value: '60' } })
+  selects[0].props.onChange({ target: { value: '60' } })
   await settleClient()
 
   const posts = mounted.fetches.filter(
@@ -1913,17 +1564,98 @@ test('the countdown length is written into the profile configuration too', async
   assert.deepEqual(JSON.parse(posts[0].init.body), { sleepCountdownSeconds: 60 })
   const after = mounted.render('plugins.row.config')
   const again = walk(after).filter((node) => node.type === 'select')
-  assert.equal(again[1].props.value, '60')
+  assert.equal(again[0].props.value, '60')
+})
+
+test('the pre-restart backup switch is written into the profile configuration and read back', async () => {
+  const mounted = mountClient({
+    status: {
+      ok: true,
+      phase: 'idle',
+      showSleepButton: true,
+      blockers: [],
+      countdownSeconds: 20,
+      backupOnRestart: true,
+      backupIncludePlugins: true,
+    },
+  })
+  const panel = await mounted.settled('plugins.row.config')
+  const switches = walk(panel).filter((node) => node.type === 'input')
+  const backup = switches.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupOnRestart')
+  backup.props.onChange({ target: { checked: false } })
+  await settleClient()
+
+  const posts = mounted.fetches.filter(
+    (call) => String(call.url).includes('/choice') && call.init && call.init.body,
+  )
+  assert.equal(posts.length, 1, 'the change must be written once')
+  assert.deepEqual(JSON.parse(posts[0].init.body), { backupOnRestart: false })
+
+  // The new value is read back from the Host.
+  const after = mounted.render('plugins.row.config')
+  const again = walk(after).filter((node) => node.type === 'input')
+  const againBackup = again.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupOnRestart')
+  assert.equal(againBackup.props.checked, false, 'the page must show the value the Host took')
+})
+
+test('the backup scope switch is written into the profile configuration and read back', async () => {
+  const mounted = mountClient({
+    status: {
+      ok: true,
+      phase: 'idle',
+      showSleepButton: true,
+      blockers: [],
+      countdownSeconds: 20,
+      backupOnRestart: true,
+      backupIncludePlugins: true,
+    },
+  })
+  const panel = await mounted.settled('plugins.row.config')
+  const switches = walk(panel).filter((node) => node.type === 'input')
+  const plugins = switches.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupIncludePlugins')
+  plugins.props.onChange({ target: { checked: false } })
+  await settleClient()
+
+  const posts = mounted.fetches.filter(
+    (call) => String(call.url).includes('/choice') && call.init && call.init.body,
+  )
+  assert.equal(posts.length, 1, 'the change must be written once')
+  assert.deepEqual(JSON.parse(posts[0].init.body), { backupIncludePlugins: false })
+
+  const after = mounted.render('plugins.row.config')
+  const again = walk(after).filter((node) => node.type === 'input')
+  const againPlugins = again.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupIncludePlugins')
+  assert.equal(againPlugins.props.checked, false, 'the page must show the value the Host took')
+})
+
+test('without a pre-restart backup the plugin scope is greyed out', async () => {
+  const mounted = mountClient({
+    status: {
+      ok: true,
+      phase: 'idle',
+      showSleepButton: true,
+      blockers: [],
+      countdownSeconds: 20,
+      backupOnRestart: false,
+      backupIncludePlugins: true,
+    },
+  })
+  const panel = await mounted.settled('plugins.row.config')
+  const switches = walk(panel).filter((node) => node.type === 'input')
+  const backup = switches.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupOnRestart')
+  const plugins = switches.find((node) => node.props['data-dsh-autorestart-setting'] === 'backupIncludePlugins')
+  assert.equal(backup.props.disabled, false, 'the backup switch itself stays usable')
+  assert.equal(plugins.props.disabled, true, 'the plugin scope is greyed out without a backup')
 })
 
 test('a failed save shows the error on the configuration page', async () => {
   const mounted = mountClient({
-    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], controller: 'human', countdownSeconds: 20 },
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], countdownSeconds: 20 },
     failChoice: true,
   })
   const panel = await mounted.settled('plugins.row.config')
   const selects = walk(panel).filter((node) => node.type === 'select')
-  selects[0].props.onChange({ target: { value: 'anyone' } })
+  selects[0].props.onChange({ target: { value: '60' } })
   await settleClient()
 
   const after = mounted.render('plugins.row.config')

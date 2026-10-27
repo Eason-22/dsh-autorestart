@@ -148,7 +148,6 @@ show up in the Plugin Manager and in the config editor.
 | `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the relaunched host before it restores the snapshot and launches the host again. |
 | `showSleepButton` | `true` | Whether the moon button of the graceful shutdown is shown at the foot of the left sidebar, next to Settings. |
 | `sleepCountdownSeconds` | `20` | How many seconds the graceful shutdown counts down before the machine goes down — a dropdown: `0` / `10` / `20` / `30` / `60` seconds. `0` means "switch off right away" (still waiting for the conversations to be idle). |
-| `sleepController` | `human` | Who may drive the graceful shutdown — a dropdown: `human` (only the button in the page can arm it **and** cancel it) or `anyone` (a script may arm and cancel it too). |
 | `sleepCommand` | `''` | A custom shutdown command for the graceful shutdown. Empty = the host is detected automatically; a value replaces the detected command (`cmd.exe /c …` on Windows, `/bin/sh -c …` everywhere else). |
 
 The two waits are independent of each other, and both default to two seconds:
@@ -275,8 +274,7 @@ system is asked to shut down immediately (`/t 0`) instead of counting down a sec
 
 **Configuration.** `showSleepButton` (default `true`) decides whether the button is shown,
 `sleepCountdownSeconds` (a **dropdown**: `0` / `10` / `20` / `30` / `60` seconds, default `20`) how
-long the countdown runs, `sleepController` (a **dropdown**: `human` / `anyone`, default `human`) who
-may drive the shutdown, and `sleepCommand` (default `''`) replaces the detected command with one of
+long the countdown runs, and `sleepCommand` (default `''`) replaces the detected command with one of
 your own — empty means "detect the host automatically". `0` means **no countdown at all**: the machine
 is switched off as soon as every conversation is idle (a busy conversation still blocks it), and no
 countdown card appears. A profile that still carries a value the dropdown does not offer (`15`,
@@ -287,32 +285,9 @@ conversation, counts down **20 seconds** in a floating card (it never covers the
 switches the machine off. Clicking the button again — or the cancel button on the card — takes it
 back. Nothing else is asked of the user: no confirmation dialog, no second click.
 
-**Who may drive it: `human` (the default) or `anyone`.** The setting `sleepController` decides:
-
-| Mode | Who can arm the shutdown | Who can cancel a running countdown |
-| --- | --- | --- |
-| `human` (default, "only I may click") | **only the button in the page** | **only the button in the page** |
-| `anyone` ("AI and scripts may use it too") | anybody | anybody |
-
-In the `human` mode the host hands the page a **one-time ticket** with every page load (it is
-injected into the HTML the host serves), and the button sends it with its request. The ticket is
-good for **60 seconds** and for **one request** — arming *and* cancelling both need it. A shell
-script (or an agent) on the same machine cannot read the ticket out of the page, so it can neither
-switch the machine off **nor** take a running countdown back: such a request is answered with
-**403** and a machine-readable reason (`no-ticket`, `bad-ticket`, `expired-ticket`,
-`replayed-ticket`), and **nothing changes** — no countdown starts, no countdown stops.
-
-This raises the bar, it is **not an absolute boundary**: a local process that can read the page (or
-the host's memory) can still get hold of a ticket.
-
-**Still only ONE click.** A page that was opened before the plugin was updated holds no ticket, so
-the click could not be carried out. Then the button writes the intent (`pendingArm` / `pendingCancel`)
-into `sessionStorage`, reloads the page **once** — quietly — and the new page (which holds a fresh
-ticket) carries the intent out by itself. The user clicked once; the page refreshed once and the
-machine stood down. If the new page still has no ticket, the button shows a single line
-("refresh the page once and it works") and does nothing else — no reload loop.
-
-**How a script uses it.** In the `anyone` mode the route is plain HTTP and needs no ticket:
+**The desktop client and the hosted web client behave exactly the same.** There is no ticket, no
+extra header and no hidden mode: `POST /__dsh_autorestart/sleep` takes nothing but the action, and
+the same route serves both. A script (or an agent) can therefore drive the shutdown as well:
 
 ```bash
 # arm it (the machine counts down and goes off)
@@ -323,14 +298,22 @@ curl -s -X POST http://127.0.0.1:<port>/__dsh_autorestart/sleep \
   -H 'content-type: application/json' -d '{"action":"cancel"}'
 ```
 
-In the `human` mode the same request is refused with **403** — that is the whole point of the mode.
-Switch `sleepController` to `anyone` in the settings page if you want a script (or an agent) to
-drive it.
-
 **The one-time install question.** The first time the plugin is used, the composer dock asks once
 more whether the button should stay. The answer is written into the profile configuration
 (`showSleepButton`) through the same `configEditor` service the backup question uses, so the
 settings page and the prompt always show the same value.
+
+**The configuration page.** In *Settings → Plugins → dsh-autorestart* the plugin row carries the
+three settings that matter:
+
+- **Countdown seconds** — the dropdown `0` / `10` / `20` / `30` / `60`.
+- **Backup before a restart** (`backupOnRestart`) — whether the pre-restart snapshot is taken at all.
+- **Include the installed plugins in the backup** (`backupIncludePlugins`) — whether that snapshot
+  also contains the plugin directory of the profile. It is greyed out when the backup itself is off.
+
+A change is written into the profile configuration at once (through the plugin's own choice route)
+and is read back from the host, so the page never shows a value the host did not take. A malformed
+value is refused with a **400** and **nothing** is written.
 
 **Trying it without switching anything off.** Set `DSH_AUTORESTART_SLEEP_DRYRUN=1` in the host
 environment: the plugin then reports the command it *would* run and never runs it.
@@ -341,9 +324,8 @@ closed. A few of its fields are meant to be read by code rather than by a human:
 kind of machine (`windows`, `wsl`, `linux`, `macos`, `unsupported`, or `custom` when the platform
 could not be recognised but a `sleepCommand` was configured); `host.suspect` is `true` when the host
 was only recognised as WSL because the Windows drive is mounted — a hint, not a proof;
-`lastRun.dryRun` marks the last run as a rehearsal that switched nothing off; `controller` says
-which mode is active (`human` or `anyone`); and `ticketReady` says whether the calling page holds a
-usable ticket (the check does **not** spend it — a script that wants a ticket still gets none).
+`lastRun.dryRun` marks the last run as a rehearsal that switched nothing off; and
+`backupOnRestart` / `backupIncludePlugins` report the effective scope of the pre-restart backup.
 
 **When the shutdown command does not start.** The host waits for the real answer of the process. If
 the command cannot start (missing binary, denied permission), the shutdown does **not** pretend it
@@ -412,7 +394,7 @@ The health route tells you whether the plugin is alive and what it has done:
 ```sh
 curl http://127.0.0.1:<gui port>/__dsh_autorestart/health
 # {"ok":true,"plugin":"dsh-autorestart","bootId":"…","pid":17884,"phase":"running",
-#  "pageHeartbeat":true,"systemPrompt":true,"configSchema":true,"indexTaps":2,…}
+#  "pageHeartbeat":true,"systemPrompt":true,"configSchema":true,"indexTaps":1,…}
 ```
 
 `bootId` and `pid` change with every new process, so a restart is visible right away.

@@ -1620,7 +1620,7 @@ test('a real click sends the gesture ticket, a scripted one does not', async () 
   // A scripted pointerdown (isTrusted === false) is not a gesture: nothing
   // is sent at all, because the host would refuse it anyway.
   button.props.onPointerDown({ isTrusted: false })
-  button.props.onClick()
+  button.props.onClick({ isTrusted: false })
   await settleClient()
   const scripted = mounted.fetches
     .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
@@ -1629,7 +1629,7 @@ test('a real click sends the gesture ticket, a scripted one does not', async () 
 
   // A trusted pointerdown is a real gesture: the ticket goes with it.
   button.props.onPointerDown({ isTrusted: true })
-  button.props.onClick()
+  button.props.onClick({ isTrusted: true })
   await settleClient()
   const real = mounted.fetches
     .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
@@ -1638,6 +1638,67 @@ test('a real click sends the gesture ticket, a scripted one does not', async () 
   assert.ok(real, 'the click must reach the host')
   assert.equal(real.init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
   assert.ok(real.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
+})
+
+/** The arm requests the client sent so far. */
+function armRequests(mounted) {
+  return mounted.fetches
+    .filter((call) => String(call.url).includes('/sleep') && call.init && call.init.body)
+    .filter((call) => JSON.parse(call.init.body).action === 'arm')
+}
+
+/** A client with a fresh ticket, waiting for a click. */
+async function mountedWithTicket() {
+  const mounted = mountClient({
+    status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [] },
+    ticket: { ticket: 'nonce.signature', issuedAt: Date.now() },
+  })
+  await mounted.poll()
+  const button = await mounted.settled('sidebar.footer.action')
+  assert.ok(button, 'the button must be rendered')
+  return { mounted, button }
+}
+
+test('a synthetic mousedown is not a gesture and arms nothing', async () => {
+  const { mounted, button } = await mountedWithTicket()
+  button.props.onMouseDown({ isTrusted: false })
+  button.props.onClick({ isTrusted: false })
+  await settleClient()
+  assert.equal(armRequests(mounted).length, 0, 'a synthetic event must not arm anything')
+})
+
+test('a real mousedown arms the machine', async () => {
+  const { mounted, button } = await mountedWithTicket()
+  button.props.onMouseDown({ isTrusted: true })
+  button.props.onClick({ isTrusted: true })
+  await settleClient()
+  const armed = armRequests(mounted).pop()
+  assert.ok(armed, 'a real mousedown must reach the host')
+  assert.equal(armed.init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
+  assert.ok(armed.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
+})
+
+test('a real touchstart arms the machine', async () => {
+  const { mounted, button } = await mountedWithTicket()
+  // A touch screen sends touchstart and no pointer event at all.
+  button.props.onTouchStart({ isTrusted: true })
+  button.props.onClick()
+  await settleClient()
+  const armed = armRequests(mounted).pop()
+  assert.ok(armed, 'a real touchstart must reach the host')
+  assert.equal(armed.init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
+  assert.ok(armed.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
+})
+
+test('a real click alone arms the machine', async () => {
+  const { mounted, button } = await mountedWithTicket()
+  // A driver that sends no pointer event at all still sends a trusted click.
+  button.props.onClick({ isTrusted: true })
+  await settleClient()
+  const armed = armRequests(mounted).pop()
+  assert.ok(armed, 'a real click must reach the host')
+  assert.equal(armed.init.headers['x-dsh-sleep-ticket'], 'nonce.signature')
+  assert.ok(armed.init.headers['x-dsh-sleep-gesture'], 'the gesture timestamp must be sent')
 })
 
 test('a page without a gesture ticket does not arm: it reloads itself and offers a refresh', async () => {

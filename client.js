@@ -1794,17 +1794,27 @@ if (moduleLoader) moduleLoader.load({
     /**
      * The last real gesture on the shutdown button.
      *
-     * A `pointerdown` with `isTrusted === true` is something the page itself
+     * A trusted event (`isTrusted === true`) is something the page itself
      * cannot fake, so it is the proof that a person really clicked. The host
      * only accepts an arm request within {@link SLEEP_GESTURE_WINDOW_MS} of
      * it.
+     *
+     * WHICH event carries that proof differs per device: a modern browser
+     * sends `pointerdown`, an older one only `mousedown`, a touch screen
+     * `touchstart`, and a keyboard activation (or a driver that sends
+     * nothing at all) only a `click`. So every one of them counts — but only
+     * when it is trusted.
      */
     const sleepGesture = { at: 0 }
 
     /**
-     * Remember a trusted pointerdown.
+     * Remember a trusted gesture.
      *
-     * @param {object} event the DOM event of the pointerdown
+     * A synthetic event (a script that dispatches one, or an injected
+     * message) is never trusted, so it never records a gesture and never
+     * leads to a ticket.
+     *
+     * @param {object} event the DOM event of the gesture
      */
     function rememberSleepGesture(event) {
       if (!event || event.isTrusted !== true) return
@@ -2420,6 +2430,18 @@ if (moduleLoader) moduleLoader.load({
         }
       }
 
+      /**
+       * The click itself is the last fallback of the gesture: a device that
+       * sends no pointer event at all still sends a trusted click.
+       *
+       * @param {object} event the DOM event of the click
+       */
+      const handleClick = (event) => {
+        rememberSleepGesture(event)
+        if (armed) cancel()
+        else arm()
+      }
+
       if (!visible) return null
       ensureSleepStyle()
 
@@ -2433,10 +2455,13 @@ if (moduleLoader) moduleLoader.load({
           'aria-label': armed ? t('sleep.button.cancel') : t('sleep.button.aria'),
           title: error || (armed ? t('sleep.button.cancel') : countdownHint),
           disabled: arming,
-          onClick: armed ? cancel : arm,
-          // The gesture: only a trusted pointerdown counts, so the page
-          // cannot arm the machine on its own.
+          onClick: handleClick,
+          // The gesture: only a TRUSTED event counts, so the page cannot arm
+          // the machine on its own. Which event carries that proof differs
+          // per device, so every real input event is accepted.
           onPointerDown: rememberSleepGesture,
+          onMouseDown: rememberSleepGesture,
+          onTouchStart: rememberSleepGesture,
           'data-dsh-autorestart-sleep-button': 'true',
           'data-armed': armed ? 'true' : 'false',
           'data-wide': wide ? 'true' : 'false',

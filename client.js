@@ -155,6 +155,7 @@ const ZH = {
   panelBlockedSession: '会话「{label}」正在运行',
   panelBlockedSubagent: '{name}正在运行',
   panelBlockedSubagentGeneric: '有一个子智能体正在运行',
+  panelBlockedRestartPending: '等这次重启完成后再关机',
   panelGoalActiveLine: '占用会话「{title}」：goal 正在自动续跑（goal-active）',
   panelGoalExhaustedLine: '占用会话「{title}」：goal 轮次额度已用完，无法继续（goal-exhausted）',
   panelParkedTitle: '已停泊的 goal（重启后自动继续）：',
@@ -298,6 +299,7 @@ const EN = {
   panelBlockedSession: 'Session "{label}" is running',
   panelBlockedSubagent: '{name} is running',
   panelBlockedSubagentGeneric: 'One subagent is running',
+  panelBlockedRestartPending: 'Waiting for the pending restart to finish before shutting down',
   panelGoalActiveLine: 'Blocking session "{title}": the goal keeps driving rounds by itself (goal-active)',
   panelGoalExhaustedLine: 'Blocking session "{title}": the goal ran out of rounds and cannot continue (goal-exhausted)',
   panelParkedTitle: 'Parked goals (they continue after the restart):',
@@ -780,8 +782,14 @@ if (moduleLoader) moduleLoader.load({
      */
     function blockerLine(entry) {
       const t = translate ?? ((name) => name)
-      const kind = entry && entry.kind === 'subagent' ? 'subagent' : 'session'
+      const kind = entry && entry.kind === 'subagent'
+        ? 'subagent'
+        : (entry && entry.kind === 'restart-pending' ? 'restart-pending' : 'session')
       const label = entry && typeof entry.label === 'string' ? entry.label.trim() : ''
+      if (kind === 'restart-pending') {
+        // A pending restart goes first: the shutdown waits for it.
+        return t('panelBlockedRestartPending')
+      }
       if (kind === 'subagent') {
         const name = entry && typeof entry.name === 'string' ? entry.name.trim() : ''
         if (name === '' || label === '') return t('panelBlockedSubagentGeneric')
@@ -790,6 +798,19 @@ if (moduleLoader) moduleLoader.load({
       return label === ''
         ? t('panelBlockedGeneric')
         : fill(t('panelBlockedSession'), { label })
+    }
+
+    /**
+     * Whether a blocker is a pending RESTART (and not a task that is running).
+     *
+     * The restart is not a task: it is the thing the shutdown waits for, so it
+     * is never counted as one.
+     *
+     * @param {any} entry
+     * @returns {boolean}
+     */
+    function isRestartPending(entry) {
+      return Boolean(entry) && entry.kind === 'restart-pending'
     }
 
     /** How long the pending restart has been waiting, as a locale string. */
@@ -2970,9 +2991,12 @@ if (moduleLoader) moduleLoader.load({
       if (phase === 'waiting') {
         ensureSleepStyle()
         const blockers = status && Array.isArray(status.blockers) ? status.blockers : []
+        // A pending restart is not a task: it is what the shutdown waits for,
+        // so it is never counted as one.
+        const tasks = blockers.filter((entry) => !isRestartPending(entry))
         // How many of the blockers are subagents: the card says so, so the
         // count is not read as "that many conversations".
-        const subagentCount = blockers.filter(
+        const subagentCount = tasks.filter(
           (entry) => entry && entry.kind === 'subagent',
         ).length
         return h(
@@ -3007,9 +3031,9 @@ if (moduleLoader) moduleLoader.load({
                 blockerLine(entry),
               )),
             ),
-          h('p', { className: 'dsh-autorestart-sleep-waiting__count' }, blockers.length === 0
+          h('p', { className: 'dsh-autorestart-sleep-waiting__count' }, tasks.length === 0
             ? null
-            : fill(t('sleep.waiting.count'), { n: blockers.length })),
+            : fill(t('sleep.waiting.count'), { n: tasks.length })),
           subagentCount === 0
             ? null
             : h(

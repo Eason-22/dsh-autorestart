@@ -24,8 +24,10 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
+  armSleep,
   beginBoot,
   cancelRestart,
+  clearSleep,
   disarmedRecord,
   entryFor,
   handoffRecord,
@@ -1627,6 +1629,17 @@ export function createRuntime(ctx, config, options = {}) {
 
   const anyAgentRunning = () => busyAgents().length > 0
 
+  /**
+   * Whether a restart is still pending.
+   *
+   * A pending restart goes FIRST: the graceful shutdown waits for it — and for
+   * the sessions that resume with it. The shutdown intent survives the
+   * restart, so the machine goes off after everything is done.
+   *
+   * @returns {boolean}
+   */
+  const pendingRestart = () => state.restart !== null && state.restart !== undefined
+
   /** How long the host has been quiet (no conversation activity at all). */
   const quietForMs = () => Math.max(0, Date.now() - lastActivityAt)
 
@@ -2231,6 +2244,12 @@ export function createRuntime(ctx, config, options = {}) {
     stopPolling,
     tick,
     anyAgentRunning,
+    /**
+     * Whether a restart is still pending (the graceful shutdown waits for it).
+     *
+     * @returns {boolean}
+     */
+    pendingRestart,
     /**
      * How long the host has been quiet (no conversation activity at all).
      *
@@ -4045,6 +4064,27 @@ function sleepDryRun() {
  * @returns {{ allow: boolean, reason: 'busy'|'grace'|'quiet', blockedBy: any[] }}
  */
 function sleepGate(runtime) {
+  // A pending restart goes FIRST: the shutdown waits for it — and for the
+  // sessions that resume with it. The intent survives the restart, so the
+  // machine goes off after everything is done, not before.
+  let pending = false
+  try {
+    pending = typeof runtime.pendingRestart === 'function' && runtime.pendingRestart() === true
+  } catch {
+    pending = false
+  }
+  if (pending) {
+    return {
+      allow: false,
+      reason: 'restart-pending',
+      blockedBy: [{
+        sessionId: 'restart-pending',
+        kind: 'restart-pending',
+        label: '待执行的重启',
+        name: '待执行的重启',
+      }],
+    }
+  }
   let busy = []
   try {
     busy = runtime.busyAgents()
@@ -4149,6 +4189,31 @@ function createSleepService(ctx, runtime, config, options = {}) {
     // plugin writing its notes, a summary) still gets its chance.
     quietForMs: () => runtime.quietForMs(),
     graceMs: () => runtime.graceMs(),
+    // A pending restart goes first: the shutdown waits for it.
+    restartPending: () => {
+      const pending = runtime.pendingRestart()
+      if (!pending) return { pending: false, blockers: [] }
+      return {
+        pending: true,
+        blockers: [{
+          sessionId: 'restart-pending',
+          kind: 'restart-pending',
+          label: '待执行的重启',
+          name: '待执行的重启',
+        }],
+      }
+    },
+    // The intent is spent when the machine went off, when the shutdown failed
+    // and when the user cancelled it: the checkpoint must not keep it.
+    onDisarm: (reason) => {
+      try {
+        clearSleep(runtime.state)
+        runtime.persist()
+        runtime.log.info('the shutdown intent was cleared:', reason)
+      } catch (error) {
+        runtime.log.warn('could not clear the shutdown intent:', String(error))
+      }
+    },
     countdownSeconds: seconds,
     hostLabel: final.shortLabel,
     supported: final.supported,
@@ -4197,6 +4262,46 @@ function createSleepService(ctx, runtime, config, options = {}) {
       return liveController
     },
     invocation,
+    /**
+     * Arm the shutdown AND remember the intent.
+     *
+     * The intent lives in the checkpoint file, so it survives a restart: a
+     * shutdown asked for while a restart is pending waits for that restart —
+     * and for the sessions that resume with it.
+     *
+     * @returns {object} the sleep status
+     */
+    arm: () => {
+      try {
+        armSleep(runtime.state, {
+          armedAt: Date.now(),
+          countdownSeconds: config.sleepCountdownSeconds,
+        })
+        runtime.persist()
+      } catch (error) {
+        runtime.log.warn('could not record the shutdown intent:', String(error))
+      }
+      return liveController.arm()
+    },
+    /**
+     * Cancel the shutdown: the intent is gone for good (the disarm hook of
+     * the controller clears the checkpoint).
+     *
+     * @returns {object} the sleep status
+     */
+    cancel: () => liveController.cancel(),
+    /**
+     * The recorded shutdown intent, if there is one.
+     *
+     * @returns {{ armed: true, armedAt: number, countdownSeconds: number|null }|null}
+     */
+    intent: () => runtime.state.sleep,
+    /**
+     * Arm the shutdown from a recorded intent (the boot restore).
+     *
+     * @returns {object} the sleep status
+     */
+    restore: () => liveController.arm(),
   }
 }
 
@@ -4211,6 +4316,7 @@ function createSleepService(ctx, runtime, config, options = {}) {
 function sleepStatusPayload(sleep, config, runtime) {
   const status = sleep.controller.status()
   const invocation = sleep.invocation()
+  const intent = typeof sleep.intent === 'function' ? sleep.intent() : null
   return {
     ok: true,
     phase: status.phase,
@@ -4221,6 +4327,9 @@ function sleepStatusPayload(sleep, config, runtime) {
     // to tell "the machine is waiting for the grace" from "somebody is busy".
     graceMs: config.restartGraceMs,
     quietForMs: runtime && typeof runtime.quietForMs === 'function' ? runtime.quietForMs() : 0,
+    // When the shutdown was armed: the intent has to survive a restart, so the
+    // time is reported for the troubleshooting.
+    armedAt: intent && typeof intent.armedAt === 'number' ? intent.armedAt : null,
     /**
      * The pre-restart backup scope, straight from the effective configuration:
      * the settings page reads its two switches from here.
@@ -4304,9 +4413,10 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
           return
         }
         if (action === 'arm') {
-          sleep.controller.arm()
+          // The intent is recorded too: it survives a restart.
+          sleep.arm()
         } else {
-          sleep.controller.cancel()
+          sleep.cancel()
         }
         answer(sleepStatusPayload(sleep, config, runtime))
       }).catch((error) => {
@@ -4758,12 +4868,31 @@ export function apply(ctx, rawConfig, options = {}) {
   // The boot recovery pass is the plugin's primary boot duty, so it is scheduled
   // BEFORE the auxiliary timers (the health-route registration retry below): a
   // fallback registered later must never shadow or postpone the recovery pass.
+  //
+  // The recorded shutdown intent is restored AFTER the recovery: a shutdown
+  // that was asked for before the restart must wait for the work that resumes
+  // with it — the machine goes off after everything is done, not before.
+  const restoreSleepIntent = () => {
+    const intent = sleep.intent()
+    if (!intent || intent.armed !== true) return
+    log.info('the shutdown intent survived the restart; the machine goes off after the work is done', {
+      armedAt: intent.armedAt,
+    })
+    sleep.restore()
+  }
   if (runtime.isNewBoot && config.resumeOnBoot) {
     runtime.recoverTimer = ctx.timeout(() => {
-      recoverAfterRestart(ctx, runtime, config).catch((error) => {
-        log.warn('boot recovery failed:', String(error))
-      })
+      recoverAfterRestart(ctx, runtime, config)
+        .then(() => { restoreSleepIntent() })
+        .catch((error) => {
+          log.warn('boot recovery failed:', String(error))
+          restoreSleepIntent()
+        })
     }, Math.max(0, config.recoveryDelayMs))
+  } else {
+    // No recovery pass: the intent is restored right away (a hot reload must
+    // not lose it either).
+    restoreSleepIntent()
   }
 
   registerTools(ctx, runtime, config)

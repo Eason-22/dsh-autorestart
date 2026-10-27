@@ -47,6 +47,7 @@ test('createEmptyState has the documented defaults', () => {
     restart: null,
     sessions: {},
     seenFeatureVersions: {},
+    sleep: null,
     updatedAt: now,
   });
 });

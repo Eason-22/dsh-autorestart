@@ -305,6 +305,33 @@ be cancelled — the card has a button, and the moon button itself becomes a tog
 is armed. If a conversation starts working again during the countdown, the countdown goes back to
 "waiting" and nothing is switched off.
 
+### Shutdown and restart: who goes first
+
+**The short version.** Pressing the moon button means "switch the machine off when the work is
+done" — **not** "switch it off right now, whatever else is running". So:
+
+1. **A pending restart wins.** If a restart is still on the list, the shutdown does **not** happen.
+   The card says *"Waiting for the pending restart to finish before shutting down"*. The restart
+   goes first, the sessions come back with it and keep working, and only then does the machine
+   go off.
+2. **The work keeps running after the restart.** The sessions that resume with the restart are
+   running work: while any of them is busy, the shutdown waits. The machine only goes off when
+   **every** session is idle again.
+3. **The shutdown intent survives the restart.** You pressed the button **once**. The restart does
+   not swallow that request: it is written into the checkpoint file, and the new boot picks it up
+   and keeps waiting for the work. You do **not** have to press the button a second time.
+4. **You can cancel at any time.** The waiting card has a *"Keep it on"* button; pressing it (or the
+   moon button again) forgets the intent for good.
+
+**Where the intent lives.** In the checkpoint file
+(`<DSH_HOME>/storages/dsh-autorestart/state.json`) as `sleep: { armed, armedAt, countdownSeconds }`.
+It is cleared as soon as the machine went off, when the shutdown failed, and when you cancel. A
+record that cannot be read is dropped — asking once more is much better than a machine that switches
+itself off for ever because of a half-written file.
+
+**For the troubleshooting.** `GET /sleep` reports `armedAt` (when the shutdown was armed) next to
+`phase`, `blockers` and `graceMs`.
+
 **Where the button is.** The moon button sits at the **very bottom of the left sidebar, right next
 to the Settings row** (`sidebar.footer.action`). That seat is a **root** slot, so the button is
 there even when no conversation is open — on any page. When the sidebar is collapsed into its narrow

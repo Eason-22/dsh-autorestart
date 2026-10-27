@@ -728,13 +728,14 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(res.statusCode, 200)
   const payload = JSON.parse(res.body)
   assert.deepEqual(Object.keys(payload).sort(), [
-    'armed', 'backupIncludePlugins', 'backupOnRestart', 'blockers', 'countdownSeconds', 'dryRun', 'graceMs', 'host', 'lastRun', 'message', 'ok', 'phase', 'quietForMs', 'remainingMs', 'showSleepButton',
+    'armed', 'armedAt', 'backupIncludePlugins', 'backupOnRestart', 'blockers', 'countdownSeconds', 'dryRun', 'graceMs', 'host', 'lastRun', 'message', 'ok', 'phase', 'quietForMs', 'remainingMs', 'showSleepButton',
   ])
   assert.equal(payload.ok, true)
   assert.equal(payload.phase, 'idle')
   assert.equal(payload.armed, false)
   assert.equal(payload.showSleepButton, true)
   assert.equal(payload.countdownSeconds, 20)
+  assert.equal(payload.armedAt, null, 'no shutdown was armed yet')
   assert.equal(payload.graceMs, 10000, 'the grace window is reported for the troubleshooting')
   assert.equal(typeof payload.quietForMs, 'number')
   assert.equal(payload.backupOnRestart, true, 'the pre-restart backup is on by default')

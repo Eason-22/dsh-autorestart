@@ -55,8 +55,8 @@ what it adds before you install it.
 | Kind | What it adds |
 | --- | --- |
 | Agent tools (6) | `continuum_restart`, `continuum_status`, `continuum_cancel_restart`, `continuum_park_goal`, `continuum_recover_now`, `continuum_handoff` |
-| HTTP routes (6) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`, `GET /sleep` and `POST /sleep` (the graceful shutdown — the desktop client and the hosted web client drive the very same route). Loopback or an authenticated browser only |
-| Client slots (5) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`); `sidebar.footer.action` — the moon button of the graceful shutdown (`autorestart-sleep-button`); `shell.overlay` — its countdown card; `settings.section` — the section "Auto-restart & shut down" in the settings page (`dsh-autorestart`) |
+| HTTP routes (7) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`, `GET /sleep` and `POST /sleep` (the graceful shutdown — the desktop client and the hosted web client drive the very same route), `GET /announcements` and `POST /announcements` (the one-time new-feature announcement). Loopback or an authenticated browser only |
+| Client slots (6) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`); `conversation.input.dock` — the one-time install question (`autorestart-backup-choice`) and the one-time new-feature announcement (`autorestart-feature-announcement`); `sidebar.footer.action` — the moon button of the graceful shutdown (`autorestart-sleep-button`); `shell.overlay` — its countdown card; `settings.section` — the section "Auto-restart & shut down" in the settings page (`dsh-autorestart`) |
 | System prompt | One "Restart policy" section that tells the agent how to ask for a restart and what the plugin will do |
 | Harness hooks | `agent/status` (tracks which conversations are busy), `tools/pre-execute` (blocks a shell command that would kill or relaunch DSH by hand), and the boot pass that resumes interrupted sessions |
 | Profile row | One bundle row, `dsh-autorestart` |
@@ -71,6 +71,8 @@ what it adds before you install it.
 | An agent wants to install or upgrade a plugin, but a restart would cut the work short | You either wait or take the risk | Call `continuum_restart`: it waits until every agent is idle and the session continues by itself afterwards |
 
 ## Install
+
+Current version: **0.5.0**.
 
 From npm — the package is published under the name `dsh-autorestart`:
 
@@ -235,6 +237,35 @@ addition to it, never a rival of it.
 - **How to change your mind later:** Settings → Auto-restart & shut down → `backupIncludePlugins`.
   `continuum_status` always reports the value that is in effect right now
   (`backupIncludePlugins: true | false`).
+
+### The one-time new-feature announcement (upgrades)
+
+**The gap it closes.** The install question above is asked exactly once — on the *first* install. An
+installation that already existed therefore never hears of a feature that was added later: for an
+upgrade the new moon button would simply not exist. Since **0.5.0** every new feature is announced
+once, in the same composer dock, as a small card:
+
+> **New feature: graceful shutdown**
+> There is a new 🌙 "Shut down" button at the very bottom of the left sidebar.
+> Click it → once every conversation is done it counts down **N** seconds and powers the machine off.
+> To change that, go to "Settings → Auto-restart & shut down".
+> **Got it**
+
+- **Only after an upgrade.** The host compares the version of the feature with the version it has
+  already shown (`seenFeatureVersions` in the checkpoint file). A fresh installation never sees the
+  card: the install question already explains the features, and answering it marks the announcement
+  as seen.
+- **Once per version, for ever.** "Got it" records the version, the card disappears at once, and it
+  never comes back — not with the next restart of the host, and not with the next version of the
+  plugin (a *new* version of a feature is announced again, of course).
+- **An unanswered card is not swallowed.** The card stays until it is answered, and it comes back with
+  the next start of DSH.
+- **The countdown is read, not written.** The seconds in the card are the ones that are really in
+  effect (`sleepCountdownSeconds`), and when the moon button is switched off the card says so
+  ("The button is currently switched off; you can turn it on in the settings").
+- **Where the state lives.** `<DSH_HOME>/storages/dsh-autorestart/state.json`, next to the checkpoint
+  of the plugin. The host serves it on `GET /announcements` (`{ ok, pending: [{ feature, version }] }`)
+  and records it on `POST /announcements` (`{ feature }`).
 
 ## Graceful shutdown (收工关机)
 

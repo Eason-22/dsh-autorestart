@@ -46,6 +46,7 @@ test('createEmptyState has the documented defaults', () => {
     phase: 'idle',
     restart: null,
     sessions: {},
+    seenFeatureVersions: {},
     updatedAt: now,
   });
 });

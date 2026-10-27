@@ -483,7 +483,7 @@ test('the served index gets a boot-token heartbeat for dsh web pages', () => {
     },
   })
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
-  assert.equal(routes.length, 6)
+  assert.equal(routes.length, 7)
   assert.equal(routes[0].kind, 'exact')
   assert.equal(routes[0].path, '/__dsh_autorestart/health')
   assert.equal(routes[1].kind, 'exact')
@@ -491,7 +491,9 @@ test('the served index gets a boot-token heartbeat for dsh web pages', () => {
   assert.equal(routes[4].kind, 'exact')
   assert.equal(routes[4].path, '/__dsh_autorestart/choice')
   assert.equal(routes[5].kind, 'exact')
-  assert.equal(routes[5].path, '/__dsh_autorestart/sleep')
+  assert.equal(routes[5].path, '/__dsh_autorestart/announcements')
+  assert.equal(routes[6].kind, 'exact')
+  assert.equal(routes[6].path, '/__dsh_autorestart/sleep')
   assert.equal(taps.length, 1, 'the page gets the boot heartbeat')
   const html = taps.reduce(
     (page, tap) => tap(page),
@@ -530,7 +532,7 @@ test('autoReloadPage: false suppresses the heartbeat but keeps the health route'
     },
   })
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true, autoReloadPage: false })
-  assert.equal(routes.length, 6)
+  assert.equal(routes.length, 7)
   assert.equal(taps.length, 0, 'without the heartbeat there is nothing to inject')
   const html = taps.length === 0 ? '<html><head></head><body>app</body></html>' : taps[0]('<html><head></head><body>app</body></html>')
   assert.doesNotMatch(html, /data-dsh-autorestart-heartbeat/, 'the heartbeat must stay off')
@@ -698,7 +700,7 @@ test('the ?gate=1 probe refuses a restart while a conversation has queued inbox 
   agent.inbox = { nextTurn: [{ id: 'm1' }], nextStep: [] };
   const { fake, routes } = contextWithRoutes({ runningAgents: [agent] });
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
-  assert.equal(routes.length, 6, 'the health route must be registered');
+  assert.equal(routes.length, 7, 'the health route must be registered');
   const res = fakeResponse();
   routes[0].handler({ url: '/__dsh_autorestart/health?gate=1', socket: { remoteAddress: '127.0.0.1' } }, res);
   assert.equal(res.statusCode, 200);
@@ -746,7 +748,7 @@ test('the ?state=1 probe reports the pending-restart state a UI banner needs', (
   });
   const { fake, routes } = contextWithRoutes();
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true });
-  assert.equal(routes.length, 6, 'the health route must be registered');
+  assert.equal(routes.length, 7, 'the health route must be registered');
   const res = fakeResponse();
   routes[0].handler({ url: '/__dsh_autorestart/health?state=1', socket: { remoteAddress: '127.0.0.1' } }, res);
   assert.equal(res.statusCode, 200);

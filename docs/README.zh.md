@@ -56,8 +56,8 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 | 类型 | 具体占用 |
 | --- | --- |
 | Agent 工具（6 个） | `continuum_restart`、`continuum_status`、`continuum_cancel_restart`、`continuum_park_goal`、`continuum_recover_now`、`continuum_handoff` |
-| HTTP 路由（6 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`、`GET /sleep`、`POST /sleep`（收工关机——桌面端和 web 端走的是同一条路由）；只接受本机回环或已认证的浏览器 |
-| 前端槽位（5 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`）、`sidebar.footer.action`（收工关机的月亮按钮，id `autorestart-sleep-button`）、`shell.overlay`（倒数浮动卡片）、`settings.section`（设置页里的「自动重启与关机」分区，id `dsh-autorestart`） |
+| HTTP 路由（7 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`、`GET /sleep`、`POST /sleep`（收工关机——桌面端和 web 端走的是同一条路由）、`GET /announcements`、`POST /announcements`（一次性新功能公告）；只接受本机回环或已认证的浏览器 |
+| 前端槽位（6 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`）、`conversation.input.dock`（一次性安装提问，id `autorestart-backup-choice`；一次性新功能公告，id `autorestart-feature-announcement`）、`sidebar.footer.action`（收工关机的月亮按钮，id `autorestart-sleep-button`）、`shell.overlay`（倒数浮动卡片）、`settings.section`（设置页里的「自动重启与关机」分区，id `dsh-autorestart`） |
 | 系统提示词 | 一段「重启政策」说明，告诉 agent 怎么请求重启、插件会做什么 |
 | 宿主事件 | `agent/status`（跟踪哪些会话在忙）、`tools/pre-execute`（拦下"手动杀/重启 DSH"的 shell 命令）、启动时的恢复流程 |
 | profile 行 | 一条 bundle 行：`dsh-autorestart` |
@@ -86,6 +86,22 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 - **不打扰**：面板是 `role="status"` 的普通块，放在输入框下方的 dock 里；可聚焦、键盘可达、`Esc` 关闭。
 - **答案存在哪**：宿主用官方 `configEditor` Service 写进 profile 配置（就是设置分区里那个 `backupIncludePlugins` 键，**只有一份真相**）。万一这个服务不可用，才退化到写 `<DSH_HOME>/storages/dsh-autorestart/install-choice.json` 并在日志里 `warn`。**托管 profile 如果自己没有声明 `dsh-autorestart` 行**，就没有行可写，答案同样落在这个文件里而不是 profile 里 —— 声明那一行（见「平台与部署」）才能让 profile 配置保持唯一真相。
 - **想改主意**：设置 → 自动重启与关机 → `backupIncludePlugins`。`continuum_status` 里随时能看到当前生效值（`backupIncludePlugins: true | false`）。
+
+### 升级也会被告知一次：从旧版升级会看到一次新功能公告
+
+**它补的漏洞**：上面那两个安装提问只在**首次安装**时出现一次。已经装好的老用户升级之后，**新功能对他们等于不存在** —— 新做的「收工关机」月亮按钮，老用户根本不会知道。所以从 **0.5.0** 起，每加一个新功能，都会在同一个位置（输入框下方的 dock）弹**一次**公告卡片：
+
+> **新功能：收工关机**
+> 左侧栏最底部多了一个 🌙「收工关机」按钮。
+> 点一下 → 所有会话收工后倒数 **N 秒**关机。
+> 想改行为，去「设置 → 自动重启与关机」。
+> **知道了**
+
+- **只有升级才会看到**：宿主把「这个功能的版本」和「已经展示过的版本」比一比（记在检查点文件的 `seenFeatureVersions` 里）。**新装**的用户不会看到这张卡 —— 安装提问已经把功能讲清楚了，答完就等于"已看过"。
+- **每个版本只弹一次**：点「知道了」→ 宿主记下版本 → 卡片立刻消失 → **以后再也不出现**（重启宿主不会，升级到下一个版本也不会 —— 除非那个新版本又改了同一个功能，那时才再公告一次）。
+- **没点不会静默吞掉**：卡片一直挂在那里等你回答；不回答，下次启动还会再出现一次。
+- **秒数是读出来的，不是写死的**：卡片里的秒数就是当前生效的 `sleepCountdownSeconds`；月亮按钮被关掉时，卡片还会补一句「按钮目前关闭，可在设置里打开。」
+- **状态存在哪**：`<DSH_HOME>/storages/dsh-autorestart/state.json`（和插件的检查点同一个文件）。宿主用 `GET /announcements` 报（`{ ok, pending: [{ feature, version }] }`），用 `POST /announcements`（body `{ feature }`）记。
 
 ## 工作方式
 
@@ -117,6 +133,8 @@ agent/status(running) ──► 写 checkpoint（<DSH_HOME>\storages\dsh-autores
   `<continuum_resume>`，模型能看到完整历史后自行判断中断点。
 
 ## 安装
+
+当前版本：**0.5.0**。
 
 ```powershell
 # 在 dsh 里（或对 Agent 说）：把工作区里的这个包安装为 profile bundle
@@ -441,7 +459,7 @@ curl -X POST http://127.0.0.1:<端口>/__dsh_autorestart/recover \
 
 ```
 index.js             插件入口：apply / 事件跟踪 / 工具 / 健康路由 / 启动恢复
-lib/checkpoint.js    原子 JSON 检查点，容错读取，boot/restart/session/解除记录（含旧 parked 记录）变更函数
+lib/checkpoint.js    原子 JSON 检查点，容错读取，boot/restart/session/解除记录（含旧 parked 记录）与"已看过的新功能公告"变更函数
 lib/lifecycle.js     纯决策：bootPlan / restartDecision / selectGoalDisarms / continuationPrompt / describeState
 lib/restart.js       Windows 脱离重启（WMI 主、schtasks 兜底、dryRun、自定义命令）
 lib/sleep.js         收工关机：识别真宿主机（含 WSL）、关机命令、等待→倒数→关机的状态机

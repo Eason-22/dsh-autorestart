@@ -1235,7 +1235,13 @@ function mountClient({
       },
     },
     slots: {
-      inject: (name, thunk) => { slots.set(name, { thunk, done: false, result: undefined }) },
+      // More than one component may live in the same slot (the install prompt
+      // and the new-feature announcement both sit in the composer dock).
+      inject: (name, thunk) => {
+        const list = slots.get(name) || []
+        list.push({ thunk, done: false, result: undefined })
+        slots.set(name, list)
+      },
       // The DSH slots service: `entries(key)` returns the entries of that
       // slot, `register(options, component)` records one and returns its
       // disposer.
@@ -1257,21 +1263,27 @@ function mountClient({
       },
     },
   })
-  const componentOf = (name) => {
-    const slot = slots.get(name)
-    assert.ok(slot, `the slot ${name} must be registered`)
-    if (!slot.done) {
-      const produced = slot.thunk()
-      // The thunk may be a GENERATOR (the messager pattern): the DSH slots
-      // service runs it through `ctx.effect`, which iterates the yielded
-      // disposers. The first yield is the registration itself.
-      slot.result = (produced && typeof produced.next === 'function')
-        ? produced.next().value
-        : produced
-      slot.done = true
+  const componentOf = (name, id) => {
+    const list = slots.get(name)
+    assert.ok(list && list.length > 0, `the slot ${name} must be registered`)
+    for (const slot of list) {
+      if (!slot.done) {
+        const produced = slot.thunk()
+        // The thunk may be a GENERATOR (the messager pattern): the DSH slots
+        // service runs it through `ctx.effect`, which iterates the yielded
+        // disposers. The first yield is the registration itself.
+        slot.result = (produced && typeof produced.next === 'function')
+          ? produced.next().value
+          : produced
+        slot.done = true
+      }
+      const entry = slot.result && slot.result.entry
+      if (!entry) continue
+      // Without an id the FIRST registration of the slot wins (that is the
+      // order the plugin injects them in).
+      if (id === undefined || entry.options.id === id) return entry
     }
-    assert.ok(slot.result && slot.result.entry, `the slot ${name} must yield its registration`)
-    return slot.result.entry
+    assert.fail(`the slot ${name} must yield its registration${id ? ` (${id})` : ''}`)
   }
   return {
     fetches,

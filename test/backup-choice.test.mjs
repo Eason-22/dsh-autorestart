@@ -496,15 +496,20 @@ function mountBackupChoicePanel({ storage, fetches, language = 'zh' }) {
       },
     },
     slots: {
+      // More than one component may live in the same slot (the install prompt
+      // and the new-feature announcement both sit in the composer dock).
       inject: (name, thunk) => {
-        slots.set(name, thunk)
+        const list = slots.get(name) || []
+        list.push(thunk)
+        slots.set(name, list)
       },
       register: (registration, Component) => ({ registration, Component }),
     },
   }
   module.apply(ctx)
 
-  const thunk = slots.get('conversation.input.dock')
+  const thunks = slots.get('conversation.input.dock') || []
+  const thunk = thunks.find((entry) => entry().registration.id === 'autorestart-backup-choice')
   assert.ok(thunk, 'the prompt must be registered in the composer dock')
   const { Component } = thunk()
   return {

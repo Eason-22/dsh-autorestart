@@ -84,6 +84,62 @@ import {
 } from './lib/sleep.js'
 
 /**
+ * The version of this plugin, as a fallback.
+ *
+ * The real version is read from the plugin's own package.json (see
+ * `pluginVersion()`), but a bundled installation may not ship that file — so
+ * the constant below is the last resort. A test keeps the two in sync.
+ */
+const PLUGIN_VERSION_FALLBACK = '0.5.0'
+
+/** The cached version of this plugin (read once per process). */
+let pluginVersionCache = null
+
+/**
+ * The version of this plugin.
+ *
+ * It is the version of the package itself: the feature announcements are
+ * bound to it, so a new version of the plugin can announce a new feature (and
+ * the announcement of an old version never comes back).
+ *
+ * @returns {string}
+ */
+function pluginVersion() {
+  if (pluginVersionCache !== null) return pluginVersionCache
+  let version = PLUGIN_VERSION_FALLBACK
+  try {
+    const raw = fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8')
+    const parsed = JSON.parse(raw)
+    if (parsed && typeof parsed.version === 'string' && parsed.version.trim() !== '') {
+      version = parsed.version.trim()
+    }
+  } catch {
+    // The package.json is not readable (a bundled build): the fallback is the
+    // version that was shipped with this build.
+  }
+  pluginVersionCache = version
+  return version
+}
+
+/**
+ * The features that are announced ONCE, after an upgrade.
+ *
+ * The install prompt only ever reaches a fresh installation, so an
+ * installation that already existed would never learn about a new feature.
+ * Every entry of this list is therefore announced once per version: the
+ * announcement is shown until the user presses "知道了", and the Host records
+ * the version it has shown, so it never comes back.
+ *
+ * @returns {{ feature: string, version: string }[]}
+ */
+function featureAnnouncements() {
+  return [
+    // The graceful shutdown ("收工关机") and its moon button.
+    { feature: 'sleep', version: pluginVersion() },
+  ]
+}
+
+/**
  * `@deepseek-ai/schemastery` resolves inside modules that live in the dsh installation,
  * but NOT from this bundle: a profile-installed bundle is a symlink into the user's
  * workspace, so Node resolves bare specifiers against the workspace realpath and never
@@ -418,6 +474,21 @@ function resolveSleepPath(config) {
   const index = healthPath.lastIndexOf('/')
   const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
   return `${prefix}/sleep`
+}
+
+/**
+ * Resolve the announcements-route path: a sibling of the health route, under
+ * the same prefix (`GET /announcements` reports the feature announcements the
+ * user has not seen yet, `POST /announcements` records that it saw one).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveAnnouncementsPath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/announcements`
 }
 
 /**
@@ -1845,6 +1916,63 @@ export function createRuntime(ctx, config, options = {}) {
     return { applied: 'fallback-file' }
   }
 
+  /**
+   * The feature announcements the user has not seen yet.
+   *
+   * A feature is pending when the recorded version is not the current one: a
+   * user who has seen the announcement of version 0.5.0 never sees it again,
+   * and a user who upgrades to a newer version sees the announcement of that
+   * version. A feature without a record is always pending — a missing record
+   * must never swallow an announcement.
+   *
+   * @returns {{ feature: string, version: string }[]}
+   */
+  const pendingAnnouncements = () => {
+    const seen = state.seenFeatureVersions && typeof state.seenFeatureVersions === 'object'
+      ? state.seenFeatureVersions
+      : {}
+    return featureAnnouncements().filter((entry) => seen[entry.feature] !== entry.version)
+  }
+
+  /**
+   * Record that the user has seen the announcement of one feature.
+   *
+   * The record lives in the checkpoint file, so it survives a restart of the
+   * Host: an announcement that was shown once does not come back with the
+   * next boot.
+   *
+   * @param {string} feature the id of the feature
+   * @returns {string[]} the features that are recorded now
+   */
+  const markFeatureSeen = (feature) => {
+    const id = typeof feature === 'string' ? feature.trim() : ''
+    if (id === '') return []
+    const known = featureAnnouncements().find((entry) => entry.feature === id)
+    if (!known) return []
+    if (!state.seenFeatureVersions || typeof state.seenFeatureVersions !== 'object') {
+      state.seenFeatureVersions = {}
+    }
+    state.seenFeatureVersions[id] = known.version
+    persist()
+    return Object.keys(state.seenFeatureVersions).sort()
+  }
+
+  /**
+   * Record that the user has seen the announcement of EVERY feature.
+   *
+   * This is what the one-time install prompt does: it already explains the
+   * features to a fresh installation, so no announcement may follow it.
+   *
+   * @returns {string[]} the features that are recorded now
+   */
+  const markAllFeaturesSeen = () => {
+    const seen = new Set()
+    for (const entry of featureAnnouncements()) {
+      for (const id of markFeatureSeen(entry.feature)) seen.add(id)
+    }
+    return Array.from(seen).sort()
+  }
+
   const runtime = {
     get state() {
       return state
@@ -1901,6 +2029,25 @@ export function createRuntime(ctx, config, options = {}) {
      * @returns {Promise<{ applied: 'config'|'fallback-file' }>}
      */
     applyConfigChoice: (changes) => persistConfigChoice(changes),
+    /**
+     * The feature announcements the user has not seen yet.
+     *
+     * @returns {{ feature: string, version: string }[]}
+     */
+    pendingAnnouncements,
+    /**
+     * Record that the user has seen the announcement of one feature.
+     *
+     * @param {string} feature
+     * @returns {string[]} the features that are recorded now
+     */
+    markFeatureSeen,
+    /**
+     * Record that the user has seen the announcement of every feature.
+     *
+     * @returns {string[]} the features that are recorded now
+     */
+    markAllFeaturesSeen,
     /**
      * Persist the user's one-time install choice: whether the pre-restart
      * backup also snapshots the installed plugin tree.
@@ -3403,6 +3550,86 @@ function buildHandoffRoute(ctx, runtime, config) {
 }
 
 /**
+ * Build the announcements route: the one-time announcement of a new feature.
+ *
+ * It sits next to the health route and uses the same authentication rule
+ * (loopback OR a request the connection service admits).
+ *
+ *   - `GET` answers `{ ok: true, pending: [{ feature, version }] }`: the
+ *     announcements the user has not seen yet (an empty list when there is
+ *     nothing new — a fresh installation is asked at the install prompt, so
+ *     it never gets an announcement);
+ *   - `POST` with `{ "feature": "sleep" }` records that the user has seen
+ *     that announcement and answers `{ ok: true, seen: [...] }`.
+ *
+ * The record lives in the checkpoint file, so an announcement that was shown
+ * once never comes back — not with the next boot and not with the next
+ * version of the plugin.
+ */
+function buildAnnouncementsRoute(ctx, runtime, config) {
+  const routePath = resolveAnnouncementsPath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      const answer = (payload, status = 200) => {
+        res.statusCode = status
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify(payload))
+      }
+      const method = req && typeof req.method === 'string' ? req.method.toUpperCase() : 'GET'
+      if (method === 'GET') {
+        answer({ ok: true, pending: runtime.pendingAnnouncements() })
+        return
+      }
+      if (method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'GET, POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then((payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const feature = typeof body.feature === 'string' ? body.feature.trim() : ''
+        if (feature === '') {
+          answer({
+            ok: false,
+            error: 'feature-required',
+            instruction: 'Send { "feature": "sleep" }.',
+          }, 400)
+          return
+        }
+        const known = featureAnnouncements().some((entry) => entry.feature === feature)
+        if (!known) {
+          answer({
+            ok: false,
+            error: 'unknown-feature',
+            instruction: `Send { "feature": ${featureAnnouncements().map((entry) => `"${entry.feature}"`).join(' | ')} }.`,
+          }, 400)
+          return
+        }
+        answer({ ok: true, seen: runtime.markFeatureSeen(feature) })
+      }).catch((error) => {
+        answer({ ok: false, error: describeError(error) }, 400)
+      })
+    },
+  }
+}
+
+/**
  * Build the POST `/choice` route: persist the one-time install choice of the
  * user (whether the pre-restart backup also snapshots the installed plugins),
  * the answer to the one-time question whether the graceful-sleep button is
@@ -3533,6 +3760,19 @@ function buildChoiceRoute(ctx, runtime, config) {
         if (hasShow) changes.showSleepButton = body.showSleepButton === true
         if (hasSeconds) changes.sleepCountdownSeconds = body.sleepCountdownSeconds
         const result = await runtime.applyConfigChoice(changes)
+        // The one-time install prompt explained the features to the user, so
+        // the announcement of a fresh installation must not follow it.
+        //
+        // Only the install prompt sends `includePlugins` and `showSleepButton`
+        // (the settings page writes `backupIncludePlugins`,
+        // `backupOnRestart` and `sleepCountdownSeconds`), so these two keys
+        // are exactly the "the install question was answered" moment.
+        if (hasInclude || hasShow) {
+          const seen = runtime.markAllFeaturesSeen()
+          if (seen.length > 0) {
+            runtime.log.info(`the install question marked the feature announcements as seen: ${seen.join(', ')}`)
+          }
+        }
         const answer = { ok: true, applied: result.applied }
         if (hasInclude) answer.includePlugins = body.includePlugins === true
         if (hasBackupInclude) answer.backupIncludePlugins = body.backupIncludePlugins === true
@@ -3947,6 +4187,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // The route that persists the one-time install choice, plus the
             // value that is effective right now.
             choiceUrl: resolveChoicePath(config),
+            // The route that reports (and records) the one-time feature
+            // announcements, so the client never has to guess the prefix.
+            announcementsUrl: resolveAnnouncementsPath(config),
             backupOnRestart: config.backupOnRestart !== false,
             backupIncludePlugins: config.backupIncludePlugins !== false,
             parkedGoals: parkedGoalList(runtime),
@@ -3964,6 +4207,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             parkUrl: resolveParkPath(config),
             recoverUrl: resolveRecoverPath(config),
             choiceUrl: resolveChoicePath(config),
+            announcementsUrl: resolveAnnouncementsPath(config),
             backupOnRestart: config.backupOnRestart !== false,
             backupIncludePlugins: config.backupIncludePlugins !== false,
             parkedGoals: [],
@@ -4023,6 +4267,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
     const recoverRoute = buildRecoverRoute(ctx, runtime, config)
     const handoffRoute = buildHandoffRoute(ctx, runtime, config)
     const choiceRoute = buildChoiceRoute(ctx, runtime, config)
+    const announcementsRoute = buildAnnouncementsRoute(ctx, runtime, config)
     const sleepRoute = sleep ? buildSleepRoute(ctx, runtime, config, sleep) : null
     try {
       const origin = typeof webServer.getOrigin === 'function' ? String(webServer.getOrigin()) : ''
@@ -4054,6 +4299,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       target.effect(() => webServer.register(choiceRoute), 'dsh-autorestart: choice route')
     } catch (error) {
       runtime.log.warn('could not register the choice route:', String(error))
+    }
+    try {
+      target.effect(() => webServer.register(announcementsRoute), 'dsh-autorestart: announcements route')
+    } catch (error) {
+      runtime.log.warn('could not register the announcements route:', String(error))
     }
     if (sleepRoute !== null) {
       try {
@@ -4287,4 +4537,7 @@ export {
   resolveStateDir,
   resolveChoicePath,
   resolveSleepPath,
+  resolveAnnouncementsPath,
+  featureAnnouncements,
+  pluginVersion,
 }

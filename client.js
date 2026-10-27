@@ -231,6 +231,17 @@ const ZH = {
   'sleep.choice.footnote': '以后可在 设置 → 自动重启与关机 修改',
   'sleep.choice.diagramLabel': '按钮出现在左侧栏最底部、设置按钮旁边',
   'sleep.choice.error': '保存失败：{message}',
+  // The one-time announcement of a new feature. An installation that already
+  // existed never sees the install prompt again, so this card is the only way
+  // a new feature reaches it.
+  'announcement.title': '新功能：收工关机',
+  'announcement.line1': '左侧栏最底部多了一个 🌙「收工关机」按钮。',
+  'announcement.line2': '点一下 → 所有会话收工后倒数 {n} 秒关机。',
+  'announcement.line2.generic': '点一下 → 所有会话收工后倒数几秒关机。',
+  'announcement.line3': '想改行为，去「设置 → 自动重启与关机」。',
+  'announcement.disabled': '按钮目前关闭，可在设置里打开。',
+  'announcement.button': '知道了',
+  'announcement.error': '没能记下来：{message}',
 }
 
 const EN = {
@@ -353,6 +364,17 @@ const EN = {
   'sleep.choice.footnote': 'You can change this later in Settings → Auto-restart & shut down',
   'sleep.choice.diagramLabel': 'The button sits at the bottom of the left sidebar, next to Settings',
   'sleep.choice.error': 'Could not save the choice: {message}',
+  // The one-time announcement of a new feature. An installation that already
+  // existed never sees the install prompt again, so this card is the only way
+  // a new feature reaches it.
+  'announcement.title': 'New feature: graceful shutdown',
+  'announcement.line1': 'There is a new 🌙 "Shut down" button at the very bottom of the left sidebar.',
+  'announcement.line2': 'Click it → once every conversation is done it counts down {n} seconds and powers the machine off.',
+  'announcement.line2.generic': 'Click it → once every conversation is done it counts down a few seconds and powers the machine off.',
+  'announcement.line3': 'To change that, go to "Settings → Auto-restart & shut down".',
+  'announcement.disabled': 'The button is currently switched off; you can turn it on in the settings.',
+  'announcement.button': 'Got it',
+  'announcement.error': 'Could not record it: {message}',
 }
 
 /**
@@ -1442,6 +1464,10 @@ if (moduleLoader) moduleLoader.load({
         if (busy) return
         writeBackupChoice('dismissed')
         writeSleepChoice('dismissed')
+        // "Do not ask me again" also covers the new-feature announcement: the
+        // install prompt is where the features of a fresh installation are
+        // explained, so no announcement may follow it.
+        void acknowledgeAnnouncement(ANNOUNCED_FEATURE).catch(() => {})
         setStep('done')
       }
 
@@ -1452,6 +1478,7 @@ if (moduleLoader) moduleLoader.load({
       const dismissSleep = () => {
         if (busy) return
         writeSleepChoice('dismissed')
+        void acknowledgeAnnouncement(ANNOUNCED_FEATURE).catch(() => {})
         setStep('done')
       }
 
@@ -3025,6 +3052,268 @@ if (moduleLoader) moduleLoader.load({
       return null
     }
 
+    /* ------------------------------------------------------------------ *
+     * The one-time announcement of a new feature.
+     * ------------------------------------------------------------------ */
+
+    // The route that reports the announcements the user has not seen yet and
+    // records that it saw one. It is a sibling of the health route and shares
+    // its prefix, so it is derived the very same way.
+    const DEFAULT_ANNOUNCEMENTS_URL = ROUTE_PREFIX + '/announcements'
+
+    // The feature this client half can describe. The Host may know more
+    // features, but only this one has a card here.
+    const ANNOUNCED_FEATURE = 'sleep'
+
+    /**
+     * The announcements the user has not seen yet.
+     *
+     * @returns {Promise<{ feature: string, version: string }[]>}
+     */
+    async function fetchAnnouncements() {
+      const response = await fetch(DEFAULT_ANNOUNCEMENTS_URL, { cache: 'no-store' })
+      if (!response.ok) return []
+      const body = await response.json().catch(() => null)
+      if (!body || typeof body !== 'object' || !Array.isArray(body.pending)) return []
+      return body.pending.filter((entry) => entry && typeof entry.feature === 'string')
+    }
+
+    /**
+     * The sleep status, read ONCE for the announcement.
+     *
+     * The card quotes the countdown length that is really in effect (it is
+     * never written into the copy) and says whether the moon button is
+     * switched on.
+     *
+     * @returns {Promise<object|null>}
+     */
+    async function fetchSleepStatusOnce() {
+      try {
+        const response = await fetch(DEFAULT_SLEEP_URL, { cache: 'no-store' })
+        if (!response.ok) return null
+        const body = await response.json().catch(() => null)
+        return body && typeof body === 'object' ? body : null
+      } catch {
+        return null
+      }
+    }
+
+    /**
+     * Tell the Host that the user has seen the announcement of a feature.
+     *
+     * @param {string} feature
+     * @returns {Promise<boolean>} true when the Host recorded it
+     */
+    async function acknowledgeAnnouncement(feature) {
+      const response = await fetch(DEFAULT_ANNOUNCEMENTS_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ feature }),
+      })
+      return response.ok === true
+    }
+
+    // The look of the card follows the install prompt: one heading, three
+    // lines of copy and one button. Only theme tokens are used, so light and
+    // dark themes both work.
+    const ANNOUNCEMENT_STYLE_ID = 'dsh-autorestart-announcement'
+    const ANNOUNCEMENT_CSS = [
+      '.dsh-autorestart-announcement{',
+      '  display:flex;',
+      '  flex-direction:column;',
+      '  gap:6px;',
+      '  width:min(560px,94vw);',
+      '  max-width:100%;',
+      '  box-sizing:border-box;',
+      '  margin:0 0 6px;',
+      '  padding:14px 16px;',
+      '  border:1px solid var(--dsw-alias-border-l1);',
+      '  border-radius:12px;',
+      '  background:var(--dsw-alias-bg-layer-1);',
+      '  box-shadow:0 8px 24px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 20%, transparent);',
+      '  color:var(--dsw-alias-label-secondary);',
+      '  font-size:13px;',
+      '  line-height:18px;',
+      '}',
+      '.dsh-autorestart-announcement h3{',
+      '  margin:0;',
+      '  font-size:14px;',
+      '  font-weight:600;',
+      '  line-height:20px;',
+      '  color:var(--dsw-alias-label-primary);',
+      '}',
+      '.dsh-autorestart-announcement p{margin:0;}',
+      '.dsh-autorestart-announcement__note{',
+      '  color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));',
+      '}',
+      '.dsh-autorestart-announcement__error{',
+      '  color:var(--dsw-alias-state-error-fg,var(--dsw-alias-label-secondary));',
+      '}',
+      '.dsh-autorestart-announcement__cta{',
+      '  align-self:flex-start;',
+      '  margin-top:4px;',
+      '  padding:5px 14px;',
+      '  border:none;',
+      '  border-radius:var(--dsw-radius-md,8px);',
+      '  background:var(--dsw-alias-brand-primary,#5b8def);',
+      '  color:var(--dsw-alias-label-on-primary,#fff);',
+      '  font:inherit;',
+      '  font-size:13px;',
+      '  line-height:20px;',
+      '  cursor:pointer;',
+      '}',
+      '.dsh-autorestart-announcement__cta:disabled{',
+      '  opacity:.6;',
+      '  cursor:default;',
+      '}',
+      '.dsh-autorestart-announcement__cta:focus-visible{',
+      '  outline:2px solid var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+      '  outline-offset:2px;',
+      '}',
+    ].join('\n')
+
+    /**
+     * Inject the announcement styles exactly once. The id keeps a second
+     * injection from duplicating the rule.
+     */
+    function ensureAnnouncementStyle() {
+      if (typeof document === 'undefined' || !document.head) return
+      try {
+        if (document.getElementById(ANNOUNCEMENT_STYLE_ID)) return
+        const style = document.createElement('style')
+        style.id = ANNOUNCEMENT_STYLE_ID
+        style.textContent = ANNOUNCEMENT_CSS
+        document.head.appendChild(style)
+      } catch {
+        // Without the stylesheet the card is still readable, just plainer.
+      }
+    }
+
+    /**
+     * The one-time card that announces a new feature.
+     *
+     * The install prompt only ever reaches a FRESH installation, so an
+     * installation that already existed would never learn about the new moon
+     * button — the feature would simply not exist for it. This card is that
+     * missing half: the Host reports the announcements the user has not seen
+     * yet, and the card disappears for good when the user presses "知道了".
+     *
+     * It is an ordinary block in the composer dock (the same place as the
+     * install prompt): it never covers the interface, it never touches the
+     * countdown, and it stays until the user answers it. An unanswered
+     * announcement comes back with the next start — it is never swallowed
+     * silently.
+     */
+    function FeatureAnnouncementPanel() {
+      const [state, setState] = useState({ loaded: false, pending: [], status: null, error: '' })
+      const [busy, setBusy] = useState(false)
+      const t = translate ?? ((name) => name)
+
+      useEffect(() => {
+        let cancelled = false
+        // The install prompt owns the dock while it is unanswered: a fresh
+        // installation must never get two prompts at once.
+        if (backupChoicePending() || sleepChoicePending()) return undefined
+        const load = async () => {
+          let pending = []
+          let status = null
+          try {
+            const [announced, sleepStatus] = await Promise.all([
+              fetchAnnouncements(),
+              fetchSleepStatusOnce(),
+            ])
+            pending = announced
+            status = sleepStatus
+          } catch {
+            // A failed request shows nothing: the announcement comes back
+            // with the next start (it is never swallowed silently).
+          }
+          if (cancelled) return
+          setState({ loaded: true, pending, status, error: '' })
+        }
+        void load()
+        return () => { cancelled = true }
+      }, [])
+
+      /**
+       * The "知道了" button: the Host records the announcement and the card
+       * disappears. A refused request keeps the card (with the reason), so
+       * the announcement is never lost.
+       */
+      const acknowledge = () => {
+        if (busy) return
+        setBusy(true)
+        setState((current) => ({ ...current, error: '' }))
+        void (async () => {
+          try {
+            const recorded = await acknowledgeAnnouncement(ANNOUNCED_FEATURE)
+            if (!recorded) throw new Error('the Host refused the announcement')
+          } catch (failure) {
+            setBusy(false)
+            setState((current) => ({
+              ...current,
+              error: fill(t('announcement.error'), { message: describeError(failure) }),
+            }))
+            return
+          }
+          setBusy(false)
+          setState((current) => ({
+            ...current,
+            pending: current.pending.filter((entry) => entry.feature !== ANNOUNCED_FEATURE),
+          }))
+        })()
+      }
+
+      if (!state.loaded) return null
+      const entry = state.pending.find((item) => item && item.feature === ANNOUNCED_FEATURE)
+      if (!entry) return null
+
+      // The countdown length is read from the Host, never written into the
+      // copy: the card always quotes what is really in effect.
+      const seconds = state.status && typeof state.status.countdownSeconds === 'number'
+        ? state.status.countdownSeconds
+        : null
+      const hidden = Boolean(state.status && state.status.showSleepButton === false)
+      ensureAnnouncementStyle()
+
+      return h(
+        'div',
+        {
+          className: 'dsh-autorestart-announcement',
+          role: 'status',
+          'data-dsh-autorestart-announcement': 'true',
+          'data-dsh-autorestart-announcement-feature': ANNOUNCED_FEATURE,
+        },
+        h('h3', { className: 'dsh-autorestart-announcement__title' }, t('announcement.title')),
+        h('p', { className: 'dsh-autorestart-announcement__line' }, t('announcement.line1')),
+        h(
+          'p',
+          { className: 'dsh-autorestart-announcement__line' },
+          seconds === null
+            ? t('announcement.line2.generic')
+            : fill(t('announcement.line2'), { n: seconds }),
+        ),
+        h('p', { className: 'dsh-autorestart-announcement__line' }, t('announcement.line3')),
+        hidden
+          ? h('p', { className: 'dsh-autorestart-announcement__note' }, t('announcement.disabled'))
+          : null,
+        state.error === ''
+          ? null
+          : h('p', { className: 'dsh-autorestart-announcement__error', role: 'alert' }, state.error),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-autorestart-announcement__cta',
+            'data-dsh-autorestart-announcement-ack': 'true',
+            disabled: busy,
+            onClick: acknowledge,
+          },
+          t('announcement.button'),
+        ),
+      )
+    }
+
     return {
       inject: ['slots', 'locale'],
       apply(ctx) {
@@ -3037,6 +3326,12 @@ if (moduleLoader) moduleLoader.load({
         ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'autorestart-restart-pill', order: 0 }, RestartPill))
         ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'autorestart-restart-dot', order: 20 }, RestartDot))
         ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'autorestart-backup-choice', order: 7, locale: NS }, BackupChoicePanel))
+        // The one-time announcement of a new feature: the install prompt only
+        // reaches a fresh installation, so an installation that already
+        // existed would never hear of a new feature. The card sits in the
+        // same dock (it never covers the interface and never touches the
+        // countdown) and disappears for good once the user answered it.
+        ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'autorestart-feature-announcement', order: 8, locale: NS }, FeatureAnnouncementPanel))
         // The graceful-shutdown button: a LIST slot at the foot of the left
         // sidebar, beside the Settings row. The slot is a ROOT slot, so the
         // button is there even when no conversation is open — and the

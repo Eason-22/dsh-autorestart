@@ -105,5 +105,15 @@
       "diagramLabel": "The button sits at the bottom of the left sidebar, next to Settings",
       "error": "Could not save the choice: {message}"
     }
+  },
+  "announcement": {
+    "title": "New feature: graceful shutdown",
+    "line1": "There is a new 🌙 \"Shut down\" button at the very bottom of the left sidebar.",
+    "line2": "Click it → once every conversation is done it counts down {n} seconds and powers the machine off.",
+    "line2Generic": "Click it → once every conversation is done it counts down a few seconds and powers the machine off.",
+    "line3": "To change that, go to \"Settings → Auto-restart & shut down\".",
+    "disabled": "The button is currently switched off; you can turn it on in the settings.",
+    "button": "Got it",
+    "error": "Could not record it: {message}"
   }
 }

@@ -75,6 +75,7 @@ import {
   runCommandNow,
   scheduleDetachedRestart,
 } from './lib/restart.js'
+import { compareSemver } from './lib/semver.js'
 import {
   createSleepController,
   COUNTDOWN_CHOICES,
@@ -202,6 +203,35 @@ function featureAnnouncements() {
     // The graceful shutdown ("收工关机") and its moon button.
     { feature: 'sleep', version: SLEEP_FEATURE_VERSION },
   ]
+}
+
+/**
+ * Whether the user has already seen the announcement of one feature.
+ *
+ * The record is the version that was announced when the user answered. It
+ * counts as seen as soon as it is NOT OLDER than the current feature version
+ * - not only when it is exactly that version:
+ *
+ *   - the announcement used to carry the version of the PACKAGE, so a user
+ *     who answered it on the release 0.6.0 recorded "0.6.0" while the feature
+ *     itself stands at "0.5.0". With an equality check that record would
+ *     look stale, and the very same card would be shown to a user who already
+ *     dismissed it;
+ *   - a record that is not a version at all counts as seen as well: a broken
+ *     record must not make the card come back for ever.
+ *
+ * A missing record counts as NOT seen: a missing record must never swallow an
+ * announcement.
+ *
+ * @param {unknown} recorded the version in the state file
+ * @param {string} current the current feature version
+ * @returns {boolean} true when the user has seen it
+ */
+function isFeatureSeen(recorded, current) {
+  if (typeof recorded !== 'string' || recorded.trim() === '') return false
+  const order = compareSemver(recorded, current)
+  if (order === null) return true
+  return order >= 0
 }
 
 /**
@@ -2154,12 +2184,16 @@ const titleOfSummary = (item) => {
   /**
    * The feature announcements the user has not seen yet.
    *
-   * A feature is pending when the recorded version is not the current one: a
-   * user who has seen the announcement of the feature version 0.5.0 never
-   * sees it again - not with the next release of the plugin, because the
-   * announcement follows the FEATURE and not the package. A feature without a
-   * record is always pending - a missing record must never swallow an
-   * announcement.
+   * A feature is pending when the recorded version is OLDER than the current
+   * one: a user who has seen the announcement of the feature version 0.5.0
+   * never sees it again - not with the next release of the plugin, because
+   * the announcement follows the FEATURE and not the package. A user who
+   * answered the card on an intermediate release (the announcement used to
+   * carry the package version) has seen it as well: a record that is not
+   * older than the current version never brings the card back.
+   *
+   * A feature without a record is always pending - a missing record must
+   * never swallow an announcement.
    *
    * @returns {{ feature: string, version: string }[]}
    */
@@ -2167,7 +2201,7 @@ const titleOfSummary = (item) => {
     const seen = state.seenFeatureVersions && typeof state.seenFeatureVersions === 'object'
       ? state.seenFeatureVersions
       : {}
-    return featureAnnouncements().filter((entry) => seen[entry.feature] !== entry.version)
+    return featureAnnouncements().filter((entry) => !isFeatureSeen(seen[entry.feature], entry.version))
   }
 
   /**

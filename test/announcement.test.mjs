@@ -298,6 +298,58 @@ test('a release does not bring the announcement back', async () => {
   assert.deepEqual(answer.body.pending, [], 'a release must not bring the announcement back')
 })
 
+test('a user who answered the card on 0.6.0 does not see it again', async () => {
+  // The record of a user who answered the card while the announcement still
+  // carried the version of the PACKAGE (0.6.0). The feature itself stands at
+  // 0.5.0, so the record is NEWER than the feature version - and the card
+  // must stay away from that user.
+  const file = stateWithSeenFeature('0.6.0')
+
+  const { ctx, routes } = createContext()
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const answer = await callAnnouncements(routes, 'GET')
+  assert.equal(answer.status, 200)
+  assert.deepEqual(
+    answer.body.pending,
+    [],
+    'a record that is not older than the feature version counts as seen',
+  )
+})
+
+test('a user who has seen an OLDER announcement sees the new one', async () => {
+  // The other side of the same rule: a record that is older than the current
+  // feature version means the user has not seen THIS announcement yet.
+  const file = stateWithSeenFeature('0.4.0')
+
+  const { ctx, routes } = createContext()
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const answer = await callAnnouncements(routes, 'GET')
+  assert.deepEqual(
+    answer.body.pending,
+    [{ feature: 'sleep', version: SLEEP_FEATURE_VERSION }],
+    'an older record must not hide a newer feature version',
+  )
+})
+
+test('a record that is not a version counts as seen', async () => {
+  // A broken record must not make the card come back for ever: the user is
+  // more annoyed by a card that never goes away than by one that is missing
+  // once.
+  const file = stateWithSeenFeature('garbage')
+
+  const { ctx, routes } = createContext()
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const answer = await callAnnouncements(routes, 'GET')
+  assert.deepEqual(
+    answer.body.pending,
+    [],
+    'an unreadable record must not make the announcement come back',
+  )
+})
+
 test('a new FEATURE version brings the announcement back on purpose', async () => {
   // The other half of the promise: the announcement can still be announced
   // again — by raising the feature version, never by releasing.
@@ -317,6 +369,28 @@ test('a new FEATURE version brings the announcement back on purpose', async () =
     answer.body.pending,
     [{ feature: 'sleep', version: '0.6.0' }],
     'a new feature version must be announced again',
+  )
+})
+
+test('a FEATURE version above the record brings the announcement back', async () => {
+  // The same rule with the numbers the real installation runs into: a record
+  // of 0.6.0 and a feature version of 0.7.0.
+  const { module } = await clonePlugin('feature-070', { featureVersion: '0.7.0' })
+  assert.deepEqual(
+    module.featureAnnouncements(),
+    [{ feature: 'sleep', version: '0.7.0' }],
+    'the clone must really run the new feature version',
+  )
+
+  const file = stateWithSeenFeature('0.6.0')
+  const { ctx, routes } = createContext()
+  module.apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const answer = await callAnnouncements(routes, 'GET')
+  assert.deepEqual(
+    answer.body.pending,
+    [{ feature: 'sleep', version: '0.7.0' }],
+    'a feature version above the record must be announced again',
   )
 })
 
@@ -349,6 +423,10 @@ test('the settings page does NOT mark the announcement as seen', async () => {
 })
 
 test('a broken record never hides the announcement', async () => {
+  // A record that is not even a string is DROPPED by the checkpoint: there is
+  // no record at all then, and a missing record must never swallow an
+  // announcement. (A record that IS a string but not a version counts as seen
+  // — see 'a record that is not a version counts as seen'.)
   const file = tempStateFile('broken')
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, JSON.stringify({

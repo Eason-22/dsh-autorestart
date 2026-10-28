@@ -499,6 +499,8 @@ test('the pill counts TASKS, not conversations', async () => {
       waiters: ['sess-waiting'],
       blockedBy: [
         { sessionId: 'sess-a', kind: 'session', label: '写代码', reason: 'running' },
+        // A subagent of that very session: the label of a subagent IS the
+        // title of the session that created it.
         { sessionId: 'sess-child', kind: 'subagent', label: '写代码', reason: 'running' },
         { sessionId: 'sess-b', kind: 'session', label: '调研', reason: 'queued' },
       ],
@@ -508,7 +510,10 @@ test('the pill counts TASKS, not conversations', async () => {
   const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-waiting' })
   assert.ok(pill, 'the pill must be shown while the restart waits')
   const text = textOf(pill)
-  assert.match(text, /等待 3 个任务结束/, `the pill must count the tasks: ${text}`)
+  // TWO tasks: the session "写代码" and its own subagent are ONE task (the
+  // sidebar counts them once), plus the session "调研".
+  assert.match(text, /等待 2 个任务结束/, `the pill must count the tasks: ${text}`)
+  assert.doesNotMatch(text, /等待 3 个任务结束/, 'a session and its own subagent are one task')
   assert.doesNotMatch(text, /会话占用/, 'the old wording must be gone')
   assert.doesNotMatch(text, /个会话/, 'the pill must not talk about conversations any more')
 })
@@ -566,9 +571,11 @@ test('the waiting card tells a session and a subagent apart', async () => {
   assert.match(text, /写代码的子智能体正在运行/, `the subagent must be named: ${text}`)
   assert.doesNotMatch(text, /子智能体（/, 'the subagent is not an annotation')
   assert.doesNotMatch(text, /sess-/, 'a raw session id must never be shown')
-  // The count is about tasks, and it says how many of them are subagents.
-  assert.match(text, /还有 2 个任务在干活/, `the count must talk about tasks: ${text}`)
-  assert.match(text, /其中 1 个是子智能体/, `the subagents must be counted: ${text}`)
+  // The count is about tasks: the session and its own subagent are ONE task
+  // (the sidebar counts them once). And that task is not a "subagent task":
+  // the session itself works, so the card has nothing to add.
+  assert.match(text, /还有 1 个任务在干活/, `the count must talk about tasks: ${text}`)
+  assert.doesNotMatch(text, /其中 \d+ 个是子智能体/, `the task is the session itself: ${text}`)
 })
 
 test('the waiting card says nothing about subagents when there are none', async () => {

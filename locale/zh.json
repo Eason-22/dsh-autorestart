@@ -58,7 +58,21 @@
       "access": "当前访问链接",
       "accessHint": "重启后 token 会变，链接也会变。这个链接一直是最新的。",
       "pending": "卸载没有完成，请手动执行：{commands}",
-      "reason": "说明"
+      "reason": "说明",
+      "command": "重启命令",
+      "derive": "推导重启命令",
+      "apply": "就用这条命令",
+      "revert": "撤销",
+      "noCommand": "推不出可重放的重启命令",
+      "plan": "干跑预览",
+      "reason.ok": "可以用这条命令重新拉起这个 DSH。",
+      "reason.desktop-app": "桌面版自带重启，不用管这条命令。",
+      "reason.not-a-web-host": "这个 DSH 不是网页型宿主，没有端口也没有监听器。",
+      "reason.argv-unavailable": "读不回启动命令行（它是被一个特殊方式拉起来的），所以不猜。",
+      "reason.external-supervisor": "已经有别的守护在管这个进程：装第二个会抢端口。改为「优雅退出，让它拉起我」。",
+      "reason.container-no-init": "这台机器没有开机自启机制（容器），所以不承诺自动拉起。",
+      "reason.port-not-fixable": "端口每次都变，浏览器会被踢出去；得先把端口固定下来。",
+      "reason.supervised": "插件自己的守护在管这个进程，重启直接交给它。"
     },
     "error": "没能保存设置：{message}"
   },

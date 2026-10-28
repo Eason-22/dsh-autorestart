@@ -54,11 +54,124 @@ test('detectEnvironment reports the desktop app exe and the host pid chain', () 
   assert.equal(environment.appExePath, APP_EXE);
 });
 
-test('detectEnvironment treats any DeepSeek Harness execPath as the desktop app', () => {
+test('detectEnvironment does not mistake the bundled node of the app for the app', () => {
+  // The PATH of this runtime mentions the desktop app — the FILE NAME does not.
+  // It is the node the app ships, and a hosted deployment may run with it: it
+  // is NOT the desktop app, and it must get a restart command like any other
+  // hosted host.
   const environment = detectEnvironment({ platform: 'win32', execPath: RUNTIME_NODE, env: {}, pid: 1, ppid: 2 });
+  assert.equal(environment.isDesktopApp, false);
+  assert.equal(environment.appExePath, null);
+});
+
+test('detectEnvironment judges the desktop app by its FILE NAME, never by its path', () => {
+  // 1) The desktop app: the file name IS the app.
+  const desktop = detectEnvironment({
+    platform: 'win32',
+    execPath: 'C:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe',
+    env: {},
+    pid: 1,
+    ppid: 2,
+  });
+  assert.equal(desktop.isDesktopApp, true);
+  assert.equal(desktop.appExePath, 'C:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe');
+
+  // 2) The node the app ships: the path mentions the app, the file name does not.
+  const bundled = detectEnvironment({ platform: 'win32', execPath: RUNTIME_NODE, env: {}, pid: 1, ppid: 2 });
+  assert.equal(bundled.isDesktopApp, false);
+  assert.equal(bundled.appExePath, null);
+
+  // 3) A plain node.
+  const plain = detectEnvironment({ platform: 'linux', execPath: '/usr/bin/node', env: {}, pid: 1, ppid: 2 });
+  assert.equal(plain.isDesktopApp, false);
+  assert.equal(plain.appExePath, null);
+
+  // 4) The hyphenated file name is the same app.
+  const hyphen = detectEnvironment({
+    platform: 'win32',
+    execPath: 'C:\\apps\\deepseek-harness.exe',
+    env: {},
+    pid: 1,
+    ppid: 2,
+  });
+  assert.equal(hyphen.isDesktopApp, true);
+  assert.equal(hyphen.appExePath, 'C:\\apps\\deepseek-harness.exe');
+});
+
+test('detectEnvironment believes the process tree when the file name cannot answer', () => {
+  // The desktop host runs the Electron binary as node: it carries the marker
+  // AND its parent is the Electron shell.
+  const environment = detectEnvironment({
+    platform: 'win32',
+    execPath: RUNTIME_NODE,
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+    pid: 10,
+    ppid: 100,
+    readChain: () => [{ pid: 100, ppid: 90, imageName: 'DeepSeek Harness.exe', commandLine: '' }],
+  });
   assert.equal(environment.isDesktopApp, true);
-  // Verified rule: appExePath is the runtime exec path itself when it is the app.
-  assert.equal(environment.appExePath, RUNTIME_NODE);
+  // The binary itself is NOT the app launcher: an unknown binary is never
+  // started again by the plugin.
+  assert.equal(environment.appExePath, null);
+});
+
+test('detectEnvironment does not believe a shell that only inherited the marker', () => {
+  // A terminal that the desktop app spawned is not the desktop app: the chain
+  // leaves the Electron family at the shell.
+  const environment = detectEnvironment({
+    platform: 'win32',
+    execPath: RUNTIME_NODE,
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+    pid: 10,
+    ppid: 100,
+    readChain: () => [
+      { pid: 100, ppid: 90, imageName: 'powershell.exe', commandLine: '' },
+      { pid: 90, ppid: 80, imageName: 'DeepSeek Harness.exe', commandLine: '' },
+    ],
+  });
+  assert.equal(environment.isDesktopApp, false);
+  assert.equal(environment.appExePath, null);
+});
+
+test('detectEnvironment stays silent when the process tree cannot be read', () => {
+  // An unreadable chain is not evidence AGAINST the desktop app: this signal
+  // simply says nothing, and the file name keeps the last word.
+  const environment = detectEnvironment({
+    platform: 'win32',
+    execPath: RUNTIME_NODE,
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+    pid: 10,
+    ppid: 100,
+    readChain: () => [],
+  });
+  assert.equal(environment.isDesktopApp, false);
+
+  const desktop = detectEnvironment({
+    platform: 'win32',
+    execPath: APP_EXE,
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+    pid: 10,
+    ppid: 100,
+    readChain: () => [],
+  });
+  assert.equal(desktop.isDesktopApp, true, 'an unreadable chain never denies the desktop verdict');
+});
+
+test('detectEnvironment does not read the process tree when the file name already answers', () => {
+  let asked = 0;
+  const environment = detectEnvironment({
+    platform: 'win32',
+    execPath: APP_EXE,
+    env: { ELECTRON_RUN_AS_NODE: '1' },
+    pid: 10,
+    ppid: 100,
+    readChain: () => {
+      asked += 1;
+      return [];
+    },
+  });
+  assert.equal(environment.isDesktopApp, true);
+  assert.equal(asked, 0, 'the file name is enough: the process tree is not read');
 });
 
 test('detectEnvironment does not pretend a plain node install is the desktop app', () => {

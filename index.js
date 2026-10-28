@@ -91,6 +91,15 @@ import {
   writeRollbackRequest,
 } from './lib/supervisor.js'
 import { composeFragment, detectInitSystems } from './lib/supervisor-install.js'
+import { countBlockerTasks } from './lib/blockers.js'
+import {
+  buildDryRunPlan,
+  composeRestartFragment,
+  deriveStartCommand,
+  detectContainer,
+  detectExternalSupervisor,
+  pickFreePort,
+} from './lib/supervisor-config.js'
 import { waitForHealthyInstance } from './lib/health.js'
 import {
   buildCustomCommand,
@@ -2582,17 +2591,139 @@ const titleOfSummary = (item) => {
    * Record the answer of the one-time question about the supervisor.
    *
    * @param {string} choice 'install' | 'external' | 'dismissed'
+   * @param {object} [previous] the values that were in effect before
    * @returns {object} the recorded answer
    */
-  const recordSupervisorChoice = (choice) => {
+  const recordSupervisorChoice = (choice, previous = null) => {
     const record = recordOnboarding(state, {
       feature: 'supervisor',
       version: SUPERVISOR_FEATURE_VERSION,
       choice,
+      previous,
       now: Date.now(),
     })
     persist()
     return record
+  }
+
+  /**
+   * Derive the command that starts this host again — or say why there is
+   * none. Nothing is written: this is the dry run (B).
+   *
+   * @param {{ fixedPort?: number }} [options]
+   * @returns {Promise<object>} the derivation (the plan of what WOULD be written)
+   */
+  const deriveStartCommandNow = async (options = {}) => {
+    const detected = detectSupervisor({ env: process.env, stateDir: stateDirOf() })
+    const external = detectExternalSupervisor({
+      ppid: process.ppid,
+      env: process.env,
+      platform: env.platform,
+    })
+    const container = detectContainer({ env: process.env })
+    const init = detectInitSystems({ platform: env.platform, homeDir: os.homedir() })
+    // A random port has to be FIXED, or the cookie of the browser dies with
+    // every restart. The port is picked once and then written down.
+    let fixedPort = Number(options.fixedPort) > 0 ? Number(options.fixedPort) : 0
+    if (fixedPort === 0 && config.supervisorPort > 0) fixedPort = config.supervisorPort
+    if (fixedPort === 0 && Number(runtime.webPort) > 0 && config.supervisorPort === 0) {
+      // The port of the running instance is the best candidate: it is the one
+      // the browser knows.
+      fixedPort = Number(runtime.webPort)
+    }
+    const derivation = deriveStartCommand({
+      execPath: process.execPath,
+      execArgv: process.execArgv,
+      argv: process.argv,
+      cwd: process.cwd(),
+      platform: env.platform,
+      env: process.env,
+      pid: process.pid,
+      isDesktopApp: env.isDesktopApp === true,
+      webPort: runtime.webPort || 0,
+      supervised: detected.supervised === true,
+      externalSupervisor: external,
+      container: container.container,
+      hasInit: env.platform === 'win32' ? true : init.systemdUser,
+      fixedPort,
+      currentRestartMode: config.restartMode,
+      currentRestartCommand: config.restartCommand,
+      healthPath: resolveHealthPath(config),
+    })
+    const plan = buildDryRunPlan(derivation)
+    return {
+      ...plan,
+      derivation,
+      externalSupervisor: external,
+      container: container.container,
+      initReason: init.reason,
+      // The fragment a container needs (there is no "at login" there).
+      compose: derivation.reason === 'container-no-init' && derivation.argv
+        ? composeRestartFragment(derivation.argv)
+        : null,
+    }
+  }
+
+  /**
+   * Write the derived command into the profile configuration — only after the
+   * user confirmed the dry run.
+   *
+   * @param {{ derivation?: object }} [options]
+   * @returns {Promise<object>} the outcome
+   */
+  const applyDerivedCommand = async (options = {}) => {
+    const derivation = options.derivation && typeof options.derivation === 'object'
+      ? options.derivation
+      : await deriveStartCommandNow()
+    if (!derivation || derivation.ok !== true || !derivation.writes) {
+      return {
+        ok: false,
+        error: 'nothing-to-write',
+        reason: derivation ? derivation.reason : 'unknown',
+      }
+    }
+    const previous = {
+      restartMode: config.restartMode,
+      restartCommand: config.restartCommand,
+    }
+    try {
+      await runtime.applyConfigChoice({
+        restartMode: derivation.writes.restartMode,
+        restartCommand: derivation.writes.restartCommand,
+      })
+    } catch (error) {
+      return { ok: false, error: describeError(error), reason: derivation.reason }
+    }
+    // The values that were in effect are kept, so the undo can put them back.
+    recordSupervisorChoice('external', previous)
+    log.warn('the derived restart command was written', {
+      mode: derivation.writes.restartMode,
+      reason: derivation.reason,
+    })
+    return { ok: true, writes: derivation.writes, previous, reason: derivation.reason }
+  }
+
+  /**
+   * Put the previous start command back (the undo).
+   *
+   * @returns {Promise<object>} the outcome
+   */
+  const revertDerivedCommand = async () => {
+    const record = state.onboarding
+    const previous = record && typeof record === 'object' ? record.previous : null
+    if (!previous || typeof previous.restartMode !== 'string') {
+      return { ok: false, error: 'nothing-to-revert' }
+    }
+    try {
+      await runtime.applyConfigChoice({
+        restartMode: previous.restartMode,
+        restartCommand: previous.restartCommand === null ? '' : previous.restartCommand,
+      })
+    } catch (error) {
+      return { ok: false, error: describeError(error) }
+    }
+    log.warn('the previous restart command was put back', previous)
+    return { ok: true, previous }
   }
 
   /**
@@ -2840,6 +2971,31 @@ const titleOfSummary = (item) => {
       } catch {}
 
       if (useCustomCommand) {
+        // (0) THE C ROUTE. When the supervisor of this plugin started this
+        // instance, the restart is asked of the SUPERVISOR (over its control
+        // channel) — not of a command. The supervisor kills the host, starts
+        // it again and puts the snapshot back if it does not come.
+        const detected = detectSupervisor({ env: process.env, stateDir })
+        if (detected.supervised) {
+          if (backup && backup.ok === true) {
+            writeRollbackRequest(stateDir, {
+              backupDir: backup.dir,
+              profileDir: profileDir ?? '',
+              generation: state.generation,
+              reason: 'plugin-restart',
+            })
+          }
+          const asked = await requestSupervisorAction({ stateDir, action: 'restart' })
+          if (asked && asked.ok === true) {
+            log.warn('the restart was handed to the supervisor of this plugin')
+            return
+          }
+          log.error(
+            'the supervisor did not accept the restart request; falling back to the restart command:',
+            asked ? asked.error : 'unknown error',
+          )
+        }
+
         const command = buildCustomCommand({
           template: config.restartCommand,
           pid: process.pid,
@@ -2853,7 +3009,11 @@ const titleOfSummary = (item) => {
         // confirm anything once the command runs. The watcher is started
         // BEFORE the command: it waits for the new instance outside the host
         // and puts the snapshot back when the new instance never comes.
-        armRollbackWatcher({ backup, profileDir })
+        //
+        // It is NOT armed when the supervisor of this plugin is in charge:
+        // that one restores the snapshot itself, and two of them would write
+        // the same files at the same time.
+        if (!detected.supervised) armRollbackWatcher({ backup, profileDir })
 
         try {
           // (2) THE COMMAND, with a real success judgement. The old code only
@@ -3275,6 +3435,20 @@ const titleOfSummary = (item) => {
      * Record the answer of the one-time question about the supervisor.
      */
     recordSupervisorChoice: recordSupervisorChoice,
+    /**
+     * Derive the command that starts this host again (the dry run: nothing is
+     * written).
+     */
+    deriveStartCommand: deriveStartCommandNow,
+    /**
+     * Write the derived command into the profile configuration (only after
+     * the user confirmed it).
+     */
+    applyDerivedCommand: applyDerivedCommand,
+    /**
+     * Put the previous start command back (the undo).
+     */
+    revertDerivedCommand: revertDerivedCommand,
     /**
      * The answer of the one-time question about the supervisor (null when it
      * was never answered).
@@ -4529,8 +4703,8 @@ function registerTools(ctx, runtime, config) {
       properties: {
         action: {
           type: 'string',
-          enum: ['status', 'plan', 'install', 'uninstall'],
-          description: 'What to do: "status" (read-only), "plan" (the dry run: what would change), "install" or "uninstall" (the real thing, they need confirmed: true).',
+          enum: ['status', 'plan', 'dry-run', 'install', 'uninstall', 'apply', 'revert'],
+          description: 'What to do: "status" (read-only), "plan" (what the installation would change), "dry-run" (the command this host would be restarted with, and why it may not be derivable), "install"/"uninstall" (the real thing, they need confirmed: true), "apply" (write the derived restart command after the user confirmed the dry run) and "revert" (put the previous command back).',
         },
         confirmed: {
           type: 'boolean',
@@ -4568,6 +4742,23 @@ function registerTools(ctx, runtime, config) {
       const supervisor = runtime.supervisorStatus()
       if (action === 'status') {
         return { ok: true, action, supervisor }
+      }
+      if (action === 'dry-run' || action === 'derive') {
+        // B: the dry run. It reports what WOULD be written; it writes nothing.
+        const plan = await runtime.deriveStartCommand()
+        return {
+          ok: plan.ok === true,
+          action,
+          level: plan.level,
+          mode: plan.mode,
+          reason: plan.reason,
+          command: plan.command,
+          plan: plan.plan,
+          needsConfirmation: plan.needsConfirmation !== false,
+          writes: plan.writes,
+          compose: plan.compose,
+          supervisor,
+        }
       }
       if (action === 'plan') {
         const plan = planSupervisorInstall({
@@ -5539,8 +5730,9 @@ function buildSupervisorRoute(ctx, runtime, config) {
           res.end(JSON.stringify({ ok: true, action, supervisor: runtime.supervisorStatus() }))
           return
         }
-        if (action === 'plan' || action === 'dry-run') {
-          // The dry run: the plan is reported, nothing is written or run.
+        if (action === 'plan' || action === 'install-plan') {
+          // The installation plan: what the registration WOULD do. Nothing is
+          // written and nothing is run.
           const plan = planSupervisorInstall({
             platform: runtime.env.platform,
             nodePath: process.execPath,
@@ -5552,6 +5744,45 @@ function buildSupervisorRoute(ctx, runtime, config) {
           res.setHeader('content-type', 'application/json; charset=utf-8')
           res.setHeader('cache-control', 'no-store')
           res.end(JSON.stringify({ ok: true, action, plan, supervisor: runtime.supervisorStatus() }))
+          return
+        }
+        if (action === 'dry-run' || action === 'derive') {
+          // B: the dry run. It shows what WOULD be written and runs nothing.
+          const plan = await runtime.deriveStartCommand()
+          res.statusCode = 200
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({ ok: true, action, plan, supervisor: runtime.supervisorStatus() }))
+          return
+        }
+        if (action === 'apply' || action === 'revert') {
+          if (body.confirmed !== true) {
+            // The dry run is the confirmation: without it nothing is written.
+            res.statusCode = 400
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.setHeader('cache-control', 'no-store')
+            res.end(JSON.stringify({
+              ok: false,
+              error: 'confirmation-required',
+              instruction: 'Send { "action": "' + action + '", "confirmed": true } after the user confirmed the dry run.',
+            }))
+            return
+          }
+          const result = action === 'apply'
+            ? await runtime.applyDerivedCommand()
+            : await runtime.revertDerivedCommand()
+          res.statusCode = result.ok === true ? 200 : 500
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: result.ok === true,
+            action,
+            error: result.error ?? null,
+            writes: result.writes ?? null,
+            previous: result.previous ?? null,
+            reason: result.reason ?? null,
+            supervisor: runtime.supervisorStatus(),
+          }))
           return
         }
         if (action === 'external') {
@@ -6076,7 +6307,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
           // window it stops blocking the restart.
           queuedGraceMs: config.queuedGraceMs,
           quietForMs: typeof verdict.quietForMs === 'number' ? verdict.quietForMs : 0,
-          busyCount: verdict.blockedBy.length,
+          // The number of TASKS the restart waits for: a session and its own
+          // subagents are ONE task, exactly as the left sidebar counts them.
+          busyCount: countBlockerTasks(verdict.blockedBy),
           agentCount,
         })
         res.statusCode = 200

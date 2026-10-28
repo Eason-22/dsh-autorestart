@@ -427,6 +427,39 @@ it is gone.
 The desktop app is **not** asked: it brings itself back up on its own (`restartMode: app`), so the
 question would be noise there.
 
+### "Keep the way I start it": the derived restart command (E) and the dry run (B)
+
+When the user keeps their own way of starting the host, the plugin can still write down a command
+that starts it again — but only if it can be derived **without guessing**. A wrong command is worse
+than no command: it looks like a restart and leaves the user with a dead host.
+
+The candidate is built from what the process itself knows: `[process.execPath, ...process.execArgv,
+...process.argv.slice(1)]` plus the working directory. The **priority** decides what happens next:
+
+| Level | Situation | What is written |
+|---|---|---|
+| **E0** | The supervisor of this plugin started this instance | Nothing — the restart is asked of the supervisor over its control channel (the plugin writes the rollback request and lets the supervisor kill and start the host). |
+| **E1** | An **external** supervisor is in charge (systemd, a user script, pm2) | **Not** a self-replay command: `restartCommand` becomes a graceful exit (`kill -TERM <pid>` / `taskkill /PID <pid>`), because the other supervisor starts the host again. A second supervisor would fight over the port. |
+| **E2** | No supervisor and no init (a container) | The command is handed out together with a compose fragment (`restart: always`); no automatic start is promised. |
+| **E3** | No supervisor, an init is available | The derived command — after the user confirmed the dry run. |
+
+The **refusals** (each one has a code, and each one names the way out): the desktop app (it restarts
+itself), a host without a web server, a command line that cannot be read back, an external
+supervisor, a container without an init, and a port that changes on every start (the cookie of the
+browser would die with it — the port has to be fixed).
+
+The **dry run** (B) is the promise: the command, the working directory, the port and the health URL
+are shown **before** anything is written. Only an explicit confirmation writes the command into the
+profile configuration; the values that were in effect before are kept, so the settings page can put
+them back with one click.
+
+- The dry run: `POST /__dsh_autorestart/supervisor` with `{ "action": "dry-run" }` (or the tool
+  `continuum_supervisor` with `action: "dry-run"`) — it writes nothing.
+- The confirmation: `{ "action": "apply", "confirmed": true }` — without `confirmed` the Host
+  answers `400 confirmation-required` and writes nothing.
+- The undo: `{ "action": "revert", "confirmed": true }` — the previous `restartMode` /
+  `restartCommand` are written back.
+
 ### The one-time install question
 
 The first time the plugin is used, the composer dock shows ONE non-modal panel that asks whether the

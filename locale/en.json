@@ -58,7 +58,21 @@
       "access": "The current access link",
       "accessHint": "The token changes with every restart, and so does the link. This one is always the current one.",
       "pending": "The uninstall did not finish. Please run it by hand: {commands}",
-      "reason": "Why"
+      "reason": "Why",
+      "command": "The restart command",
+      "derive": "Derive the restart command",
+      "apply": "Use this command",
+      "revert": "Undo",
+      "noCommand": "No replayable restart command could be derived",
+      "plan": "Dry run",
+      "reason.ok": "This command starts this DSH again.",
+      "reason.desktop-app": "The desktop app restarts itself; there is no command to write.",
+      "reason.not-a-web-host": "This DSH is not a web host: it has no port and no listener.",
+      "reason.argv-unavailable": "The command line cannot be read back (it was started in a special way), so nothing is guessed.",
+      "reason.external-supervisor": "Another supervisor is already in charge: a second one would fight over the port. The restart becomes \"exit gracefully and let it start me again\".",
+      "reason.container-no-init": "This machine has no \"at login\" (a container), so no automatic start is promised.",
+      "reason.port-not-fixable": "The port changes every time, so the browser would be logged out; the port has to be fixed first.",
+      "reason.supervised": "The supervisor of this plugin is in charge: the restart is handed to it."
     },
     "error": "Could not save the settings: {message}"
   },

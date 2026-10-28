@@ -287,6 +287,20 @@ const ZH = {
   'settings.supervisor.accessHint': '重启后 token 会变，链接也会变。这个链接一直是最新的。',
   'settings.supervisor.pending': '卸载没有完成，请手动执行：{commands}',
   'settings.supervisor.reason': '说明',
+  'settings.supervisor.command': '重启命令',
+  'settings.supervisor.derive': '推导重启命令',
+  'settings.supervisor.apply': '就用这条命令',
+  'settings.supervisor.revert': '撤销',
+  'settings.supervisor.noCommand': '推不出可重放的重启命令',
+  'settings.supervisor.plan': '干跑预览',
+  'settings.supervisor.reason.ok': '可以用这条命令重新拉起这个 DSH。',
+  'settings.supervisor.reason.desktop-app': '桌面版自带重启，不用管这条命令。',
+  'settings.supervisor.reason.not-a-web-host': '这个 DSH 不是网页型宿主，没有端口也没有监听器。',
+  'settings.supervisor.reason.argv-unavailable': '读不回启动命令行（它是被一个特殊方式拉起来的），所以不猜。',
+  'settings.supervisor.reason.external-supervisor': '已经有别的守护在管这个进程：装第二个会抢端口。改为「优雅退出，让它拉起我」。',
+  'settings.supervisor.reason.container-no-init': '这台机器没有开机自启机制（容器），所以不承诺自动拉起。',
+  'settings.supervisor.reason.port-not-fixable': '端口每次都变，浏览器会被踢出去；得先把端口固定下来。',
+  'settings.supervisor.reason.supervised': '插件自己的守护在管这个进程，重启直接交给它。',
   'settings.error': '没能保存设置：{message}',
   'sleep.dryRun.title': '试运行：不会真的关机',
   'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
@@ -509,6 +523,20 @@ const EN = {
   'settings.supervisor.accessHint': 'The token changes with every restart, and so does the link. This one is always the current one.',
   'settings.supervisor.pending': 'The uninstall did not finish. Please run it by hand: {commands}',
   'settings.supervisor.reason': 'Why',
+  'settings.supervisor.command': 'The restart command',
+  'settings.supervisor.derive': 'Derive the restart command',
+  'settings.supervisor.apply': 'Use this command',
+  'settings.supervisor.revert': 'Undo',
+  'settings.supervisor.noCommand': 'No replayable restart command could be derived',
+  'settings.supervisor.plan': 'Dry run',
+  'settings.supervisor.reason.ok': 'This command starts this DSH again.',
+  'settings.supervisor.reason.desktop-app': 'The desktop app restarts itself; there is no command to write.',
+  'settings.supervisor.reason.not-a-web-host': 'This DSH is not a web host: it has no port and no listener.',
+  'settings.supervisor.reason.argv-unavailable': 'The command line cannot be read back (it was started in a special way), so nothing is guessed.',
+  'settings.supervisor.reason.external-supervisor': 'Another supervisor is already in charge: a second one would fight over the port. The restart becomes "exit gracefully and let it start me again".',
+  'settings.supervisor.reason.container-no-init': 'This machine has no "at login" (a container), so no automatic start is promised.',
+  'settings.supervisor.reason.port-not-fixable': 'The port changes every time, so the browser would be logged out; the port has to be fixed first.',
+  'settings.supervisor.reason.supervised': 'The supervisor of this plugin is in charge: the restart is handed to it.',
   'settings.error': 'Could not save the settings: {message}',
   'sleep.dryRun.title': 'Dry run: the machine stays on',
   'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
@@ -923,6 +951,187 @@ function blockerParentKey(entry) {
   return null
 }
 
+/* ------------------------------------------------------------------ *
+ * THE TASK COUNT: one rule, four surfaces.
+ *
+ * A TASK is one conversation of the left sidebar: the session itself. A
+ * subagent belongs to the session that spawned it, so a session and its
+ * subagents are ONE task — the sidebar counts them once, and so does the
+ * bubble.
+ *
+ * The defect this fixes: the bubble counted every BLOCKER, so a session
+ * with two subagents was three tasks. The sidebar showed two busy
+ * conversations and the bubble said "waiting for 3 tasks to finish".
+ *
+ * The rule:
+ *
+ *   - a session is a task of its own (its key is its own session id);
+ *   - a subagent belongs to the session that created it (its key is the
+ *     PARENT's session id), so a parent and its subagents are ONE task;
+ *   - a subagent whose parent is only known by its TITLE joins the session
+ *     with that title (the shutdown card reports the title but no id);
+ *   - a subagent with no known parent is a task of its own;
+ *   - a pending restart is not a task.
+ *
+ * MIRRORED: `lib/blockers.js` (the host half) carries the same rule — the
+ * client is a CLASSIC script and cannot import that module. The two
+ * implementations MUST agree, and `test/task-count.test.mjs` runs the same
+ * cases through both.
+ * ------------------------------------------------------------------ */
+
+/** The prefix of the key of a family that is known by its session id. */
+const TASK_KEY_SESSION = 'session:'
+
+/** The prefix of the key of a family that is only known by its title. */
+const TASK_KEY_TITLE = 'title:'
+
+/**
+ * The session id of a blocker.
+ *
+ * @param {any} entry
+ * @returns {string}
+ */
+function blockerSessionId(entry) {
+  if (!entry || typeof entry !== 'object') return ''
+  const value = entry.sessionId
+  return value == null ? '' : String(value).trim()
+}
+
+/**
+ * The title of the session a subagent belongs to.
+ *
+ * @param {any} entry
+ * @returns {string}
+ */
+function blockerTaskParentTitle(entry) {
+  return blockerField(entry, 'parentTitle') || blockerField(entry, 'label')
+}
+
+/**
+ * The title of a blocker (for a session: its own title).
+ *
+ * @param {any} entry
+ * @returns {string}
+ */
+function blockerTaskTitle(entry) {
+  return blockerField(entry, 'label') || blockerField(entry, 'title')
+}
+
+/**
+ * The map "title of a session" → "session id" of the sessions in the list.
+ *
+ * @param {any[]} entries
+ * @returns {Map<string, string>}
+ */
+function blockerTaskTitles(entries) {
+  const map = new Map()
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') continue
+    if (blockerEntryKind(entry) === 'subagent') continue
+    const title = blockerTaskTitle(entry)
+    if (title === '') continue
+    const id = blockerSessionId(entry)
+    if (id === '') continue
+    if (!map.has(title)) map.set(title, id)
+  }
+  return map
+}
+
+/**
+ * The key of the family every entry belongs to.
+ *
+ * One key per entry, in the order of the list ('' for an entry that is not a
+ * task at all).
+ *
+ * @param {any[]} entries the blockers the Host reported
+ * @returns {string[]}
+ */
+function blockerTaskKeys(entries) {
+  const list = Array.isArray(entries) ? entries : []
+  const titles = blockerTaskTitles(list)
+  const keys = []
+  for (let index = 0; index < list.length; index += 1) {
+    const entry = list[index]
+    if (!entry || typeof entry !== 'object') {
+      keys.push('')
+      continue
+    }
+    const kind = blockerEntryKind(entry)
+    if (kind === 'restart-pending') {
+      // A pending restart is not a task: it is what the shutdown waits for.
+      keys.push('')
+      continue
+    }
+    if (kind === 'subagent') {
+      const parentId = blockerField(entry, 'parentSessionId')
+      if (parentId !== '') {
+        keys.push(TASK_KEY_SESSION + parentId)
+        continue
+      }
+      const parentTitle = blockerTaskParentTitle(entry)
+      if (parentTitle !== '') {
+        const known = titles.get(parentTitle)
+        keys.push(known ? TASK_KEY_SESSION + known : TASK_KEY_TITLE + parentTitle)
+        continue
+      }
+      const own = blockerSessionId(entry)
+      keys.push(own !== '' ? TASK_KEY_SESSION + own : 'entry:' + index)
+      continue
+    }
+    const own = blockerSessionId(entry)
+    keys.push(own !== '' ? TASK_KEY_SESSION + own : 'entry:' + index)
+  }
+  return keys
+}
+
+/**
+ * How many TASKS the blockers are.
+ *
+ * A parent session and its own subagents are ONE task: the same number the
+ * left sidebar shows.
+ *
+ * @param {any[]} entries the blockers the Host reported
+ * @returns {number}
+ */
+function countBlockerTasks(entries) {
+  const keys = blockerTaskKeys(entries)
+  const families = new Set()
+  for (const key of keys) {
+    if (key !== '') families.add(key)
+  }
+  return families.size
+}
+
+/**
+ * How many of those tasks are carried by SUBAGENTS ONLY.
+ *
+ * A task whose session is idle and whose subagent works is a task of the
+ * subagent — that is what the card tells the user ("2 of them are
+ * subagents"). A task whose session works itself is not one of them, even
+ * when it has subagents of its own.
+ *
+ * @param {any[]} entries the blockers the Host reported
+ * @returns {number}
+ */
+function countSubagentTasks(entries) {
+  const list = Array.isArray(entries) ? entries : []
+  const keys = blockerTaskKeys(list)
+  const families = new Map()
+  list.forEach((entry, index) => {
+    const key = keys[index]
+    if (key === '') return
+    const family = families.get(key) || { session: false, subagent: false }
+    if (blockerEntryKind(entry) === 'subagent') family.subagent = true
+    else family.session = true
+    families.set(key, family)
+  })
+  let count = 0
+  for (const family of families.values()) {
+    if (family.subagent && !family.session) count += 1
+  }
+  return count
+}
+
 /**
  * The readable name of one blocker.
  *
@@ -1125,7 +1334,9 @@ function formatLongWaitNoteParts(info, t) {
   // capsule: the capsule cannot afford "16 分 37 秒".
   const duration = formatDurationMs(longWait.waitedMs, translate)
   const compact = formatCompactDurationMs(longWait.waitedMs, translate)
-  const count = blockedBy.length
+  // The count is about TASKS, not blockers: a session and its own subagents
+  // are ONE task, exactly as the left sidebar counts them.
+  const count = countBlockerTasks(blockedBy)
   // The tooltip: the whole story, every name, nothing cut.
   const sentence = fillTemplate(translate('longWaitTooltip'), { duration, blockers: summary.full })
   return {
@@ -1243,6 +1454,10 @@ const SLEEP_EXPORTS = {
   groupBlockers,
   summarizeBlockers,
   truncateBlockerName,
+  // The task count: one rule, four surfaces (mirrored from lib/blockers.js).
+  blockerTaskKeys,
+  countBlockerTasks,
+  countSubagentTasks,
   resolveAccessRedirect,
   supervisorModeLabel,
   // The two dictionaries, so a test can build a translator without a Host.
@@ -2096,14 +2311,27 @@ if (moduleLoader) moduleLoader.load({
       if (!waiting && !withdrawn) return null
 
       const blockedBy = Array.isArray(info.blockedBy) ? info.blockedBy : []
+      // The TASK of every blocker: a session and its own subagents are ONE
+      // task (the sidebar counts them once). The keys are aligned with the
+      // list, so the filter below can ask "is this MY task?".
+      const taskKeys = blockerTaskKeys(blockedBy)
+      const ownTaskKey = TASK_KEY_SESSION + key
+      // The own session blocks itself — but only when it is a top-level
+      // session. A subagent mounted capsule belongs to its parent's task, and
+      // the parent's other work still blocks the restart.
+      const ownIsTask = !blockedBy.some((entry) => (
+        entry && String(entry.sessionId) === key && blockerEntryKind(entry) === 'subagent'
+      ))
       // One entry per SESSION: a conversation that is running *and* still has
       // queued work is one conversation, so the pill never counts it twice.
       const seenSessions = new Set()
-      const others = blockedBy.filter((entry) => {
+      const others = blockedBy.filter((entry, index) => {
         if (!entry) return false
         const id = String(entry.sessionId)
         if (id === key || seenSessions.has(id)) return false
         seenSessions.add(id)
+        // The own task is not a blocker of the own capsule.
+        if (ownIsTask && taskKeys[index] === ownTaskKey) return false
         return true
       })
       // A goal-driven blocker: an armed goal that keeps driving rounds by
@@ -2111,12 +2339,14 @@ if (moduleLoader) moduleLoader.load({
       // up (`goal-exhausted`, not parkable at all).
       const goalActive = others.filter((entry) => String(entry.reason) === 'goal-active')
       const goalExhausted = others.filter((entry) => String(entry.reason) === 'goal-exhausted')
-      const otherBusy = others.length - goalActive.length - goalExhausted.length
       // The tasks that are NOT a goal: the count and the names of the waiting
       // sentence talk about the same set.
       const busyBlockers = others.filter(
         (entry) => String(entry.reason) !== 'goal-active' && String(entry.reason) !== 'goal-exhausted',
       )
+      // The count is about TASKS, not blockers: a parent session and its own
+      // subagents are ONE task, exactly as the left sidebar counts them.
+      const otherBusy = countBlockerTasks(busyBlockers)
 
       // WHY the gate is closed: the Host reports the reason next to the
       // blockers. With no blocker but the reason "settling" the restart is
@@ -2160,8 +2390,9 @@ if (moduleLoader) moduleLoader.load({
         : (detail === '' ? tooltipText : `${tooltipText} ${detail}`)
 
       // The panel: how many tasks the restart waits for, and how many OTHER
-      // sessions wait for the same restart.
-      const taskCount = longWait.hasLongWait ? longWait.count : others.length
+      // sessions wait for the same restart. The count is about TASKS (a
+      // session and its own subagents are one), like everywhere else.
+      const taskCount = longWait.hasLongWait ? longWait.count : countBlockerTasks(others)
       const otherWaiters = waiters.filter((waiter) => String(waiter) !== key).length
       const sessionsWaiting = sessionsLeft === null ? otherWaiters : sessionsLeft
       // The session that asks for the cancel: without it the own request
@@ -3661,6 +3892,8 @@ if (moduleLoader) moduleLoader.load({
       const info = useSharedInfo(true)
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
+      // The dry run of the restart command (null = not derived yet).
+      const [dryRun, setDryRun] = useState(null)
       const t = props && typeof props.t === 'function'
         ? props.t
         : (translate ?? ((name) => name))
@@ -3728,6 +3961,44 @@ if (moduleLoader) moduleLoader.load({
               : String(response.status)
             setError(fill(t('supervisor.error'), { message }))
             return
+          }
+        } catch (failure) {
+          setError(fill(t('supervisor.error'), { message: describeError(failure) }))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      /**
+       * E + B: derive the restart command and show it (the dry run).
+       *
+       * The dry run writes NOTHING. Only the "use this command" button sends
+       * the confirmation, and only then does the Host write the command into
+       * the profile configuration.
+       */
+      const driveDryRun = async (action) => {
+        if (busy) return
+        setBusy(true)
+        setError('')
+        try {
+          const response = await fetch(supervisorUrlFor(info), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action, confirmed: action !== 'dry-run' }),
+          })
+          const body = await response.json().catch(() => null)
+          if (!response.ok) {
+            const message = body && typeof body === 'object'
+              ? (body.error || String(response.status))
+              : String(response.status)
+            setError(fill(t('supervisor.error'), { message }))
+            return
+          }
+          if (action === 'dry-run') {
+            setDryRun(body && typeof body.plan === 'object' ? body.plan : null)
+          } else {
+            // The command was written (or the undo ran): the preview is stale.
+            setDryRun(null)
           }
         } catch (failure) {
           setError(fill(t('supervisor.error'), { message: describeError(failure) }))
@@ -3991,6 +4262,73 @@ if (moduleLoader) moduleLoader.load({
                 ),
               )
             : null,
+          // E + B: the derived restart command. The dry run shows it; only
+          // the "use this command" button writes it into the configuration.
+          h(
+            'div',
+            { className: 'dsh-autorestart-settings__field' },
+            h(
+              'span',
+              { className: 'dsh-autorestart-settings__label' },
+              t('settings.supervisor.command'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-autorestart-settings__button',
+                disabled: busy,
+                'data-dsh-autorestart-supervisor': 'derive',
+                onClick: () => void driveDryRun('dry-run'),
+              },
+              t('settings.supervisor.derive'),
+            ),
+            dryRun
+              ? h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__dry-run', 'data-dsh-autorestart-dry-run': 'true' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__hint' },
+                    t('settings.supervisor.plan'),
+                  ),
+                  h(
+                    'code',
+                    { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-dry-run': 'command' },
+                    dryRun.command || t('settings.supervisor.noCommand'),
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-dry-run': 'reason' },
+                    t('settings.supervisor.reason.' + (dryRun.reason || 'ok')),
+                  ),
+                  dryRun.ok
+                    ? h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-autorestart-settings__button',
+                          disabled: busy,
+                          'data-dsh-autorestart-supervisor': 'apply',
+                          onClick: () => void driveDryRun('apply'),
+                        },
+                        t('settings.supervisor.apply'),
+                      )
+                    : null,
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-autorestart-settings__button',
+                      disabled: busy,
+                      'data-dsh-autorestart-supervisor': 'revert',
+                      onClick: () => void driveDryRun('revert'),
+                    },
+                    t('settings.supervisor.revert'),
+                  ),
+                )
+              : null,
+          ),
         ),
         error === ''
           ? null
@@ -4461,11 +4799,13 @@ if (moduleLoader) moduleLoader.load({
         // A pending restart is not a task: it is what the shutdown waits for,
         // so it is never counted as one.
         const tasks = blockers.filter((entry) => !isRestartPending(entry))
-        // How many of the blockers are subagents: the card says so, so the
+        // The count is about TASKS, not blockers: a session and its own
+        // subagents are ONE task, exactly as the left sidebar counts them.
+        const taskCount = countBlockerTasks(tasks)
+        // How many of the tasks are carried by SUBAGENTS ONLY: the session
+        // itself is idle, one of its subagents works. The card says so, so the
         // count is not read as "that many conversations".
-        const subagentCount = tasks.filter(
-          (entry) => entry && entry.kind === 'subagent',
-        ).length
+        const subagentCount = countSubagentTasks(tasks)
         // The list of the card: the SAME rule as the bubble (the subagents of
         // one session are one item, the list is capped), so a team of a dozen
         // members does not become a dozen lines.
@@ -4524,7 +4864,7 @@ if (moduleLoader) moduleLoader.load({
             ),
           h('p', { className: 'dsh-autorestart-sleep-waiting__count' }, tasks.length === 0
             ? null
-            : fill(t('sleep.waiting.count'), { n: tasks.length })),
+            : fill(t('sleep.waiting.count'), { n: taskCount })),
           subagentCount === 0
             ? null
             : h(

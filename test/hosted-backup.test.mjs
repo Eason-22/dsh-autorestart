@@ -345,6 +345,8 @@ test('the hosted mode with an empty restart command takes no snapshot and restar
       commands.push(command)
       return { ok: true, command, pid: null }
     },
+    // The new instance is confirmed without waiting for a real health route.
+    probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(runtime)
 
@@ -373,6 +375,8 @@ test('the desktop app still falls back to the app relaunch when the command is e
       commands.push(command)
       return { ok: true, command, pid: null }
     },
+    // The new instance is confirmed without waiting for a real health route.
+    probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
     scheduleDetached: (options) => {
       scheduled.push(options)
       return { ok: true, method: 'wmi', error: null }

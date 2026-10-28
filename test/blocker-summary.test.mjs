@@ -618,7 +618,9 @@ const CAPSULE_SCENARIOS = [
 test('the capsule of a long wait carries numbers only', async () => {
   const pill = await mountLongWait(LONG_WAIT_BLOCKERS)
   const copy = copyOf(pill)
-  assert.equal(copy, '待重启 · 已等 25 分钟 · 6 项任务在跑', `the capsule says the numbers: ${copy}`)
+  // FOUR tasks: the two parents of the subagents and the two plain
+  // conversations. The ten blockers are four tasks.
+  assert.equal(copy, '待重启 · 已等 25 分钟 · 4 项任务在跑', `the capsule says the numbers: ${copy}`)
   assert.ok(
     Array.from(copy).length <= CAPSULE_COPY_LIMIT,
     `the capsule stays short: ${Array.from(copy).length} characters — ${copy}`,
@@ -722,7 +724,9 @@ test('the waiting sentence of the capsule counts the tasks and names none of the
 
   const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-x' })
   const copy = copyOf(pill)
-  assert.equal(copy, '待重启 · 等待 4 个任务结束', `the capsule counts the tasks: ${copy}`)
+  // THREE tasks: the two subagents belong to the session "写代码" (one task),
+  // plus "调研" and "另一个会话".
+  assert.equal(copy, '待重启 · 等待 3 个任务结束', `the capsule counts the tasks: ${copy}`)
   for (const title of ['写代码', '调研', '另一个会话']) {
     assert.ok(!copy.includes(title), `the capsule names no blocker: ${title} — ${copy}`)
   }
@@ -822,6 +826,9 @@ test('the count of the shutdown card is still about tasks', async () => {
 
   const card = await mounted.settled('autorestart-sleep-overlay')
   const text = textOf(card)
-  assert.match(text, /还有 6 个任务在干活/, `the count is about tasks: ${text}`)
-  assert.match(text, /其中 4 个是子智能体/, `the subagents are counted: ${text}`)
+  // FOUR tasks: the two parents of the subagents and the two plain
+  // conversations. TWO of them are carried by subagents alone (their session
+  // is idle).
+  assert.match(text, /还有 4 个任务在干活/, `the count is about tasks: ${text}`)
+  assert.match(text, /其中 2 个是子智能体/, `the subagent tasks are counted: ${text}`)
 })

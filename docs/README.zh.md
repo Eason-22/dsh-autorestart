@@ -93,6 +93,27 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 
 桌面版**不问**：它自己就能把自己拉起来（`restartMode: app`），问了是噪声。
 
+### 「保持我现在的启动方式」之后：推导重启命令（E）与干跑确认（B）
+
+用户选择保持现状时，插件仍然可以写下一条"能把它拉起来"的命令——但**只能靠推导，绝不猜**。猜错的命令比没有命令更糟：它看起来像重启成功了，实际留下一个起不来的宿主。
+
+候选命令来自进程自己知道的事实：`[process.execPath, ...process.execArgv, ...process.argv.slice(1)]` 加上工作目录。**优先级**决定接下来怎么办：
+
+| 级 | 情形 | 写什么 |
+|---|---|---|
+| **E0** | 是插件自己的守护把这个实例拉起来的 | **什么都不写**——重启直接问守护（插件先写回滚请求，让守护去杀进程、重新拉起）。 |
+| **E1** | 有**外部**监管器（systemd / 用户自己的脚本 / pm2） | **不写**自重放命令：`restartCommand` 变成**优雅退出**（`kill -TERM <pid>` / `taskkill /PID <pid>`），因为是那个监管器负责再拉起我们。装第二个守护会抢同一个端口。 |
+| **E2** | 没有守护、也没有 init（容器） | 给出命令 + 一段 compose 片段（`restart: always`），**不承诺**开机自启。 |
+| **E3** | 没有守护、有 init（Windows / systemd 可用） | 推导出的命令——但**要用户确认干跑之后**才写。 |
+
+**拒绝**的情形（每种都有代码，也都指出路）：桌面版（它自己会重启）、没有 web 服务端的宿主、读不回命令行、已有外部监管器、没有 init 的容器、以及**端口每次都变**（浏览器的 cookie 会跟着 authority 一起死——端口必须固定）。
+
+**干跑（B）是一个承诺**：命令、工作目录、端口、健康检查 URL 在**写任何东西之前**原样展示。只有明确的确认才会把命令写进 profile 配置；写之前的原值被记下来，设置页一键就能改回去。
+
+- 干跑：`POST /__dsh_autorestart/supervisor` 带 `{ "action": "dry-run" }`（或工具 `continuum_supervisor` 的 `action: "dry-run"`）——**什么都不写**。
+- 确认：`{ "action": "apply", "confirmed": true }`——没有 `confirmed` 宿主回 `400 confirmation-required`，同样什么都不写。
+- 撤销：`{ "action": "revert", "confirmed": true }`——把原来的 `restartMode` / `restartCommand` 写回去。
+
 ### 首次安装只问一次：备份要不要连已装插件一起备
 
 第一次用这个插件时，输入框上方会出现**一条非模态提示**（不是弹窗，不挡输入框，也不会自己消失），问一句：

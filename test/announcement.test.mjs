@@ -18,11 +18,21 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { apply, featureAnnouncements, pluginVersion } from '../index.js'
+import {
+  apply,
+  featureAnnouncements,
+  pluginVersion,
+  PLUGIN_VERSION_FALLBACK,
+  SLEEP_FEATURE_VERSION,
+} from '../index.js'
 
 const ANNOUNCEMENTS_PATH = '/__dsh_autorestart/announcements'
 const CHOICE_PATH = '/__dsh_autorestart/choice'
+
+/** The checkout under test (the plugin directory). */
+const PLUGIN_DIR = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 
 /* ------------------------------------------------------------------ *
  * The Host half.
@@ -32,6 +42,70 @@ const CHOICE_PATH = '/__dsh_autorestart/choice'
 function tempStateFile(label) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), `dsh-autorestart-announce-${label}-`))
   return path.join(dir, 'state.json')
+}
+
+/**
+ * A checkpoint file in which the user has already seen the announcement of one
+ * feature version — the state a real installation is in after the user
+ * pressed "知道了".
+ *
+ * @param {string} version the recorded feature version
+ * @returns {string} the path of the state file
+ */
+function stateWithSeenFeature(version) {
+  const file = tempStateFile(`seen-${version}`)
+  fs.writeFileSync(file, JSON.stringify({
+    version: 1,
+    bootId: null,
+    bootPid: null,
+    bootStartedAt: null,
+    generation: 0,
+    phase: 'idle',
+    restart: null,
+    sessions: {},
+    seenFeatureVersions: { sleep: version },
+    updatedAt: Date.now(),
+  }), 'utf8')
+  return file
+}
+
+/**
+ * A copy of the plugin in a temporary directory.
+ *
+ * The copy lets a test pretend that a release happened (a bigger version in
+ * package.json) or that the feature itself changed (a bigger
+ * `SLEEP_FEATURE_VERSION`) WITHOUT touching the checkout: the copy is a
+ * different file, so the dynamic import below loads a different module.
+ *
+ * @param {string} label
+ * @param {{ packageVersion?: string, featureVersion?: string }} options
+ * @returns {Promise<{ dir: string, module: object }>}
+ */
+async function clonePlugin(label, { packageVersion, featureVersion } = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `dsh-autorestart-clone-${label}-`))
+  fs.mkdirSync(path.join(dir, 'lib'), { recursive: true })
+  fs.copyFileSync(path.join(PLUGIN_DIR, 'index.js'), path.join(dir, 'index.js'))
+  for (const name of fs.readdirSync(path.join(PLUGIN_DIR, 'lib'))) {
+    fs.copyFileSync(path.join(PLUGIN_DIR, 'lib', name), path.join(dir, 'lib', name))
+  }
+
+  const pkg = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, 'package.json'), 'utf8'))
+  if (packageVersion) pkg.version = packageVersion
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify(pkg, null, 2), 'utf8')
+
+  if (featureVersion) {
+    const file = path.join(dir, 'index.js')
+    const source = fs.readFileSync(file, 'utf8')
+    const patched = source.replace(
+      /const SLEEP_FEATURE_VERSION = '[^']*'/,
+      `const SLEEP_FEATURE_VERSION = '${featureVersion}'`,
+    )
+    assert.notEqual(patched, source, 'the clone must find the feature version constant')
+    fs.writeFileSync(file, patched, 'utf8')
+  }
+
+  const module = await import(pathToFileURL(path.join(dir, 'index.js')).href)
+  return { dir, module }
 }
 
 /**
@@ -143,16 +217,31 @@ test('the announcement of an upgrade is reported by the Host', async () => {
   const answer = await callAnnouncements(routes, 'GET')
   assert.equal(answer.status, 200)
   assert.equal(answer.body.ok, true)
-  assert.deepEqual(answer.body.pending, [{ feature: 'sleep', version: pluginVersion() }])
+  assert.deepEqual(answer.body.pending, [{ feature: 'sleep', version: SLEEP_FEATURE_VERSION }])
 })
 
-test('the version of the announcement is the version of the package', () => {
+test('the version of the announcement is the FEATURE version, not the package version', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pluginVersion(), pkg.version, 'the announcement must carry the version of the package')
-  // The release number lives in package.json only: pinning a literal here made every
-  // version bump fail this test, which taught nobody anything about the announcement.
+  assert.equal(
+    SLEEP_FEATURE_VERSION,
+    '0.5.0',
+    'the feature version must stay 0.5.0: the users who saw the card recorded that version',
+  )
+  assert.deepEqual(
+    featureAnnouncements(),
+    [{ feature: 'sleep', version: SLEEP_FEATURE_VERSION }],
+    'the announcement must carry the FEATURE version',
+  )
+  assert.notEqual(
+    SLEEP_FEATURE_VERSION,
+    pkg.version,
+    'the announcement must NOT follow the version of the package: a release brought the card back',
+  )
+  // The package version is still the package version — the two are simply two
+  // different things now.
+  assert.equal(pluginVersion(), pkg.version, 'the plugin must still report the version of the package')
+  assert.equal(PLUGIN_VERSION_FALLBACK, pkg.version, 'the fallback must follow the package')
   assert.match(pkg.version, /^\d+\.\d+\.\d+$/, 'the package version must be a semver triple')
-  assert.deepEqual(featureAnnouncements(), [{ feature: 'sleep', version: pkg.version }])
 })
 
 test('the announcement is recorded once and never comes back', async () => {
@@ -170,7 +259,65 @@ test('the announcement is recorded once and never comes back', async () => {
 
   // The record lives in the state file, so it survives a restart of the Host.
   const state = JSON.parse(fs.readFileSync(file, 'utf8'))
-  assert.equal(state.seenFeatureVersions.sleep, pluginVersion())
+  assert.equal(state.seenFeatureVersions.sleep, SLEEP_FEATURE_VERSION)
+})
+
+test('a user who has seen the announcement of 0.5.0 does not see it again', async () => {
+  // The regression of the bug this file guards: the card used to carry the
+  // version of the package, so every release brought it back.
+  const file = stateWithSeenFeature('0.5.0')
+
+  const { ctx, routes } = createContext()
+  apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const answer = await callAnnouncements(routes, 'GET')
+  assert.equal(answer.status, 200)
+  assert.deepEqual(
+    answer.body.pending,
+    [],
+    'the announcement of 0.5.0 must not come back — it follows the feature, not the release',
+  )
+})
+
+test('a release does not bring the announcement back', async () => {
+  // A release only changes the version of the package. The announcement has to
+  // survive it, so the version it carries cannot come from there.
+  const { module } = await clonePlugin('release', { packageVersion: '9.9.9' })
+  assert.equal(module.pluginVersion(), '9.9.9', 'the clone must really run the new package version')
+  assert.deepEqual(
+    module.featureAnnouncements(),
+    [{ feature: 'sleep', version: '0.5.0' }],
+    'the announcement must not follow the version of the package',
+  )
+
+  const file = stateWithSeenFeature('0.5.0')
+  const { ctx, routes } = createContext()
+  module.apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const answer = await callAnnouncements(routes, 'GET')
+  assert.deepEqual(answer.body.pending, [], 'a release must not bring the announcement back')
+})
+
+test('a new FEATURE version brings the announcement back on purpose', async () => {
+  // The other half of the promise: the announcement can still be announced
+  // again — by raising the feature version, never by releasing.
+  const { module } = await clonePlugin('feature', { featureVersion: '0.6.0' })
+  assert.deepEqual(
+    module.featureAnnouncements(),
+    [{ feature: 'sleep', version: '0.6.0' }],
+    'the clone must really run the new feature version',
+  )
+
+  const file = stateWithSeenFeature('0.5.0')
+  const { ctx, routes } = createContext()
+  module.apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
+
+  const answer = await callAnnouncements(routes, 'GET')
+  assert.deepEqual(
+    answer.body.pending,
+    [{ feature: 'sleep', version: '0.6.0' }],
+    'a new feature version must be announced again',
+  )
 })
 
 test('the answer of the install question marks the announcement as seen', async () => {

@@ -284,9 +284,18 @@ once, in the same composer dock, as a small card:
   already shown (`seenFeatureVersions` in the checkpoint file). A fresh installation never sees the
   card: the install question already explains the features, and answering it marks the announcement
   as seen.
-- **Once per version, for ever.** "Got it" records the version, the card disappears at once, and it
-  never comes back — not with the next restart of the host, and not with the next version of the
-  plugin (a *new* version of a feature is announced again, of course).
+- **Once per feature version, for ever.** "Got it" records the version, the card disappears at once,
+  and it never comes back — not with the next restart of the host, and not with the next release of
+  the plugin (a *new version of the feature* is announced again, of course).
+- **The announcement follows the FEATURE, not the release.** The version it carries is a constant in
+  the source (`SLEEP_FEATURE_VERSION` in `index.js`), **not** the version of the package: a release
+  never brings the card back. Until 0.6.0 the card carried the package version, and every release
+  (0.5.0 → 0.6.0) brought "graceful shutdown" back to the users who had already answered it.
+- **How to announce it again on purpose.** Raise `SLEEP_FEATURE_VERSION` to any new value: the
+  recorded version no longer matches, so the card is shown exactly once more. Do that **only** when
+  the feature itself changed so much that the user has to hear about it again (the shutdown became a
+  completely different thing, the button moved somewhere else, …). A release, a bug fix or a small
+  addition must **not** touch it — that is exactly the bug this constant exists to prevent.
 - **An unanswered card is not swallowed.** The card stays until it is answered, and it comes back with
   the next start of DSH.
 - **The countdown is read, not written.** The seconds in the card are the ones that are really in
@@ -294,7 +303,8 @@ once, in the same composer dock, as a small card:
   ("The button is currently switched off; you can turn it on in the settings").
 - **Where the state lives.** `<DSH_HOME>/storages/dsh-autorestart/state.json`, next to the checkpoint
   of the plugin. The host serves it on `GET /announcements` (`{ ok, pending: [{ feature, version }] }`)
-  and records it on `POST /announcements` (`{ feature }`).
+  and records it on `POST /announcements` (`{ feature }`). The `version` in that answer is the feature
+  version — the same number that `SLEEP_FEATURE_VERSION` holds.
 
 ## Graceful shutdown (收工关机)
 

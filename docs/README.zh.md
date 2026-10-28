@@ -98,10 +98,12 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 > **知道了**
 
 - **只有升级才会看到**：宿主把「这个功能的版本」和「已经展示过的版本」比一比（记在检查点文件的 `seenFeatureVersions` 里）。**新装**的用户不会看到这张卡 —— 安装提问已经把功能讲清楚了，答完就等于"已看过"。
-- **每个版本只弹一次**：点「知道了」→ 宿主记下版本 → 卡片立刻消失 → **以后再也不出现**（重启宿主不会，升级到下一个版本也不会 —— 除非那个新版本又改了同一个功能，那时才再公告一次）。
+- **每个功能版本只弹一次**：点「知道了」→ 宿主记下版本 → 卡片立刻消失 → **以后再也不出现**（重启宿主不会，升级发下一个版本也不会 —— 除非那个功能的版本变了，那时才再公告一次）。
+- **公告跟的是「功能」，不是「发版」**：公告带的版本号是源码里的常量 `SLEEP_FEATURE_VERSION`（`index.js`），**不是** `package.json` 里的包版本 —— 所以发版不会把老用户已经点过「知道了」的卡片再弹回来。（0.6.0 之前公告带的是包版本，于是 0.5.0 → 0.6.0 每发一次版，「收工关机」就重弹一次。）
+- **想主动再公告一次**：把 `SLEEP_FEATURE_VERSION` 调成任意新值即可 —— 记录的版本对不上，卡片就再出现一次。但**只在功能本身变化大到必须再讲一遍时**才调（比如关机改成了完全不同的用法、按钮换了位置）；**发版、修 bug、加小功能都不要动它** —— 那正是这个常量要防的坑。
 - **没点不会静默吞掉**：卡片一直挂在那里等你回答；不回答，下次启动还会再出现一次。
 - **秒数是读出来的，不是写死的**：卡片里的秒数就是当前生效的 `sleepCountdownSeconds`；月亮按钮被关掉时，卡片还会补一句「按钮目前关闭，可在设置里打开。」
-- **状态存在哪**：`<DSH_HOME>/storages/dsh-autorestart/state.json`（和插件的检查点同一个文件）。宿主用 `GET /announcements` 报（`{ ok, pending: [{ feature, version }] }`），用 `POST /announcements`（body `{ feature }`）记。
+- **状态存在哪**：`<DSH_HOME>/storages/dsh-autorestart/state.json`（和插件的检查点同一个文件）。宿主用 `GET /announcements` 报（`{ ok, pending: [{ feature, version }] }`），用 `POST /announcements`（body `{ feature }`）记。里面的 `version` 就是功能版本，跟 `SLEEP_FEATURE_VERSION` 是同一个数。
 
 ## 工作方式
 

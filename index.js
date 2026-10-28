@@ -135,15 +135,34 @@ function snapGraceChoice(value) {
  */
 const PLUGIN_VERSION_FALLBACK = '0.6.0'
 
+/**
+ * The version of the graceful-shutdown FEATURE, not the version of the package.
+ *
+ * The one-time announcement is bound to this constant. It used to follow the
+ * version in package.json, and that made every release resurrect the card the
+ * user had already answered (0.5.0 -> 0.6.0 brought "收工关机" back). A release
+ * is not news about the feature, so the two are decoupled.
+ *
+ * WHEN TO RAISE IT: only when the feature itself changed so much that the
+ * user has to hear about it again (the shutdown became a completely different
+ * thing, the button moved to another place, ...). Any new value works: the
+ * recorded version no longer matches, so the announcement is shown once more.
+ *
+ * WHEN NOT TO RAISE IT: a release, a bug fix, a small addition, a new option
+ * that the documentation explains. None of those deserve a card that
+ * interrupts the user a second time.
+ */
+const SLEEP_FEATURE_VERSION = '0.5.0'
+
 /** The cached version of this plugin (read once per process). */
 let pluginVersionCache = null
 
 /**
- * The version of this plugin.
+ * The version of this plugin (the PACKAGE version).
  *
- * It is the version of the package itself: the feature announcements are
- * bound to it, so a new version of the plugin can announce a new feature (and
- * the announcement of an old version never comes back).
+ * It says which release is installed - not what the user has been told about.
+ * The feature announcements are bound to `SLEEP_FEATURE_VERSION`, so a release
+ * never brings an answered announcement back.
  *
  * @returns {string}
  */
@@ -169,16 +188,19 @@ function pluginVersion() {
  *
  * The install prompt only ever reaches a fresh installation, so an
  * installation that already existed would never learn about a new feature.
- * Every entry of this list is therefore announced once per version: the
- * announcement is shown until the user presses "知道了", and the Host records
- * the version it has shown, so it never comes back.
+ * Every entry of this list is therefore announced once per FEATURE version:
+ * the announcement is shown until the user presses "知道了", and the Host
+ * records the feature version it has shown, so it never comes back.
+ *
+ * The version of an entry is the version of the FEATURE, never the version of
+ * the package - see `SLEEP_FEATURE_VERSION`.
  *
  * @returns {{ feature: string, version: string }[]}
  */
 function featureAnnouncements() {
   return [
     // The graceful shutdown ("收工关机") and its moon button.
-    { feature: 'sleep', version: pluginVersion() },
+    { feature: 'sleep', version: SLEEP_FEATURE_VERSION },
   ]
 }
 
@@ -2133,10 +2155,11 @@ const titleOfSummary = (item) => {
    * The feature announcements the user has not seen yet.
    *
    * A feature is pending when the recorded version is not the current one: a
-   * user who has seen the announcement of version 0.6.0 never sees it again,
-   * and a user who upgrades to a newer version sees the announcement of that
-   * version. A feature without a record is always pending — a missing record
-   * must never swallow an announcement.
+   * user who has seen the announcement of the feature version 0.5.0 never
+   * sees it again - not with the next release of the plugin, because the
+   * announcement follows the FEATURE and not the package. A feature without a
+   * record is always pending - a missing record must never swallow an
+   * announcement.
    *
    * @returns {{ feature: string, version: string }[]}
    */
@@ -3834,7 +3857,8 @@ function buildHandoffRoute(ctx, runtime, config) {
  *
  * The record lives in the checkpoint file, so an announcement that was shown
  * once never comes back — not with the next boot and not with the next
- * version of the plugin.
+ * release of the plugin. Only a new FEATURE version (see
+ * `SLEEP_FEATURE_VERSION`) brings it back, on purpose.
  */
 function buildAnnouncementsRoute(ctx, runtime, config) {
   const routePath = resolveAnnouncementsPath(config)
@@ -4967,4 +4991,6 @@ export {
   resolveAnnouncementsPath,
   featureAnnouncements,
   pluginVersion,
+  PLUGIN_VERSION_FALLBACK,
+  SLEEP_FEATURE_VERSION,
 }

@@ -144,7 +144,8 @@ show up in the Plugin Manager and in the config editor.
 | `restartCommand` | `''` | Custom restart command. Supports the `{pid}`, `{ppid}` and `{app}` placeholders. |
 | `relaunchDelaySeconds` | `2` | How long the detached helper waits before it kills the app (`ping -n 3`, roughly 2 seconds). |
 | `settleMs` | `2000` | Quiet window in milliseconds: the host must stay silent this long after the last conversation activity before a restart may start. |
-| `restartGraceMs` | `10000` | Grace window in milliseconds: how long the host waits after the last conversation finished before it is really restarted or switched off — a dropdown: `0` / `3` / `5` / `10` / `20` / `30` seconds. `0` means "no extra wait". |
+| `restartGraceMs` | `0` | The **restart reserve** in milliseconds: how long the host waits after the last conversation finished before it is really RESTARTED — a dropdown: `0` / `5` / `10` / `20` / `30` / `60` seconds. `0` means "no extra wait". A restart is a daily operation, so the default is none. |
+| `sleepGraceMs` | `30000` | The **shutdown reserve** in milliseconds: how long the machine waits after the last conversation finished before it is really SWITCHED OFF — a dropdown: `0` / `5` / `10` / `20` / `30` / `60` seconds. The machine goes off for good, so the delayed work of the other plugins gets its chance. The two windows are independent. |
 | `queuedGraceMs` | `60000` | Upper bound in milliseconds for a **queued** (unclaimed) inbox message: how long it may hold the restart back before it is treated as stuck. `0` means "no upper bound" (the behaviour before 0.6.2). A **running** conversation always blocks, under every setting. |
 | `autoReloadPage` | `true` | `dsh web`: reload the page automatically when the host boot token changes. |
 | `blockManualRestart` | `true` | Hard-block an agent that tries to kill or restart DSH with a shell command, and point it at `continuum_restart` instead. |
@@ -175,21 +176,31 @@ work other plugins queue with a timer of their own — a memory plugin that writ
 seconds after the conversation ended, a summary, an MCP callback, a log flush. That work is
 invisible here, so "every agent is idle" does not mean "nothing is happening any more".
 
-**The grace window.** `restartGraceMs` (default **10 seconds**) is the extra wait for exactly
-that: after the LAST conversation finished, the host waits this long before it is really restarted
-or switched off. It is a plain, configurable insurance — not a special case for any particular
-plugin.
+**Two reserve windows, because the two situations differ.** A restart and a shutdown are not the
+same thing: a restart is a daily operation (it should happen as soon as the conversations are
+done), while the machine going off is final (the delayed work must get its chance). So there are
+two independent windows:
 
-- **Both paths use it.** The restart gate waits `max(settleMs, restartGraceMs)` of quiet, and the
-  graceful shutdown waits the same grace **before** its countdown starts (so the grace never pushes
-  a countdown that is already running back by a round).
+| Window | Governs | Default | Offered |
+| --- | --- | --- | --- |
+| `restartGraceMs` | the **restart** | `0` (no extra wait) | `0` / `5` / `10` / `20` / `30` / `60` seconds |
+| `sleepGraceMs` | the **shutdown** | `30000` (thirty seconds) | `0` / `5` / `10` / `20` / `30` / `60` seconds |
+
+- **The restart gate waits `max(settleMs, restartGraceMs)`** of quiet. With the default (`0`) the
+  gate waits for the settle window alone — a restart happens as soon as the conversations are done.
+- **The graceful shutdown waits `sleepGraceMs`** **before** its countdown starts (so the reserve
+  never pushes a countdown that is already running back by a round).
 - **New activity restarts the timer.** If a conversation starts working again while the host is
-  waiting, the grace starts over — the wait always follows the last activity.
-- **`0` means "as before".** With `restartGraceMs: 0` the behaviour is exactly the one of 0.4.0.
-- **Where to change it.** Settings → Auto-restart & shut down → *Wait a few more seconds after the
-  work is done*. The status interfaces report it too: `GET /health?state=1`, `GET /health?gate=1`,
-  `continuum_status` and `GET /sleep` all carry `graceMs` (the configured window) and `quietForMs`
-  (how long the host has actually been quiet).
+  waiting, the reserve starts over — the wait always follows the last activity.
+- **They never inherit each other.** A profile that only knows `restartGraceMs` gets the default
+  shutdown reserve (thirty seconds) and vice versa; a value that is not one of the six offered
+  windows is snapped onto the nearest one.
+- **Where to change them.** Settings → Auto-restart & shut down → *Wait a few more seconds before
+  the restart* and *Wait a few more seconds before the shutdown*. The status interfaces report both:
+  `GET /health?state=1`, `GET /health?gate=1` and `continuum_status` carry `graceMs` (the restart
+  reserve) **and** `sleepGraceMs` (the shutdown reserve); `GET /sleep` carries `graceMs` (the
+  shutdown reserve, the one that path waits for) and `restartGraceMs` next to it. All of them carry
+  `quietForMs` (how long the host has actually been quiet).
 
 ### Why a queued message cannot block the restart for ever
 
@@ -428,7 +439,7 @@ record that cannot be read is dropped — asking once more is much better than a
 itself off for ever because of a half-written file.
 
 **For the troubleshooting.** `GET /sleep` reports `armedAt` (when the shutdown was armed) next to
-`phase`, `blockers` and `graceMs`.
+`phase`, `blockers`, `graceMs` (the shutdown reserve) and `restartGraceMs` (the restart reserve).
 
 ### Troubleshooting: the machine did not switch off
 
@@ -459,11 +470,13 @@ waiting for something. Here is what it can be, and what to do about it:
    `待执行的重启`). That is normal queueing, not a fault: the restart runs first, the sessions
    come back with it, and the countdown continues afterwards. **What to do:** nothing — wait for
    the restart. (You can also cancel the restart with `continuum_cancel_restart`.)
-3. **The work just ended and the grace window is still running** (default 10 seconds, so that a
+3. **The work just ended and the shutdown reserve is still running** (default 30 seconds, so that a
    memory or summary plugin can still write its notes). **What you see:** `graceMs` is the
-   configured window, `quietForMs` is how long the host has actually been quiet. **What to do:**
-   wait; if another conversation starts working during the wait, the timer starts over (that is
-   the point of the window). Set it to `0` in the settings if you do not want the extra wait.
+   configured shutdown reserve, `quietForMs` is how long the host has actually been quiet. **What to
+   do:** wait; if another conversation starts working during the wait, the timer starts over (that is
+   the point of the window). Set it to `0` in the settings if you do not want the extra wait. (The
+   restart has its own window — `restartGraceMs`, default none — and the two never
+   influence each other.)
 4. **Somebody started working during the countdown.** The countdown goes back to "waiting" and
    `remainingMs` returns to its full value. **What you see:** the message says that somebody
    started working again, and `blockers[]` lists who. **What to do:** let them finish.

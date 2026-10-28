@@ -24,11 +24,17 @@
       "value": "{n} seconds",
       "hint": "After the button: wait for every conversation to be done, count down this many seconds and switch off. \"No countdown\" switches off as soon as the conversations are done."
     },
-    "grace": {
-      "label": "Wait a few more seconds after the work is done",
-      "immediate": "Do not wait (restart/switch off right away)",
+    "restartGrace": {
+      "label": "Wait a few more seconds before the restart",
+      "immediate": "Do not wait (restart right away)",
       "value": "{n} seconds",
-      "hint": "After the last conversation finished, wait this long before the host is really restarted or switched off — this plugin only sees the DSH conversations, not the work other plugins queue with a timer. If a conversation starts working again while waiting, the timer starts over."
+      "hint": "A restart is a daily operation, so the default is 0 seconds (restart as soon as possible). Only raise it when you rely on a memory or summary plugin that writes its notes after the conversation ended."
+    },
+    "sleepGrace": {
+      "label": "Wait a few more seconds before the machine goes off",
+      "immediate": "Do not wait (switch off right away)",
+      "value": "{n} seconds",
+      "hint": "The machine goes off for good, so the default is 30 seconds: it leaves the delayed work (memory notes, a summary, an MCP callback) the time it needs. Do not lower it if you are unsure; 0 = do not wait."
     },
     "backup": {
       "label": "Backup before a restart",

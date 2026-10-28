@@ -115,17 +115,23 @@ const SLEEP_DEFAULT_COUNTDOWN_SECONDS = 20
 const SLEEP_DRY_RUN_NOTICE_MS = 8_000
 
 /**
- * The grace window the settings page offers (a dropdown, in seconds).
+ * The RESERVE windows the settings page offers (a dropdown, in seconds).
  *
- * It is the extra wait after the last conversation finished, so that work
- * other plugins queue with a timer (a memory plugin writing its notes, a
- * summary) still gets its chance — this plugin cannot see that work.
+ * They are two separate windows, because the two situations differ: a restart
+ * is a daily operation (it should happen as soon as possible) while the
+ * machine going off is final (the delayed work of other plugins — a memory
+ * plugin writing its notes, a summary, an MCP callback — must get its chance,
+ * and this plugin cannot see that work).
  */
-const GRACE_CHOICES_SECONDS = Object.freeze([0, 3, 5, 10, 20, 30])
+const GRACE_CHOICES_SECONDS = Object.freeze([0, 5, 10, 20, 30, 60])
 
-/** The grace window used when the Host did not report one (ms / seconds). */
-const GRACE_DEFAULT_MS = 10_000
-const GRACE_DEFAULT_SECONDS = 10
+/** The RESTART reserve used when the Host did not report one (ms / seconds). */
+const GRACE_DEFAULT_MS = 0
+const GRACE_DEFAULT_SECONDS = 0
+
+/** The SHUTDOWN reserve used when the Host did not report one (ms / seconds). */
+const SLEEP_GRACE_DEFAULT_MS = 30_000
+const SLEEP_GRACE_DEFAULT_SECONDS = 30
 
 const ZH = {
   label: '待重启',
@@ -203,10 +209,14 @@ const ZH = {
   'settings.seconds.immediate': '不倒数（立即关机）',
   'settings.seconds.value': '{n} 秒',
   'settings.seconds.hint': '按下按钮后，等所有会话收工，再倒数这么多秒才关机；「不倒数」表示会话一收工就关机。',
-  'settings.grace.label': '收工后再等几秒（给记忆/总结类插件留时间）',
-  'settings.grace.hint': '最后一个会话收工后，再等这么久才真正重启或关机——我们只看得见 DSH 的会话，看不见别的插件用定时器排队的活。等待期间如果又有会话开始干活，会重新计时。',
-  'settings.grace.value': '{n} 秒',
-  'settings.grace.immediate': '不等（立即重启/关机）',
+  'settings.restartGrace.label': '重启前再等几秒',
+  'settings.restartGrace.hint': '重启是日常操作，默认 0 秒（尽快重启）；只有当你依赖“会话结束后才写”的记忆/总结类插件时，才需要调大。',
+  'settings.restartGrace.value': '{n} 秒',
+  'settings.restartGrace.immediate': '不等（立即重启）',
+  'settings.sleepGrace.label': '关机前再等几秒',
+  'settings.sleepGrace.hint': '关机后机器就关了，默认 30 秒：给记忆、总结、MCP 回调这类延迟落盘的活留时间；不确定就别改小；0 = 不等。',
+  'settings.sleepGrace.value': '{n} 秒',
+  'settings.sleepGrace.immediate': '不等（立即关机）',
   'settings.backup.label': '重启前备份',
   'settings.backup.hint': '每次重启前先快照一次当前配置；万一重启后起不来，能自动回退。',
   'settings.backupPlugins.label': '备份包含已安装插件',
@@ -354,10 +364,14 @@ const EN = {
   'settings.seconds.immediate': 'No countdown (switch off right away)',
   'settings.seconds.value': '{n} seconds',
   'settings.seconds.hint': 'After the button: wait for every conversation to be done, count down this many seconds and switch off. "No countdown" switches off as soon as the conversations are done.',
-  'settings.grace.label': 'Wait a few more seconds after the work is done',
-  'settings.grace.hint': 'After the last conversation finished, wait this long before the host is really restarted or switched off — this plugin only sees the DSH conversations, not the work other plugins queue with a timer. If a conversation starts working again while waiting, the timer starts over.',
-  'settings.grace.value': '{n} seconds',
-  'settings.grace.immediate': 'Do not wait (restart/switch off right away)',
+  'settings.restartGrace.label': 'Wait a few more seconds before the restart',
+  'settings.restartGrace.hint': 'A restart is a daily operation, so the default is 0 seconds (restart as soon as possible). Only raise it when you rely on a memory or summary plugin that writes its notes after the conversation ended.',
+  'settings.restartGrace.value': '{n} seconds',
+  'settings.restartGrace.immediate': 'Do not wait (restart right away)',
+  'settings.sleepGrace.label': 'Wait a few more seconds before the shutdown',
+  'settings.sleepGrace.hint': 'The machine goes off for good, so the default is 30 seconds: it leaves the delayed work (memory notes, a summary, an MCP callback) the time it needs. Do not lower it if you are unsure; 0 = do not wait.',
+  'settings.sleepGrace.value': '{n} seconds',
+  'settings.sleepGrace.immediate': 'Do not wait (switch off right away)',
   'settings.backup.label': 'Backup before a restart',
   'settings.backup.hint': 'Take a snapshot of the current configuration before every restart, so a host that cannot boot again is rolled back automatically.',
   'settings.backupPlugins.label': 'Include the installed plugins in the backup',
@@ -2500,15 +2514,20 @@ if (moduleLoader) moduleLoader.load({
       const backupIncludePlugins = status && typeof status === 'object' && typeof status.backupIncludePlugins === 'boolean'
         ? status.backupIncludePlugins
         : true
-      // The grace window: how long the host waits after the last conversation
-      // finished. The Host reports it in milliseconds; the dropdown works in
-      // seconds.
-      const reportedGraceMs = status && typeof status === 'object' && typeof status.graceMs === 'number'
-        ? status.graceMs
+      // The two reserve windows: the RESTART one and the SHUTDOWN one. The
+      // Host reports both in milliseconds; the dropdowns work in seconds.
+      const reportedRestartGraceMs = status && typeof status === 'object' && typeof status.restartGraceMs === 'number'
+        ? status.restartGraceMs
         : GRACE_DEFAULT_MS
-      const graceSeconds = GRACE_CHOICES_SECONDS.indexOf(Math.round(reportedGraceMs / 1000)) === -1
+      const restartGraceSeconds = GRACE_CHOICES_SECONDS.indexOf(Math.round(reportedRestartGraceMs / 1000)) === -1
         ? GRACE_DEFAULT_SECONDS
-        : Math.round(reportedGraceMs / 1000)
+        : Math.round(reportedRestartGraceMs / 1000)
+      const reportedSleepGraceMs = status && typeof status === 'object' && typeof status.sleepGraceMs === 'number'
+        ? status.sleepGraceMs
+        : SLEEP_GRACE_DEFAULT_MS
+      const sleepGraceSeconds = GRACE_CHOICES_SECONDS.indexOf(Math.round(reportedSleepGraceMs / 1000)) === -1
+        ? SLEEP_GRACE_DEFAULT_SECONDS
+        : Math.round(reportedSleepGraceMs / 1000)
 
       /**
        * Write one change into the profile configuration.
@@ -2579,17 +2598,17 @@ if (moduleLoader) moduleLoader.load({
         h(
           'label',
           { className: 'dsh-autorestart-settings__field' },
-          h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.grace.label')),
+          h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.restartGrace.label')),
           h(
             'select',
             {
               className: 'dsh-autorestart-settings__select',
-              value: String(graceSeconds),
+              value: String(restartGraceSeconds),
               disabled: busy,
               'data-dsh-autorestart-setting': 'restartGraceMs',
               onChange: (event) => {
                 const value = Number(event && event.target ? event.target.value : NaN)
-                if (!Number.isFinite(value) || value === graceSeconds) return
+                if (!Number.isFinite(value) || value === restartGraceSeconds) return
                 void save({ restartGraceMs: value * 1000 })
               },
             },
@@ -2597,11 +2616,38 @@ if (moduleLoader) moduleLoader.load({
               'option',
               { key: String(choice), value: String(choice) },
               choice === 0
-                ? t('settings.grace.immediate')
-                : fill(t('settings.grace.value'), { n: choice }),
+                ? t('settings.restartGrace.immediate')
+                : fill(t('settings.restartGrace.value'), { n: choice }),
             )),
           ),
-          h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.grace.hint')),
+          h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.restartGrace.hint')),
+        ),
+        h(
+          'label',
+          { className: 'dsh-autorestart-settings__field' },
+          h('span', { className: 'dsh-autorestart-settings__label' }, t('settings.sleepGrace.label')),
+          h(
+            'select',
+            {
+              className: 'dsh-autorestart-settings__select',
+              value: String(sleepGraceSeconds),
+              disabled: busy,
+              'data-dsh-autorestart-setting': 'sleepGraceMs',
+              onChange: (event) => {
+                const value = Number(event && event.target ? event.target.value : NaN)
+                if (!Number.isFinite(value) || value === sleepGraceSeconds) return
+                void save({ sleepGraceMs: value * 1000 })
+              },
+            },
+            GRACE_CHOICES_SECONDS.map((choice) => h(
+              'option',
+              { key: String(choice), value: String(choice) },
+              choice === 0
+                ? t('settings.sleepGrace.immediate')
+                : fill(t('settings.sleepGrace.value'), { n: choice }),
+            )),
+          ),
+          h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.sleepGrace.hint')),
         ),
         h(
           'label',

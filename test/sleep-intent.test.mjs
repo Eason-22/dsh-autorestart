@@ -132,8 +132,10 @@ function applyPlugin(ctx, file, overrides = {}) {
     stateFile: file,
     recoveryDelayMs: 0,
     enabled: true,
-    // No grace window here: these tests are about the restart, not the wait.
+    // No reserve window here: these tests are about the restart, not the wait.
+    // The shutdown reserve is the one the shutdown waits for.
     restartGraceMs: 0,
+    sleepGraceMs: 0,
     sleepCountdownSeconds: 20,
     ...overrides,
   }, {

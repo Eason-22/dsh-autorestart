@@ -93,20 +93,31 @@ import {
 } from './lib/sleep.js'
 
 /**
- * The grace window: how long the host waits after the LAST conversation
- * finished before it is really restarted or switched off.
+ * The RESERVE windows: how long the host waits after the LAST conversation
+ * finished before it really restarts — or before the machine really goes off.
  *
  * This plugin can only see the DSH agents. Other plugins (a memory plugin
  * that writes its notes a few seconds after the conversation ended, a summary,
  * an MCP callback) queue their work with a timer of their own — work that is
- * invisible here. A short, configurable grace window is left for it.
+ * invisible here. A short, configurable reserve window is left for it.
+ *
+ * The two windows are SEPARATE, because the two situations are different:
+ *
+ *   - `restartGraceMs` — the RESTART reserve. A restart is a daily operation:
+ *     it should happen as soon as the conversations are done. Default: none.
+ *   - `sleepGraceMs` — the SHUTDOWN reserve. The machine goes off for good,
+ *     so the delayed work (the memory notes, the summary) must get its
+ *     chance. Default: thirty seconds.
  *
  * The values are the ones the settings page offers (in milliseconds).
  */
-const GRACE_CHOICES_MS = Object.freeze([0, 3000, 5000, 10000, 20000, 30000])
+const GRACE_CHOICES_MS = Object.freeze([0, 5000, 10000, 20000, 30000, 60000])
 
-/** The grace window that is used when nothing was configured. */
-const DEFAULT_GRACE_MS = 10000
+/** The RESTART reserve that is used when nothing was configured. */
+const DEFAULT_RESTART_GRACE_MS = 0
+
+/** The SHUTDOWN reserve that is used when nothing was configured. */
+const DEFAULT_SLEEP_GRACE_MS = 30000
 
 /**
  * How often the "the restart is waiting for a long time" line may be logged.
@@ -118,18 +129,19 @@ const DEFAULT_GRACE_MS = 10000
 const LONG_WAIT_LOG_INTERVAL_MS = 60000
 
 /**
- * Snap a grace value onto the nearest offered choice.
+ * Snap a reserve value onto the nearest offered choice.
  *
  * A profile that carries a value that is not offered (a hand-edited row, an
  * older build) must not break the boot: the value is snapped onto the
  * nearest choice, exactly like the countdown length is.
  *
  * @param {unknown} value
+ * @param {number} [fallback] the value used when the input is not a number
  * @returns {number} one of {@link GRACE_CHOICES_MS}
  */
-function snapGraceChoice(value) {
+function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
   const raw = Number(value)
-  if (!Number.isFinite(raw) || raw < 0) return DEFAULT_GRACE_MS
+  if (!Number.isFinite(raw) || raw < 0) return fallback
   let best = GRACE_CHOICES_MS[0]
   let bestDistance = Math.abs(raw - best)
   for (const choice of GRACE_CHOICES_MS) {
@@ -395,8 +407,16 @@ function buildConfigSchema() {
       // Other plugins queue work with timers of their own (a memory plugin
       // writing its notes, a summary, an MCP callback) and that work is
       // invisible here — so a short, configurable grace window is left for it.
-      restartGraceMs: schemastery.number().min(0).default(DEFAULT_GRACE_MS)
-        .description('Milliseconds to wait after the last conversation finished before the host is really restarted or switched off: the grace window for work other plugins queue with a timer (0 / 3 / 5 / 10 / 20 / 30 seconds, default 10).'),
+      // The RESTART reserve: the extra wait after the last conversation
+      // finished, before the host is really restarted. A restart is a daily
+      // operation, so the default is none (0 / 5 / 10 / 20 / 30 / 60 seconds).
+      restartGraceMs: schemastery.number().min(0).default(DEFAULT_RESTART_GRACE_MS)
+        .description('Milliseconds to wait after the last conversation finished before the host is really RESTARTED: the reserve for work other plugins queue with a timer (0 / 5 / 10 / 20 / 30 / 60 seconds, default 0 = no extra wait).'),
+      // The SHUTDOWN reserve: the same idea for the graceful shutdown. The
+      // machine goes off for good, so the delayed work (memory notes, a
+      // summary, an MCP callback) must get its chance: default 30 seconds.
+      sleepGraceMs: schemastery.number().min(0).default(DEFAULT_SLEEP_GRACE_MS)
+        .description('Milliseconds to wait after the last conversation finished before the machine is really SWITCHED OFF: the reserve for work other plugins queue with a timer (0 / 5 / 10 / 20 / 30 / 60 seconds, default 30; 0 = no extra wait).'),
       // The upper bound of a QUEUED inbox message: a message that nobody
       // claims within this window is stuck, and it stops blocking the restart.
       // Without it a single unclaimed message kept the restart pending for
@@ -469,7 +489,10 @@ const DEFAULTS = {
   restartCommand: '',
   relaunchDelaySeconds: 2,
   settleMs: 2000,
-  restartGraceMs: DEFAULT_GRACE_MS,
+  restartGraceMs: DEFAULT_RESTART_GRACE_MS,
+  // The SHUTDOWN reserve: the machine goes off for good, so the delayed work
+  // (memory notes, a summary, an MCP callback) must get its chance.
+  sleepGraceMs: DEFAULT_SLEEP_GRACE_MS,
   // The upper bound of a queued (unclaimed) inbox message: after this time it
   // is treated as stuck and stops blocking the restart. 0 switches the
   // protection off (the old behaviour: a queued message blocks for ever).
@@ -520,9 +543,13 @@ function normalizeConfig(raw) {
   // profile that still carries an old value (15, 45, …) is snapped onto the
   // nearest one instead of breaking, and 0 means "no countdown at all".
   config.sleepCountdownSeconds = snapCountdownChoice(config.sleepCountdownSeconds)
-  // The grace window is one of the offered choices as well: a hand-edited
-  // profile value is snapped onto the nearest one instead of breaking.
-  config.restartGraceMs = snapGraceChoice(config.restartGraceMs)
+  // The reserve windows are one of the offered choices as well: a hand-edited
+  // profile value is snapped onto the nearest one instead of breaking. The two
+  // windows are independent — a missing one falls back to ITS OWN default
+  // (the restart reserve: none, the shutdown reserve: thirty seconds), never
+  // to the value of the other one.
+  config.restartGraceMs = snapGraceChoice(config.restartGraceMs, DEFAULT_RESTART_GRACE_MS)
+  config.sleepGraceMs = snapGraceChoice(config.sleepGraceMs, DEFAULT_SLEEP_GRACE_MS)
   // The upper bound of a queued message is a plain number: a wrong or negative
   // value falls back to the default, and 0 switches the protection off.
   config.queuedGraceMs = normalizeQueuedGraceMs(config.queuedGraceMs)
@@ -806,7 +833,7 @@ const INSTALL_CHOICE_FILE = 'install-choice.json'
  * Read the recorded install choice from the fallback file.
  *
  * @param {string} stateDir
- * @returns {{ includePlugins: boolean|null, backupOnRestart: boolean|null, showSleepButton: boolean|null, sleepCountdownSeconds: number|null, restartGraceMs: number|null }|null}
+ * @returns {{ includePlugins: boolean|null, backupOnRestart: boolean|null, showSleepButton: boolean|null, sleepCountdownSeconds: number|null, restartGraceMs: number|null, sleepGraceMs: number|null }|null}
  */
 function readInstallChoice(stateDir) {
   try {
@@ -821,6 +848,7 @@ function readInstallChoice(stateDir) {
         ? parsed.sleepCountdownSeconds
         : null,
       restartGraceMs: typeof parsed.restartGraceMs === 'number' ? parsed.restartGraceMs : null,
+      sleepGraceMs: typeof parsed.sleepGraceMs === 'number' ? parsed.sleepGraceMs : null,
     }
   } catch {
     return null
@@ -834,7 +862,7 @@ function readInstallChoice(stateDir) {
  * erase the recorded backup scope (and the other way round).
  *
  * @param {string} stateDir
- * @param {{ includePlugins?: boolean, backupOnRestart?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number, restartGraceMs?: number }} values
+ * @param {{ includePlugins?: boolean, backupOnRestart?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number, restartGraceMs?: number, sleepGraceMs?: number }} values
  * @returns {string} the file that was written
  */
 function writeInstallChoice(stateDir, values) {
@@ -845,6 +873,7 @@ function writeInstallChoice(stateDir, values) {
     showSleepButton: null,
     sleepCountdownSeconds: null,
     restartGraceMs: null,
+    sleepGraceMs: null,
   }
   const payload = {
     includePlugins: typeof values.includePlugins === 'boolean' ? values.includePlugins : current.includePlugins,
@@ -856,6 +885,9 @@ function writeInstallChoice(stateDir, values) {
     restartGraceMs: typeof values.restartGraceMs === 'number'
       ? values.restartGraceMs
       : current.restartGraceMs,
+    sleepGraceMs: typeof values.sleepGraceMs === 'number'
+      ? values.sleepGraceMs
+      : current.sleepGraceMs,
     at: new Date().toISOString(),
   }
   fs.mkdirSync(stateDir, { recursive: true })
@@ -1883,11 +1915,23 @@ export function createRuntime(ctx, config, options = {}) {
   const quietForMs = () => Math.max(0, Date.now() - quietSince())
 
   /**
-   * The grace window: how much longer the host waits after the last
-   * conversation finished, so that work other plugins queue with a timer (a
-   * memory plugin writing its notes, a summary) still gets its chance.
+   * The RESTART reserve: how much longer the host waits after the last
+   * conversation finished before it is really restarted.
+   *
+   * A restart is a daily operation, so the default is none: the host restarts
+   * as soon as the conversations are done and the settle window has passed.
    */
   const graceMs = () => config.restartGraceMs
+
+  /**
+   * The SHUTDOWN reserve: how much longer the machine waits after the last
+   * conversation finished before it is really switched off.
+   *
+   * The machine goes off for good, so the work other plugins queue with a
+   * timer (a memory plugin writing its notes, a summary, an MCP callback) must
+   * get its chance. Default: thirty seconds.
+   */
+  const sleepGraceMs = () => config.sleepGraceMs
 
   /**
    * The quiet window the restart gate really uses.
@@ -2405,6 +2449,10 @@ const titleOfSummary = (item) => {
       wanted.restartGraceMs = changes.restartGraceMs
       fallback.restartGraceMs = changes.restartGraceMs
     }
+    if (typeof changes.sleepGraceMs === 'number') {
+      wanted.sleepGraceMs = changes.sleepGraceMs
+      fallback.sleepGraceMs = changes.sleepGraceMs
+    }
     const editor = resolveConfigEditor(ctx)
     if (editor !== null) {
       try {
@@ -2623,11 +2671,19 @@ const titleOfSummary = (item) => {
      */
     quietSince,
     /**
-     * The grace window: the extra wait after the last conversation finished.
+     * The RESTART reserve: the extra wait after the last conversation
+     * finished, before the host is really restarted.
      *
      * @returns {number} milliseconds
      */
     graceMs,
+    /**
+     * The SHUTDOWN reserve: the extra wait after the last conversation
+     * finished, before the machine is really switched off.
+     *
+     * @returns {number} milliseconds
+     */
+    sleepGraceMs,
     /**
      * The quiet window the restart gate really uses: the settle window, but
      * never shorter than the grace window.
@@ -3385,6 +3441,7 @@ function registerTools(ctx, runtime, config) {
           gateAllow: { type: 'boolean' },
           quietForMs: { type: 'number' },
           graceMs: { type: 'number' },
+          sleepGraceMs: { type: 'number' },
           effectiveSettleMs: { type: 'number' },
           queuedGraceMs: { type: 'number' },
           blockedBy: {
@@ -3438,9 +3495,11 @@ function registerTools(ctx, runtime, config) {
         pendingRestart: state.restart !== null,
         gateAllow: verdict.allow,
         quietForMs: Math.round(verdict.quietForMs),
-        // The grace window (the extra wait after the last conversation
-        // finished) and the quiet window the gate really uses.
+        // The RESTART reserve (the extra wait after the last conversation
+        // finished) and the quiet window the gate really uses. The SHUTDOWN
+        // reserve is reported next to it — the two are independent.
         graceMs: runtime.graceMs(),
+        sleepGraceMs: runtime.sleepGraceMs(),
         effectiveSettleMs: runtime.effectiveSettleMs(),
         // The upper bound of a queued (unclaimed) inbox message.
         queuedGraceMs: runtime.queuedGraceMs(),
@@ -4293,7 +4352,8 @@ function buildChoiceRoute(ctx, runtime, config) {
         const hasShow = Object.prototype.hasOwnProperty.call(body, 'showSleepButton')
         const hasSeconds = Object.prototype.hasOwnProperty.call(body, 'sleepCountdownSeconds')
         const hasGrace = Object.prototype.hasOwnProperty.call(body, 'restartGraceMs')
-        if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasSeconds && !hasGrace) {
+        const hasSleepGrace = Object.prototype.hasOwnProperty.call(body, 'sleepGraceMs')
+        if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasSeconds && !hasGrace && !hasSleepGrace) {
           // No key was asked for: there is nothing to persist.
           res.statusCode = 400
           res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -4301,7 +4361,7 @@ function buildChoiceRoute(ctx, runtime, config) {
           res.end(JSON.stringify({
             ok: false,
             error: 'no-choice',
-            instruction: 'Send { "includePlugins": true | false } and/or { "backupIncludePlugins": true | false } and/or { "backupOnRestart": true | false } and/or { "showSleepButton": true | false } and/or { "sleepCountdownSeconds": 0 | 10 | 20 | 30 | 60 } and/or { "restartGraceMs": 0 | 3000 | 5000 | 10000 | 20000 | 30000 }.',
+            instruction: 'Send { "includePlugins": true | false } and/or { "backupIncludePlugins": true | false } and/or { "backupOnRestart": true | false } and/or { "showSleepButton": true | false } and/or { "sleepCountdownSeconds": 0 | 10 | 20 | 30 | 60 } and/or { "restartGraceMs": 0 | 5000 | 10000 | 20000 | 30000 | 60000 } and/or { "sleepGraceMs": 0 | 5000 | 10000 | 20000 | 30000 | 60000 }.',
           }))
           return
         }
@@ -4373,6 +4433,17 @@ function buildChoiceRoute(ctx, runtime, config) {
           }))
           return
         }
+        if (hasSleepGrace && GRACE_CHOICES_MS.indexOf(body.sleepGraceMs) === -1) {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'sleepGraceMs-must-be-offered',
+            instruction: `Send { "sleepGraceMs": ${GRACE_CHOICES_MS.join(' | ')} }.`,
+          }))
+          return
+        }
         const changes = {}
         // The route field is `includePlugins`, the configuration key is
         // `backupIncludePlugins` (the profile row keeps the plugin's own name).
@@ -4382,6 +4453,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         if (hasShow) changes.showSleepButton = body.showSleepButton === true
         if (hasSeconds) changes.sleepCountdownSeconds = body.sleepCountdownSeconds
         if (hasGrace) changes.restartGraceMs = body.restartGraceMs
+        if (hasSleepGrace) changes.sleepGraceMs = body.sleepGraceMs
         const result = await runtime.applyConfigChoice(changes)
         // The one-time install prompt explained the features to the user, so
         // the announcement of a fresh installation must not follow it.
@@ -4403,6 +4475,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         if (hasShow) answer.showSleepButton = body.showSleepButton === true
         if (hasSeconds) answer.sleepCountdownSeconds = body.sleepCountdownSeconds
         if (hasGrace) answer.restartGraceMs = body.restartGraceMs
+        if (hasSleepGrace) answer.sleepGraceMs = body.sleepGraceMs
         res.statusCode = 200
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('cache-control', 'no-store')
@@ -4481,12 +4554,14 @@ function sleepGate(runtime) {
   }
   const list = Array.isArray(busy) ? busy : []
   if (list.length > 0) return { allow: false, reason: 'busy', blockedBy: list }
-  // The grace window: the last conversation may have finished a moment ago,
-  // and other plugins still have work queued that this plugin cannot see.
+  // The SHUTDOWN reserve: the last conversation may have finished a moment
+  // ago, and other plugins still have work queued that this plugin cannot
+  // see. The machine goes off for good, so the reserve is the SHUTDOWN one
+  // (`sleepGraceMs`) — never the restart one.
   let quiet = 0
   let grace = 0
   try { quiet = Number(runtime.quietForMs()) } catch { quiet = 0 }
-  try { grace = Number(runtime.graceMs()) } catch { grace = 0 }
+  try { grace = Number(runtime.sleepGraceMs()) } catch { grace = 0 }
   if (!Number.isFinite(quiet) || quiet < 0) quiet = 0
   if (Number.isFinite(grace) && grace > 0 && quiet < grace) {
     return { allow: false, reason: 'grace', blockedBy: [] }
@@ -4572,11 +4647,12 @@ function createSleepService(ctx, runtime, config, options = {}) {
     busyAgents: () => runtime.busyAgents(),
     gate,
     titleOf: (sessionId) => runtime.sessionTitle(sessionId),
-    // The grace window: after the last conversation finished the machine
+    // The SHUTDOWN reserve: after the last conversation finished the machine
     // waits a little longer, so that work this plugin cannot see (a memory
-    // plugin writing its notes, a summary) still gets its chance.
+    // plugin writing its notes, a summary) still gets its chance. The machine
+    // goes off for good, so this is the shutdown reserve — not the restart one.
     quietForMs: () => runtime.quietForMs(),
-    graceMs: () => runtime.graceMs(),
+    graceMs: () => runtime.sleepGraceMs(),
     // A pending restart goes first: the shutdown waits for it.
     restartPending: () => {
       const pending = runtime.pendingRestart()
@@ -4711,9 +4787,12 @@ function sleepStatusPayload(sleep, config, runtime) {
     armed: status.armed,
     showSleepButton: config.showSleepButton !== false,
     countdownSeconds: status.countdownSeconds,
-    // The grace window and how long the host has been quiet: both are needed
-    // to tell "the machine is waiting for the grace" from "somebody is busy".
-    graceMs: config.restartGraceMs,
+    // The SHUTDOWN reserve (the machine goes off for good) and how long the
+    // host has been quiet: both are needed to tell "the machine is waiting
+    // for the reserve" from "somebody is busy". The RESTART reserve is
+    // reported next to it, so the settings page can show both.
+    graceMs: config.sleepGraceMs,
+    restartGraceMs: config.restartGraceMs,
     quietForMs: runtime && typeof runtime.quietForMs === 'function' ? runtime.quietForMs() : 0,
     // When the shutdown was armed: the intent has to survive a restart, so the
     // time is reported for the troubleshooting.
@@ -4855,9 +4934,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
           generation: state.generation,
           pendingRestart: state.restart !== null,
           settleMs: config.settleMs,
-          // The grace window and the quiet window the gate really uses: both
-          // are needed to tell "waiting for the grace" from "somebody is busy".
+          // The RESTART reserve and the quiet window the gate really uses:
+          // both are needed to tell "waiting for the reserve" from "somebody
+          // is busy". The SHUTDOWN reserve is reported next to it.
           graceMs: config.restartGraceMs,
+          sleepGraceMs: config.sleepGraceMs,
           effectiveSettleMs: runtime.effectiveSettleMs(),
           // The upper bound of a queued (unclaimed) inbox message: after this
           // window it stops blocking the restart.
@@ -4931,8 +5012,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             reason: typeof verdict.reason === 'string' ? verdict.reason : 'unknown',
             quietForMs: typeof verdict.quietForMs === 'number' ? verdict.quietForMs : 0,
             settleMs: config.settleMs,
-            // The grace window and the quiet window the gate really uses.
+            // The RESTART reserve and the quiet window the gate really uses.
+            // The SHUTDOWN reserve is reported next to it — the two windows
+            // are independent.
             graceMs: config.restartGraceMs,
+            sleepGraceMs: config.sleepGraceMs,
             effectiveSettleMs: runtime.effectiveSettleMs(),
             // The upper bound of a queued (unclaimed) inbox message.
             queuedGraceMs: config.queuedGraceMs,

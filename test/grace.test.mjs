@@ -182,14 +182,43 @@ function fireTicks(timers) {
   }
 }
 
-test('the grace window is a config value with a default of ten seconds', () => {
-  assert.equal(DEFAULTS.restartGraceMs, 10000, 'the default is ten seconds')
-  assert.equal(normalizeConfig({}).restartGraceMs, 10000)
+test('the two reserve windows have their own defaults', () => {
+  // The restart reserve: a restart is a daily operation, so no extra wait.
+  assert.equal(DEFAULTS.restartGraceMs, 0, 'the restart reserve defaults to none')
+  assert.equal(normalizeConfig({}).restartGraceMs, 0)
+  // The shutdown reserve: the machine goes off for good, so the delayed work
+  // of the other plugins must get its chance.
+  assert.equal(DEFAULTS.sleepGraceMs, 30000, 'the shutdown reserve defaults to thirty seconds')
+  assert.equal(normalizeConfig({}).sleepGraceMs, 30000)
+  assert.notEqual(
+    normalizeConfig({}).restartGraceMs,
+    normalizeConfig({}).sleepGraceMs,
+    'the two windows must not share one default',
+  )
   // A hand-edited profile value is snapped onto the nearest offered choice.
   assert.equal(normalizeConfig({ restartGraceMs: 7000 }).restartGraceMs, 5000)
+  assert.equal(normalizeConfig({ restartGraceMs: 20000 }).restartGraceMs, 20000)
+  assert.equal(normalizeConfig({ restartGraceMs: 15000 }).restartGraceMs, 10000)
+  assert.equal(normalizeConfig({ sleepGraceMs: 3000 }).sleepGraceMs, 5000)
+  assert.equal(normalizeConfig({ sleepGraceMs: 15000 }).sleepGraceMs, 10000)
   assert.equal(normalizeConfig({ restartGraceMs: 0 }).restartGraceMs, 0)
-  assert.equal(normalizeConfig({ restartGraceMs: -1 }).restartGraceMs, 10000)
-  assert.equal(normalizeConfig({ restartGraceMs: 'nonsense' }).restartGraceMs, 10000)
+  assert.equal(normalizeConfig({ sleepGraceMs: 0 }).sleepGraceMs, 0)
+  // A wrong value falls back to the default OF THAT WINDOW.
+  assert.equal(normalizeConfig({ restartGraceMs: -1 }).restartGraceMs, 0)
+  assert.equal(normalizeConfig({ restartGraceMs: 'nonsense' }).restartGraceMs, 0)
+  assert.equal(normalizeConfig({ sleepGraceMs: -1 }).sleepGraceMs, 30000)
+  assert.equal(normalizeConfig({ sleepGraceMs: 'nonsense' }).sleepGraceMs, 30000)
+})
+
+test('the two reserve windows do not inherit each other', () => {
+  // A profile that only knows the OLD key gets the new defaults — the old
+  // value must not bleed into the other window.
+  assert.equal(normalizeConfig({ restartGraceMs: 60000 }).sleepGraceMs, 30000)
+  assert.equal(normalizeConfig({ sleepGraceMs: 60000 }).restartGraceMs, 0)
+  // Both present: each one keeps its own value.
+  const both = normalizeConfig({ restartGraceMs: 10000, sleepGraceMs: 60000 })
+  assert.equal(both.restartGraceMs, 10000)
+  assert.equal(both.sleepGraceMs, 60000)
 })
 
 test('without a grace the restart behaves exactly as before', (t) => {
@@ -266,7 +295,7 @@ test('new activity during the wait starts the timer over', (t) => {
   assert.equal(late.gate.quietForMs, 10000)
 })
 
-test('the graceful shutdown waits for the grace too', async (t) => {
+test('the graceful shutdown waits for the SHUTDOWN reserve', async (t) => {
   const clock = patchNow({ value: 1_700_000_000_000 }, t)
   const { ctx, routes, timers } = createContext()
   apply(ctx, {
@@ -274,7 +303,9 @@ test('the graceful shutdown waits for the grace too', async (t) => {
     recoveryDelayMs: 0,
     enabled: true,
     settleMs: 0,
-    restartGraceMs: 10000,
+    // The restart reserve is not the one the shutdown waits for.
+    restartGraceMs: 0,
+    sleepGraceMs: 10000,
     sleepCountdownSeconds: 20,
   })
 
@@ -282,7 +313,7 @@ test('the graceful shutdown waits for the grace too', async (t) => {
   assert.equal(armed.phase, 'waiting', 'the countdown must not start during the grace')
   assert.deepEqual(armed.blockers, [], 'nobody is busy — the grace is the reason')
   assert.match(armed.message, /再等/, 'the machine says why it waits')
-  assert.equal(armed.graceMs, 10000, 'the grace window is reported')
+  assert.equal(armed.graceMs, 10000, 'the shutdown reserve is reported')
   assert.equal(typeof armed.quietForMs, 'number')
 
   // Still inside the grace: the countdown does not start.
@@ -501,10 +532,12 @@ function mountSettings({ status = {}, language = 'zh' } = {}) {
       const target = String(url)
       if (target.includes('/choice') && init && init.body) {
         // The Host takes the answer and reports it back on the next poll —
-        // under the name the status route uses (`graceMs`, not the write key).
+        // under the names the status route uses (`restartGraceMs` and
+        // `sleepGraceMs`, not the write key of the shutdown reserve).
         const written = JSON.parse(init.body)
         const next = { ...(state.status || {}) }
-        if (typeof written.restartGraceMs === 'number') next.graceMs = written.restartGraceMs
+        if (typeof written.restartGraceMs === 'number') next.restartGraceMs = written.restartGraceMs
+        if (typeof written.sleepGraceMs === 'number') next.sleepGraceMs = written.sleepGraceMs
         if (typeof written.sleepCountdownSeconds === 'number') next.countdownSeconds = written.sleepCountdownSeconds
         state.status = next
         return Promise.resolve({
@@ -590,7 +623,7 @@ function mountSettings({ status = {}, language = 'zh' } = {}) {
   }
 }
 
-test('the settings section offers the grace window and saves it', async () => {
+test('the settings section offers the two reserve windows and saves them', async () => {
   const mounted = mountSettings({
     status: {
       ok: true,
@@ -598,7 +631,9 @@ test('the settings section offers the grace window and saves it', async () => {
       showSleepButton: true,
       blockers: [],
       countdownSeconds: 20,
-      graceMs: 10000,
+      graceMs: 30000,
+      sleepGraceMs: 30000,
+      restartGraceMs: 0,
     },
   })
 
@@ -606,19 +641,29 @@ test('the settings section offers the grace window and saves it', async () => {
   assert.ok(panel, 'the settings section must be rendered')
 
   const selects = walk(panel).filter((node) => node.type === 'select')
-  const grace = selects.find((node) => node.props['data-dsh-autorestart-setting'] === 'restartGraceMs')
-  assert.ok(grace, 'the grace window must have a dropdown')
-  assert.equal(grace.props.value, '10', 'the Host value is shown')
-  const options = walk(grace).filter((node) => node.type === 'option').map((node) => node.props.value)
-  assert.deepEqual(options, ['0', '3', '5', '10', '20', '30'])
+  const restart = selects.find((node) => node.props['data-dsh-autorestart-setting'] === 'restartGraceMs')
+  const shutdown = selects.find((node) => node.props['data-dsh-autorestart-setting'] === 'sleepGraceMs')
+  assert.ok(restart, 'the restart reserve must have a dropdown')
+  assert.ok(shutdown, 'the shutdown reserve must have a dropdown')
+  assert.equal(restart.props.value, '0', 'the restart reserve of the Host is shown')
+  assert.equal(shutdown.props.value, '30', 'the shutdown reserve of the Host is shown')
+  const options = walk(restart).filter((node) => node.type === 'option').map((node) => node.props.value)
+  assert.deepEqual(options, ['0', '5', '10', '20', '30', '60'], 'the six offered windows')
+  assert.deepEqual(
+    walk(shutdown).filter((node) => node.type === 'option').map((node) => node.props.value),
+    ['0', '5', '10', '20', '30', '60'],
+    'both dropdowns offer the same six windows',
+  )
 
-  // The label and the explanation are on the page.
+  // The two labels tell the two situations apart.
   const shown = textOf(panel)
-  assert.match(shown, /收工后再等几秒/, `the label must be there: ${shown}`)
-  assert.match(shown, /重新计时/, `the hint must say that the timer starts over: ${shown}`)
+  assert.match(shown, /重启前再等几秒/, `the restart label must be there: ${shown}`)
+  assert.match(shown, /关机前再等几秒/, `the shutdown label must be there: ${shown}`)
+  assert.match(shown, /日常操作/, `the restart hint must explain the restart: ${shown}`)
+  assert.match(shown, /机器就关了/, `the shutdown hint must explain the shutdown: ${shown}`)
 
   // Choosing another value writes it into the profile configuration.
-  grace.props.onChange({ target: { value: '20' } })
+  restart.props.onChange({ target: { value: '20' } })
   await new Promise((resolve) => setTimeout(resolve, 10))
   const posts = mounted.fetches.filter(
     (call) => String(call.url).includes('/choice') && call.init && call.init.body,
@@ -629,16 +674,21 @@ test('the settings section offers the grace window and saves it', async () => {
   // And it is read back from the Host.
   const again = mounted.render('dsh-autorestart')
   const selectsAgain = walk(again).filter((node) => node.type === 'select')
-  const graceAgain = selectsAgain.find((node) => node.props['data-dsh-autorestart-setting'] === 'restartGraceMs')
-  assert.equal(graceAgain.props.value, '20', 'the new value is read back')
+  const restartAgain = selectsAgain.find((node) => node.props['data-dsh-autorestart-setting'] === 'restartGraceMs')
+  assert.equal(restartAgain.props.value, '20', 'the new value is read back')
 })
 
-test('the copy of the grace window lives in the locale files', () => {
+test('the copy of the two reserve windows lives in the locale files', () => {
   const zh = JSON.parse(fs.readFileSync(new URL('../locale/zh.json', import.meta.url), 'utf8'))
   const en = JSON.parse(fs.readFileSync(new URL('../locale/en.json', import.meta.url), 'utf8'))
-  assert.ok(zh.settings.grace, 'the zh locale must carry the grace texts')
-  assert.ok(en.settings.grace, 'the en locale must carry the grace texts')
-  assert.match(zh.settings.grace.hint, /定时器|看不见/, 'the zh copy must explain the blind spot')
-  assert.match(en.settings.grace.hint, /timer/, 'the en copy must explain the blind spot')
-  assert.match(zh.settings.grace.hint, /重新计时/, 'the zh copy must say that the timer starts over')
+  assert.ok(zh.settings.restartGrace, 'the zh locale must carry the restart texts')
+  assert.ok(zh.settings.sleepGrace, 'the zh locale must carry the shutdown texts')
+  assert.ok(en.settings.restartGrace, 'the en locale must carry the restart texts')
+  assert.ok(en.settings.sleepGrace, 'the en locale must carry the shutdown texts')
+  assert.equal(zh.settings.restartGrace.label, '重启前再等几秒')
+  assert.equal(zh.settings.sleepGrace.label, '关机前再等几秒')
+  assert.match(zh.settings.restartGrace.hint, /日常操作/, 'the zh restart copy must explain the restart')
+  assert.match(zh.settings.sleepGrace.hint, /机器就关了/, 'the zh shutdown copy must explain the shutdown')
+  assert.match(en.settings.restartGrace.hint, /daily operation/, 'the en restart copy must explain the restart')
+  assert.match(en.settings.sleepGrace.hint, /goes off for good/, 'the en shutdown copy must explain the shutdown')
 })

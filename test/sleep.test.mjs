@@ -731,7 +731,7 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(res.statusCode, 200)
   const payload = JSON.parse(res.body)
   assert.deepEqual(Object.keys(payload).sort(), [
-    'armed', 'armedAt', 'backupIncludePlugins', 'backupOnRestart', 'blockers', 'countdownSeconds', 'dryRun', 'graceMs', 'host', 'lastRun', 'message', 'ok', 'phase', 'quietForMs', 'remainingMs', 'showSleepButton',
+    'armed', 'armedAt', 'backupIncludePlugins', 'backupOnRestart', 'blockers', 'countdownSeconds', 'dryRun', 'graceMs', 'host', 'lastRun', 'message', 'ok', 'phase', 'quietForMs', 'remainingMs', 'restartGraceMs', 'showSleepButton',
   ])
   assert.equal(payload.ok, true)
   assert.equal(payload.phase, 'idle')
@@ -739,7 +739,8 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(payload.showSleepButton, true)
   assert.equal(payload.countdownSeconds, 20)
   assert.equal(payload.armedAt, null, 'no shutdown was armed yet')
-  assert.equal(payload.graceMs, 10000, 'the grace window is reported for the troubleshooting')
+  assert.equal(payload.graceMs, 30000, 'the SHUTDOWN reserve is reported for the troubleshooting')
+  assert.equal(payload.restartGraceMs, 0, 'the restart reserve is reported next to it')
   assert.equal(typeof payload.quietForMs, 'number')
   assert.equal(payload.backupOnRestart, true, 'the pre-restart backup is on by default')
   assert.equal(payload.backupIncludePlugins, true, 'the plugin tree is part of the backup by default')
@@ -1645,7 +1646,7 @@ test('an empty settings page puts the section at the end', async () => {
   assert.equal(mounted.section().order, 1000, 'the fallback order is the big number')
 })
 
-test('the section shows exactly the four settings, with the Host values', async () => {
+test('the section shows exactly the five settings, with the Host values', async () => {
   const mounted = mountClient({
     status: {
       ok: true,
@@ -1653,7 +1654,9 @@ test('the section shows exactly the four settings, with the Host values', async 
       showSleepButton: true,
       blockers: [],
       countdownSeconds: 30,
-      graceMs: 10000,
+      graceMs: 30000,
+      sleepGraceMs: 30000,
+      restartGraceMs: 0,
       backupOnRestart: true,
       backupIncludePlugins: false,
     },
@@ -1661,22 +1664,28 @@ test('the section shows exactly the four settings, with the Host values', async 
   const panel = await mounted.settled('settings.section')
   assert.ok(panel, 'the settings section must be rendered')
 
-  // 1. and 2. the two dropdowns: the countdown and the grace window
+  // 1. to 3. the three dropdowns: the countdown and the two reserves
   const selects = walk(panel).filter((node) => node.type === 'select')
-  assert.equal(selects.length, 2, 'the section has exactly two dropdowns')
+  assert.equal(selects.length, 3, 'the section has exactly three dropdowns')
   assert.equal(selects[0].props.value, '30', 'the dropdown shows the countdown the Host reports')
   const secondsOptions = walk(selects[0]).filter((node) => node.type === 'option').map((node) => node.props.value)
   assert.deepEqual(secondsOptions, ['0', '10', '20', '30', '60'])
   assert.equal(
     selects[1].props['data-dsh-autorestart-setting'],
     'restartGraceMs',
-    'the second dropdown is the grace window',
+    'the second dropdown is the restart reserve',
   )
-  assert.equal(selects[1].props.value, '10', 'the grace window the Host reports is shown')
+  assert.equal(selects[1].props.value, '0', 'the restart reserve the Host reports is shown')
+  assert.equal(
+    selects[2].props['data-dsh-autorestart-setting'],
+    'sleepGraceMs',
+    'the third dropdown is the shutdown reserve',
+  )
+  assert.equal(selects[2].props.value, '30', 'the shutdown reserve the Host reports is shown')
   const graceOptions = walk(selects[1]).filter((node) => node.type === 'option').map((node) => node.props.value)
-  assert.deepEqual(graceOptions, ['0', '3', '5', '10', '20', '30'])
+  assert.deepEqual(graceOptions, ['0', '5', '10', '20', '30', '60'])
 
-  // 3. and 4. the two backup switches
+  // 4. and 5. the two backup switches
   const switches = walk(panel).filter((node) => node.type === 'input')
   assert.equal(switches.length, 2, 'the section has exactly two switches')
   const byKey = new Map(switches.map((node) => [node.props['data-dsh-autorestart-setting'], node]))
@@ -1687,7 +1696,8 @@ test('the section shows exactly the four settings, with the Host values', async 
   // The labels and the explanation are on the page.
   const shown = textOf(panel)
   assert.ok(shown.includes('倒计时秒数'), `the label must be there: ${shown}`)
-  assert.ok(shown.includes('收工后再等几秒'), `the grace label must be there: ${shown}`)
+  assert.ok(shown.includes('重启前再等几秒'), `the restart reserve label must be there: ${shown}`)
+  assert.ok(shown.includes('关机前再等几秒'), `the shutdown reserve label must be there: ${shown}`)
   assert.ok(shown.includes('重启前备份'), `the label must be there: ${shown}`)
   assert.ok(shown.includes('备份包含已安装插件'), `the label must be there: ${shown}`)
   assert.ok(shown.includes('不含 profile 里的插件目录'), `the scope must be explained: ${shown}`)

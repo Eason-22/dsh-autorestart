@@ -221,6 +221,29 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 **不会**为了重启去强杀任何会话：`forceRestartWhenBusy` 默认仍然是关的，这个插件也不会去打开它。
 
+### 安静窗口到底在量什么
+
+重启闸门有两层：**没有会话在忙** + **一段安静窗口**（`max(settleMs, restartGraceMs)`）。
+
+安静窗口只回答一个问题：**距上一次「真的有活」过了多久。** 它从下面两个标记里**较晚的那个**开始算：
+
+- **最后一次真正的活动信号** —— 一轮开始或结束（`agent/status`）、一条消息被排队（`agent/inbox/inserted`）、或者一个说明「确实在干活」的会话事件（消息、工具调用、轮次）；
+- **最后一次看见会话在忙** —— 正在跑的轮次，或者排队的消息（`busyAgents()`）。
+
+**例行的会话事件不算活动。** 宿主在界面轮询/状态同步时会持续产生会话事件（标题、投影、请求上下文、已结算的任务），实测每 2~3 秒一个。以前这些都算活动，于是安静窗口每两三秒就被清零 —— **只要窗口比事件间隔长，它就永远凑不满，重启永远不会触发**（这就是 0.6.0 把宽限期从 2 秒抬到 10 秒之后「昨晚正常、今天不动」的原因）。
+
+这条规则是**单边**的：**读不出类型的事件一律不算活动** —— 拿不准的时候宁可早重启，也不要永远不重启。
+
+**正在跑的会话永远挡路。** 安静窗口只决定「什么时候可以重启」；「有没有会话在忙」是硬保证，任何配置都放松不了它。
+
+**重启不动的时候去哪儿看。** 状态接口会把闸门的原因和阻塞者一起报出来（`GET /health?state=1` 里的 `reason`：`conversation-active` = 有会话在忙，`settling` = 只是安静窗口还没凑满，`quiet` = 可以走了）；待重启期间日志里每分钟会写一条诊断行：
+
+```
+restart gate: action=wait reason=agents-busy-within-soft-window busyCount=1 quietForMs=1432 effectiveSettleMs=10000
+```
+
+`action` 是这次决策做了什么（`wait` / `restart` / `long-wait` …），`reason` 是为什么，`busyCount` 是几个会话在挡，`quietForMs` 是已经安静了多久，`effectiveSettleMs` 是要凑满的窗口。
+
 ## Agent 工具与"它怎么知道该用插件"
 
 | 工具 | 作用 |
@@ -563,8 +586,13 @@ A restart is never scheduled while another DSH conversation is still working.
    the log. The verdict is { allow:false, reason:'conversation-active',
    blockedBy:[...] }.
 2. Settle gate: even with no busy conversation, the host must have been quiet for
-   settleMs (default 2000 ms) since the last observed activity (agent/status,
-   session/event, agent/inbox/inserted). Otherwise the verdict is
+   settleMs (default 2000 ms) since the last REAL activity — a turn that started
+   or ended (agent/status), a message that was queued (agent/inbox/inserted), a
+   session event that says work happened (a message, a tool, a turn), or the last
+   moment a conversation was seen working. A ROUTINE session event (a title, a
+   projection, a context request) is not activity: the host emits those every
+   two to three seconds, so counting them kept the window from ever filling and
+   the restart never fired. Otherwise the verdict is
    { allow:false, reason:'settling' }. This closes the gap between the decision
    and the detached helper's ping delay, where a new turn could otherwise start
    and be killed.

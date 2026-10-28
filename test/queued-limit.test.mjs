@@ -775,3 +775,43 @@ test('the long-wait line exists in both languages', async () => {
   assert.match(enText, /waiting for/, enText)
   assert.match(enText, /coding/, enText)
 })
+
+test('the bubble says that it is waiting for the quiet window', async () => {
+  const mounted = mountPill({
+    state: {
+      ok: true,
+      pendingRestart: true,
+      waiters: ['sess-x'],
+      blockedBy: [],
+      allowRestart: false,
+      // No blocker, but the gate is closed because the quiet window is not
+      // full yet. The bubble must say that, not "waiting for N tasks".
+      reason: 'settling',
+    },
+  })
+
+  const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-x' })
+  assert.ok(pill, 'the pill must be rendered')
+  const text = textOf(pill)
+  assert.match(text, /还在等这段安静期/, `the bubble says what it waits for: ${text}`)
+  assert.doesNotMatch(text, /等待 \d+ 个任务/, 'no conversation blocks the restart')
+})
+
+test('the bubble says that it waits for the other sessions when one blocks', async () => {
+  const mounted = mountPill({
+    state: {
+      ok: true,
+      pendingRestart: true,
+      waiters: ['sess-x'],
+      blockedBy: [{ sessionId: 'sess-hold', kind: 'session', label: '写代码', name: '写代码', reason: 'running' }],
+      allowRestart: false,
+      reason: 'conversation-active',
+    },
+  })
+
+  const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-x' })
+  assert.ok(pill, 'the pill must be rendered')
+  const text = textOf(pill)
+  assert.match(text, /等待 1 个任务结束/, `the bubble counts the blocker: ${text}`)
+  assert.doesNotMatch(text, /还在等这段安静期/, 'the quiet window is not the reason')
+})

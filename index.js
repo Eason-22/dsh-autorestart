@@ -76,6 +76,7 @@ import {
   scheduleDetachedRestart,
 } from './lib/restart.js'
 import { compareSemver } from './lib/semver.js'
+import { isWorkSessionEvent } from './lib/activity.js'
 import {
   createQueuedTracker,
   DEFAULT_QUEUED_GRACE_MS,
@@ -1261,6 +1262,18 @@ export function createRuntime(ctx, config, options = {}) {
   let lastActivityAt = Date.now()
 
   /**
+   * When a busy conversation was seen for the last time.
+   *
+   * The quiet window measures the time since the last REAL work: a running
+   * turn or a queued message. The host polls the agent list every few
+   * seconds, so this marker follows the work exactly — and it is NOT reset by
+   * the routine session events the interface produces while it synchronises
+   * (those used to reset the window every 2-3 seconds, so a window longer
+   * than that interval could never fill and the restart never fired).
+   */
+  let lastBusyAt = 0
+
+  /**
    * When the "the restart is waiting for a long time" line was logged last.
    *
    * The gate polls every few seconds, so the line is rate limited: at most one
@@ -1269,7 +1282,22 @@ export function createRuntime(ctx, config, options = {}) {
    */
   let longWaitLog = { at: 0, requestedAt: 0 }
 
-  /** Record conversation activity (any agent turn, session event or queued message). */
+  /**
+   * When the diagnostic line of the restart gate was logged last.
+   *
+   * The gate is evaluated every few seconds, so the line is rate limited to
+   * once a minute: it says what the gate decided and why, which is the first
+   * thing to look at when "the restart never happens" is reported.
+   */
+  let lastDecisionLogAt = 0
+
+  /**
+   * Record REAL conversation activity (an agent turn that started or ended, a
+   * message that was queued, a session event that says work happened).
+   *
+   * The routine session events of the interface do NOT go through here: they
+   * would keep the quiet window from ever filling.
+   */
   const noteActivity = () => {
     lastActivityAt = Date.now()
   }
@@ -1488,6 +1516,10 @@ export function createRuntime(ctx, config, options = {}) {
     }
     queuedSessions.clear()
     for (const sessionId of seen) queuedSessions.add(sessionId)
+    // Real work is still going on: the quiet window starts over. This is the
+    // marker that makes the quiet window measure "since the last real work"
+    // instead of "since the last session event of any kind".
+    if (out.length > 0) lastBusyAt = Date.now()
     return out
   }
 
@@ -1829,8 +1861,26 @@ export function createRuntime(ctx, config, options = {}) {
    */
   const pendingRestart = () => state.restart !== null && state.restart !== undefined
 
-  /** How long the host has been quiet (no conversation activity at all). */
-  const quietForMs = () => Math.max(0, Date.now() - lastActivityAt)
+  /**
+   * The moment the quiet window started.
+   *
+   * It is the LATER of the two markers:
+   *   - `lastActivityAt`: the last real activity signal (a turn that started
+   *     or ended, a message that was queued);
+   *   - `lastBusyAt`: the last moment a conversation was seen working (a
+   *     running turn or a queued message).
+   *
+   * The routine session events of the interface (a title, a projection, a
+   * context request) are NOT activity: they arrive every two to three
+   * seconds, so counting them would keep the quiet window from ever filling
+   * — and the restart would never fire.
+   *
+   * @returns {number} a timestamp in milliseconds
+   */
+  const quietSince = () => Math.max(lastActivityAt, lastBusyAt)
+
+  /** How long the host has been quiet (no real conversation activity at all). */
+  const quietForMs = () => Math.max(0, Date.now() - quietSince())
 
   /**
    * The grace window: how much longer the host waits after the last
@@ -1850,7 +1900,7 @@ export function createRuntime(ctx, config, options = {}) {
   /** The two-layer restart gate: no busy conversation AND a quiet window. */
   const gate = () => restartGate(state, {
     busyAgents: busyAgents(),
-    lastActivityAt,
+    lastActivityAt: quietSince(),
     now: Date.now(),
     settleMs: effectiveSettleMs(),
   })
@@ -2241,7 +2291,7 @@ const titleOfSummary = (item) => {
     const decision = restartDecision(state, {
       anyAgentRunning: busy.length > 0,
       busyAgents: busy,
-      lastActivityAt,
+      lastActivityAt: quietSince(),
       settleMs: effectiveSettleMs(),
       now,
       softMs: config.deferSoftMs,
@@ -2250,6 +2300,23 @@ const titleOfSummary = (item) => {
       forceRestartWhenBusy: config.forceRestartWhenBusy,
     })
     if (decision.log) log.info(decision.log)
+    // The diagnostic line of the pending restart: what the gate decided and
+    // why. It is rate limited (once a minute) so the 3s poll does not flood
+    // the log, and it is the first thing to look at when "the restart never
+    // happens" is reported.
+    if (now - lastDecisionLogAt >= LONG_WAIT_LOG_INTERVAL_MS) {
+      lastDecisionLogAt = now
+      log.info(
+        `restart gate: action=${decision.action} reason=${decision.reason} busyCount=${busy.length} quietForMs=${Math.max(0, now - quietSince())} effectiveSettleMs=${effectiveSettleMs()}`,
+        {
+          action: decision.action,
+          reason: decision.reason,
+          busyCount: busy.length,
+          quietForMs: Math.max(0, now - quietSince()),
+          effectiveSettleMs: effectiveSettleMs(),
+        },
+      )
+    }
     switch (decision.action) {
       case 'wait':
         return
@@ -2541,11 +2608,20 @@ const titleOfSummary = (item) => {
      */
     pendingRestart,
     /**
-     * How long the host has been quiet (no conversation activity at all).
+     * How long the host has been quiet (no REAL conversation activity: a
+     * running turn, a queued message, a turn that started or ended).
+     *
+     * The routine session events of the interface do not count.
      *
      * @returns {number}
      */
     quietForMs,
+    /**
+     * The moment the quiet window started.
+     *
+     * @returns {number} a timestamp in milliseconds
+     */
+    quietSince,
     /**
      * The grace window: the extra wait after the last conversation finished.
      *
@@ -4848,6 +4924,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             waiters,
             blockedBy,
             allowRestart: verdict.allow === true,
+            // WHY the gate says what it says. Without this, "allowRestart is
+            // false and blockedBy is empty" looks like a contradiction: the
+            // reason tells the two apart (an empty blocker list with the
+            // reason "settling" means the quiet window is not full yet).
+            reason: typeof verdict.reason === 'string' ? verdict.reason : 'unknown',
             quietForMs: typeof verdict.quietForMs === 'number' ? verdict.quietForMs : 0,
             settleMs: config.settleMs,
             // The grace window and the quiet window the gate really uses.
@@ -4885,6 +4966,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             waiters: [],
             blockedBy: [],
             allowRestart: false,
+            reason: 'unknown',
             quietForMs: 0,
             queuedGraceMs: config.queuedGraceMs,
             longWait: null,
@@ -5056,9 +5138,20 @@ function trackAgents(ctx, runtime, config) {
     }
   })
 
-  // Any session event or newly queued inbox message restarts the settle window.
-  ctx.on('session/event', () => {
+  // A session event only restarts the settle window when it says that WORK
+  // happened (a message, a tool, a turn). The host produces session events
+  // every two to three seconds while the interface polls and synchronises —
+  // counting those as activity kept the quiet window from ever filling, so a
+  // restart with a grace window of ten seconds NEVER fired. When the type of
+  // an event cannot be read, it is not activity: the plugin would rather
+  // restart a little early than never restart at all.
+  //
+  // The hard guarantee is elsewhere and untouched: a conversation that is
+  // really running blocks the restart through `busyAgents()`, which is never
+  // relaxed.
+  ctx.on('session/event', (payload) => {
     try {
+      if (!isWorkSessionEvent(payload)) return
       runtime.noteActivity()
     } catch {}
   })

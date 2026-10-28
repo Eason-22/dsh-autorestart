@@ -134,6 +134,7 @@ const ZH = {
   idle: ' · 空闲后自动重启',
   goalActive: ' · 被某个自动续跑的 goal 占着',
   goalExhausted: ' · 某个任务的 goal 轮次额度已用完，无法续跑',
+  settling: ' · 还在等这段安静期',
   parkedGoals: ' · 已停泊 {n} 个 goal，重启后自动继续',
   parkButton: '停泊并重启',
   parkButtonAria: '停泊该会话的 goal，并立即请求重启',
@@ -281,6 +282,7 @@ const EN = {
   idle: ' · restarts once idle',
   goalActive: ' · held by a self-continuing goal',
   goalExhausted: ' · a goal ran out of rounds',
+  settling: ' · still waiting for the quiet window',
   parkedGoals: ' · {n} goal(s) parked, they continue after the restart',
   parkButton: 'Park & restart',
   parkButtonAria: 'Park that session goal and request the restart now',
@@ -1352,13 +1354,18 @@ if (moduleLoader) moduleLoader.load({
       const goalExhausted = others.filter((entry) => String(entry.reason) === 'goal-exhausted')
       const otherBusy = others.length - goalActive.length - goalExhausted.length
 
+      // WHY the gate is closed: the Host reports the reason next to the
+      // blockers. With no blocker but the reason "settling" the restart is
+      // waiting for the quiet window — not for a conversation.
+      const gateReason = info && typeof info.reason === 'string' ? info.reason : ''
+
       const status = goalActive.length > 0
         ? t('goalActive')
         : goalExhausted.length > 0
           ? t('goalExhausted')
           : otherBusy > 0
             ? `${t('busyPrefix')}${otherBusy}${t('busySuffix')}`
-            : t('idle')
+            : (gateReason === 'settling' ? t('settling') : t('idle'))
 
       // The long wait: the Host says that the restart passed the hard
       // deadline while a conversation was still running. The bubble shows one

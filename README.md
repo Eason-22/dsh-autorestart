@@ -232,6 +232,45 @@ not pretend that everything is fine — and it does not give up either:
 A conversation is never killed to make the restart happen: `forceRestartWhenBusy` stays off by
 default, and this plugin never turns it on.
 
+### What the quiet window measures
+
+The restart gate has two layers: **no busy conversation** and **a quiet window**
+(`max(settleMs, restartGraceMs)`).
+
+The quiet window answers one question: *how long ago did the last real work happen?* It is measured
+from the LATER of two markers:
+
+- **the last real activity signal** — a turn that started or ended (`agent/status`), a message that
+  was queued (`agent/inbox/inserted`), or a session event that says work happened (a message, a tool,
+  a turn);
+- **the last moment a conversation was seen working** — a running turn or a queued message
+  (`busyAgents()`).
+
+**A routine session event is not activity.** The host emits session events every two to three seconds
+while the interface polls and synchronises (a title, a projection, a context request, a job that
+settled). Counting those as activity reset the quiet window every couple of seconds, so a window
+longer than the event interval could never fill: the restart never fired, however long the user
+waited. That is why a grace window of ten seconds used to make the restart impossible.
+
+The rule is one-sided: **an event whose type cannot be read is not activity.** When in doubt the
+plugin restarts a little early rather than never.
+
+**A running conversation always blocks.** The quiet window only decides *when* the restart may fire;
+the busy check is the hard guarantee, and it is never relaxed by any setting.
+
+**Where to look when the restart does not happen.** The status interfaces report the reason of the
+gate next to the blockers (`GET /health?state=1` carries `reason`: `conversation-active` when a
+conversation blocks, `settling` when only the quiet window is not full yet, `quiet` when it may go),
+and the pending restart writes one diagnostic line into the log per minute:
+
+```
+restart gate: action=wait reason=agents-busy-within-soft-window busyCount=1 quietForMs=1432 effectiveSettleMs=10000
+```
+
+`action` is what the restart decision did (`wait`, `restart`, `long-wait`, …), `reason` why,
+`busyCount` how many conversations block, `quietForMs` how long the host has been quiet, and
+`effectiveSettleMs` the window it has to fill.
+
 ### Platform note
 
 `restartMode: app` only applies to the DeepSeek Harness desktop app. A hosted `dsh web`

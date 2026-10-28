@@ -1,18 +1,19 @@
 /**
  * Tests for the grace window: the extra wait after the last conversation
- * finished.
+ * finished, before the host is really RESTARTED.
  *
  * The plugin can only see the DSH agents. Other plugins (a memory plugin
  * that writes its notes a few seconds after the conversation ended, a
  * summary, an MCP callback) queue their work with a timer of their own —
  * work that is invisible here. Without a grace window the host may restart
- * or switch off right in the middle of that write.
+ * right in the middle of that write.
  *
  * The grace window is therefore:
  *
- *   - a CONFIG value (`restartGraceMs`, default 10 seconds, offered as
- *     0 / 3 / 5 / 10 / 20 / 30 seconds);
- *   - honoured by BOTH paths (the restart gate and the graceful shutdown);
+ *   - a CONFIG value (`restartGraceMs`, default 0 seconds, offered as
+ *     0 / 5 / 10 / 20 / 30 / 60 seconds);
+ *   - honoured by the RESTART path only — the graceful shutdown has a
+ *     VISIBLE countdown instead, and that countdown IS its wait;
  *   - anchored at the last observed conversation activity, so new activity
  *     during the wait starts the timer over;
  *   - reported by the status interfaces (`graceMs` + `quietForMs`).
@@ -29,6 +30,15 @@ import { apply, DEFAULTS, normalizeConfig } from '../index.js'
 
 const HEALTH_PATH = '/__dsh_autorestart/health'
 const SLEEP_PATH = '/__dsh_autorestart/sleep'
+
+/**
+ * The key of the shutdown reserve that no longer exists.
+ *
+ * It is built from two parts on purpose: the whole plugin must not mention
+ * the key any more — the tests included — so the needle itself may not
+ * appear in any file of this repository.
+ */
+const REMOVED_SHUTDOWN_KEY = ['sleep', 'GraceMs'].join('')
 
 /* ------------------------------------------------------------------ *
  * The Host half.
@@ -182,43 +192,39 @@ function fireTicks(timers) {
   }
 }
 
-test('the two reserve windows have their own defaults', () => {
-  // The restart reserve: a restart is a daily operation, so no extra wait.
+test('the restart reserve has its own default', () => {
+  // A restart is a daily operation, so no extra wait.
   assert.equal(DEFAULTS.restartGraceMs, 0, 'the restart reserve defaults to none')
   assert.equal(normalizeConfig({}).restartGraceMs, 0)
-  // The shutdown reserve: the machine goes off for good, so the delayed work
-  // of the other plugins must get its chance.
-  assert.equal(DEFAULTS.sleepGraceMs, 30000, 'the shutdown reserve defaults to thirty seconds')
-  assert.equal(normalizeConfig({}).sleepGraceMs, 30000)
-  assert.notEqual(
-    normalizeConfig({}).restartGraceMs,
-    normalizeConfig({}).sleepGraceMs,
-    'the two windows must not share one default',
+  // The shutdown has NO reserve of its own any more: its visible countdown
+  // is the wait before the machine goes off.
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(DEFAULTS, REMOVED_SHUTDOWN_KEY),
+    false,
+    'the removed shutdown reserve must not be a configuration key any more',
   )
+  assert.equal(normalizeConfig({})[REMOVED_SHUTDOWN_KEY], undefined)
   // A hand-edited profile value is snapped onto the nearest offered choice.
   assert.equal(normalizeConfig({ restartGraceMs: 7000 }).restartGraceMs, 5000)
   assert.equal(normalizeConfig({ restartGraceMs: 20000 }).restartGraceMs, 20000)
   assert.equal(normalizeConfig({ restartGraceMs: 15000 }).restartGraceMs, 10000)
-  assert.equal(normalizeConfig({ sleepGraceMs: 3000 }).sleepGraceMs, 5000)
-  assert.equal(normalizeConfig({ sleepGraceMs: 15000 }).sleepGraceMs, 10000)
   assert.equal(normalizeConfig({ restartGraceMs: 0 }).restartGraceMs, 0)
-  assert.equal(normalizeConfig({ sleepGraceMs: 0 }).sleepGraceMs, 0)
-  // A wrong value falls back to the default OF THAT WINDOW.
+  // A wrong value falls back to the default.
   assert.equal(normalizeConfig({ restartGraceMs: -1 }).restartGraceMs, 0)
   assert.equal(normalizeConfig({ restartGraceMs: 'nonsense' }).restartGraceMs, 0)
-  assert.equal(normalizeConfig({ sleepGraceMs: -1 }).sleepGraceMs, 30000)
-  assert.equal(normalizeConfig({ sleepGraceMs: 'nonsense' }).sleepGraceMs, 30000)
 })
 
-test('the two reserve windows do not inherit each other', () => {
-  // A profile that only knows the OLD key gets the new defaults — the old
-  // value must not bleed into the other window.
-  assert.equal(normalizeConfig({ restartGraceMs: 60000 }).sleepGraceMs, 30000)
-  assert.equal(normalizeConfig({ sleepGraceMs: 60000 }).restartGraceMs, 0)
-  // Both present: each one keeps its own value.
-  const both = normalizeConfig({ restartGraceMs: 10000, sleepGraceMs: 60000 })
-  assert.equal(both.restartGraceMs, 10000)
-  assert.equal(both.sleepGraceMs, 60000)
+test('an old shutdown reserve in the profile is ignored', () => {
+  // A profile that still carries the removed key must not break the boot —
+  // and the key must not come back to life.
+  const config = normalizeConfig({ restartGraceMs: 10000, [REMOVED_SHUTDOWN_KEY]: 60000 })
+  assert.equal(config.restartGraceMs, 10000, 'the restart reserve keeps its own value')
+  assert.equal(config[REMOVED_SHUTDOWN_KEY], undefined, 'the removed key stays gone')
+  assert.equal(
+    Object.keys(config).includes(REMOVED_SHUTDOWN_KEY),
+    false,
+    'the removed key must not appear in the effective configuration',
+  )
 })
 
 test('without a grace the restart behaves exactly as before', (t) => {
@@ -295,38 +301,33 @@ test('new activity during the wait starts the timer over', (t) => {
   assert.equal(late.gate.quietForMs, 10000)
 })
 
-test('the graceful shutdown waits for the SHUTDOWN reserve', async (t) => {
+test('the graceful shutdown goes straight into the countdown', async (t) => {
   const clock = patchNow({ value: 1_700_000_000_000 }, t)
   const { ctx, routes, timers } = createContext()
   apply(ctx, {
-    stateFile: tempStateFile('sleep-grace'),
+    stateFile: tempStateFile('sleep-no-grace'),
     recoveryDelayMs: 0,
     enabled: true,
     settleMs: 0,
-    // The restart reserve is not the one the shutdown waits for.
-    restartGraceMs: 0,
-    sleepGraceMs: 10000,
+    // The restart reserve is NOT the one the shutdown waits for — not even a
+    // huge one: the visible countdown is the wait.
+    restartGraceMs: 60000,
     sleepCountdownSeconds: 20,
   })
 
   const armed = await armSleep(routes)
-  assert.equal(armed.phase, 'waiting', 'the countdown must not start during the grace')
-  assert.deepEqual(armed.blockers, [], 'nobody is busy — the grace is the reason')
-  assert.match(armed.message, /再等/, 'the machine says why it waits')
-  assert.equal(armed.graceMs, 10000, 'the shutdown reserve is reported')
-  assert.equal(typeof armed.quietForMs, 'number')
+  assert.equal(armed.phase, 'countdown', 'the countdown starts at once')
+  assert.equal(armed.remainingMs, 20000, 'the whole countdown is there')
+  assert.deepEqual(armed.blockers, [], 'nobody is busy')
+  assert.doesNotMatch(armed.message, /再等/, 'the machine must not wait in silence')
+  assert.match(armed.message, /倒数/, 'the machine counts down on screen')
 
-  // Still inside the grace: the countdown does not start.
-  clock.value += 9000
-  fireTicks(timers)
-  assert.equal(sleepStatusOf(routes).phase, 'waiting')
-
-  // The grace is over: the countdown starts.
-  clock.value += 2000
+  // A tick later it is still counting down — there is no hidden window.
+  clock.value += 1000
   fireTicks(timers)
   const counting = sleepStatusOf(routes)
-  assert.equal(counting.phase, 'countdown', 'the countdown starts once the grace is over')
-  assert.equal(counting.remainingMs, 20000)
+  assert.equal(counting.phase, 'countdown')
+  assert.equal(counting.remainingMs, 19000)
 })
 
 test('the state route reports the grace and the quiet window', (t) => {
@@ -533,11 +534,10 @@ function mountSettings({ status = {}, language = 'zh' } = {}) {
       if (target.includes('/choice') && init && init.body) {
         // The Host takes the answer and reports it back on the next poll —
         // under the names the status route uses (`restartGraceMs` and
-        // `sleepGraceMs`, not the write key of the shutdown reserve).
+        // `countdownSeconds`).
         const written = JSON.parse(init.body)
         const next = { ...(state.status || {}) }
         if (typeof written.restartGraceMs === 'number') next.restartGraceMs = written.restartGraceMs
-        if (typeof written.sleepGraceMs === 'number') next.sleepGraceMs = written.sleepGraceMs
         if (typeof written.sleepCountdownSeconds === 'number') next.countdownSeconds = written.sleepCountdownSeconds
         state.status = next
         return Promise.resolve({
@@ -623,7 +623,7 @@ function mountSettings({ status = {}, language = 'zh' } = {}) {
   }
 }
 
-test('the settings section offers the two reserve windows and saves them', async () => {
+test('the settings section offers the restart wait and the shutdown countdown', async () => {
   const mounted = mountSettings({
     status: {
       ok: true,
@@ -631,8 +631,6 @@ test('the settings section offers the two reserve windows and saves them', async
       showSleepButton: true,
       blockers: [],
       countdownSeconds: 20,
-      graceMs: 30000,
-      sleepGraceMs: 30000,
       restartGraceMs: 0,
     },
   })
@@ -640,27 +638,53 @@ test('the settings section offers the two reserve windows and saves them', async
   const panel = await mounted.settled('dsh-autorestart')
   assert.ok(panel, 'the settings section must be rendered')
 
+  // The two groups, in this order: the restart settings come first.
+  const groups = walk(panel).filter(
+    (node) => node.type === 'div' && typeof node.props['data-dsh-autorestart-group'] === 'string',
+  )
+  assert.deepEqual(
+    groups.map((node) => node.props['data-dsh-autorestart-group']),
+    ['restart', 'shutdown'],
+    'the restart group must come before the shutdown group',
+  )
+  assert.equal(textOf(groups[0].children[0]), '重启相关设置', 'the restart group has a visible title')
+  assert.equal(textOf(groups[1].children[0]), '关机相关设置', 'the shutdown group has a visible title')
+
+  // The restart group carries three controls, the shutdown group exactly one.
+  const restartControls = walk(groups[0]).filter((node) => node.type === 'select' || node.type === 'input')
+  assert.deepEqual(
+    restartControls.map((node) => node.props['data-dsh-autorestart-setting']),
+    ['restartGraceMs', 'backupOnRestart', 'backupIncludePlugins'],
+    'the restart group carries the wait and the two backup switches',
+  )
+  const shutdownControls = walk(groups[1]).filter((node) => node.type === 'select' || node.type === 'input')
+  assert.deepEqual(
+    shutdownControls.map((node) => node.props['data-dsh-autorestart-setting']),
+    ['sleepCountdownSeconds'],
+    'the shutdown group carries the countdown',
+  )
+
   const selects = walk(panel).filter((node) => node.type === 'select')
   const restart = selects.find((node) => node.props['data-dsh-autorestart-setting'] === 'restartGraceMs')
-  const shutdown = selects.find((node) => node.props['data-dsh-autorestart-setting'] === 'sleepGraceMs')
-  assert.ok(restart, 'the restart reserve must have a dropdown')
-  assert.ok(shutdown, 'the shutdown reserve must have a dropdown')
-  assert.equal(restart.props.value, '0', 'the restart reserve of the Host is shown')
-  assert.equal(shutdown.props.value, '30', 'the shutdown reserve of the Host is shown')
+  const countdown = selects.find((node) => node.props['data-dsh-autorestart-setting'] === 'sleepCountdownSeconds')
+  assert.ok(restart, 'the restart wait must have a dropdown')
+  assert.ok(countdown, 'the shutdown countdown must have a dropdown')
+  assert.equal(restart.props.value, '0', 'the restart wait of the Host is shown')
+  assert.equal(countdown.props.value, '20', 'the countdown of the Host is shown')
   const options = walk(restart).filter((node) => node.type === 'option').map((node) => node.props.value)
   assert.deepEqual(options, ['0', '5', '10', '20', '30', '60'], 'the six offered windows')
   assert.deepEqual(
-    walk(shutdown).filter((node) => node.type === 'option').map((node) => node.props.value),
-    ['0', '5', '10', '20', '30', '60'],
-    'both dropdowns offer the same six windows',
+    walk(countdown).filter((node) => node.type === 'option').map((node) => node.props.value),
+    ['0', '10', '20', '30', '60'],
+    'the countdown offers its own five lengths',
   )
 
   // The two labels tell the two situations apart.
   const shown = textOf(panel)
-  assert.match(shown, /重启前再等几秒/, `the restart label must be there: ${shown}`)
-  assert.match(shown, /关机前再等几秒/, `the shutdown label must be there: ${shown}`)
-  assert.match(shown, /日常操作/, `the restart hint must explain the restart: ${shown}`)
-  assert.match(shown, /机器就关了/, `the shutdown hint must explain the shutdown: ${shown}`)
+  assert.match(shown, /重启前等待/, `the restart label must be there: ${shown}`)
+  assert.match(shown, /关机倒数秒数/, `the shutdown label must be there: ${shown}`)
+  assert.match(shown, /重启没有倒数环节/, `the restart hint must explain the restart: ${shown}`)
+  assert.match(shown, /屏幕上会显示这段倒数/, `the shutdown hint must explain the countdown: ${shown}`)
 
   // Choosing another value writes it into the profile configuration.
   restart.props.onChange({ target: { value: '20' } })
@@ -678,17 +702,34 @@ test('the settings section offers the two reserve windows and saves them', async
   assert.equal(restartAgain.props.value, '20', 'the new value is read back')
 })
 
-test('the copy of the two reserve windows lives in the locale files', () => {
+test('the copy of the settings lives in the locale files', () => {
   const zh = JSON.parse(fs.readFileSync(new URL('../locale/zh.json', import.meta.url), 'utf8'))
   const en = JSON.parse(fs.readFileSync(new URL('../locale/en.json', import.meta.url), 'utf8'))
   assert.ok(zh.settings.restartGrace, 'the zh locale must carry the restart texts')
-  assert.ok(zh.settings.sleepGrace, 'the zh locale must carry the shutdown texts')
+  assert.ok(zh.settings.seconds, 'the zh locale must carry the countdown texts')
   assert.ok(en.settings.restartGrace, 'the en locale must carry the restart texts')
-  assert.ok(en.settings.sleepGrace, 'the en locale must carry the shutdown texts')
-  assert.equal(zh.settings.restartGrace.label, '重启前再等几秒')
-  assert.equal(zh.settings.sleepGrace.label, '关机前再等几秒')
-  assert.match(zh.settings.restartGrace.hint, /日常操作/, 'the zh restart copy must explain the restart')
-  assert.match(zh.settings.sleepGrace.hint, /机器就关了/, 'the zh shutdown copy must explain the shutdown')
-  assert.match(en.settings.restartGrace.hint, /daily operation/, 'the en restart copy must explain the restart')
-  assert.match(en.settings.sleepGrace.hint, /goes off for good/, 'the en shutdown copy must explain the shutdown')
+  assert.ok(en.settings.seconds, 'the en locale must carry the countdown texts')
+  // The two group titles.
+  assert.equal(zh.settings.groups.restart, '重启相关设置')
+  assert.equal(zh.settings.groups.shutdown, '关机相关设置')
+  assert.ok(en.settings.groups.restart, 'the en locale must carry the group titles')
+  assert.ok(en.settings.groups.shutdown, 'the en locale must carry the group titles')
+  // The two labels.
+  assert.equal(zh.settings.restartGrace.label, '重启前等待')
+  assert.equal(zh.settings.seconds.label, '关机倒数秒数')
+  assert.match(zh.settings.restartGrace.hint, /重启没有倒数环节/, 'the zh restart copy must explain the restart')
+  assert.match(zh.settings.seconds.hint, /屏幕上会显示这段倒数/, 'the zh countdown copy must explain the countdown')
+  assert.match(en.settings.restartGrace.hint, /no countdown/, 'the en restart copy must explain the restart')
+  assert.match(en.settings.seconds.hint, /countdown is shown on screen/, 'the en countdown copy must explain the countdown')
+  // The removed shutdown reserve is gone from both locale files.
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(zh.settings, 'sleepGrace'),
+    false,
+    'the zh locale must not carry the removed shutdown reserve',
+  )
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(en.settings, 'sleepGrace'),
+    false,
+    'the en locale must not carry the removed shutdown reserve',
+  )
 })

@@ -18,23 +18,21 @@
   },
   "settings": {
     "nav": "Auto-restart & shut down",
+    "groups": {
+      "restart": "Restart settings",
+      "shutdown": "Shutdown settings"
+    },
     "seconds": {
-      "label": "Countdown seconds",
+      "label": "Shutdown countdown seconds",
       "immediate": "No countdown (switch off right away)",
       "value": "{n} seconds",
-      "hint": "After the button: wait for every conversation to be done, count down this many seconds and switch off. \"No countdown\" switches off as soon as the conversations are done."
+      "hint": "Once every conversation is done, this countdown is shown on screen (pick \"Never mind, keep it on\" to cancel); the machine goes off when it reaches zero. Raise it when you want more time to write."
     },
     "restartGrace": {
-      "label": "Wait a few more seconds before the restart",
+      "label": "Wait before the restart",
       "immediate": "Do not wait (restart right away)",
       "value": "{n} seconds",
-      "hint": "A restart is a daily operation, so the default is 0 seconds (restart as soon as possible). Only raise it when you rely on a memory or summary plugin that writes its notes after the conversation ended."
-    },
-    "sleepGrace": {
-      "label": "Wait a few more seconds before the machine goes off",
-      "immediate": "Do not wait (switch off right away)",
-      "value": "{n} seconds",
-      "hint": "The machine goes off for good, so the default is 30 seconds: it leaves the delayed work (memory notes, a summary, an MCP callback) the time it needs. Do not lower it if you are unsure; 0 = do not wait."
+      "hint": "A restart has no countdown: the host restarts as soon as the conversations are done. Raise this if you rely on a memory or summary plugin that writes its notes after the conversation ended (default 0 seconds)."
     },
     "backup": {
       "label": "Backup before a restart",

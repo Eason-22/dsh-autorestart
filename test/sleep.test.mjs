@@ -731,7 +731,7 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(res.statusCode, 200)
   const payload = JSON.parse(res.body)
   assert.deepEqual(Object.keys(payload).sort(), [
-    'armed', 'armedAt', 'backupIncludePlugins', 'backupOnRestart', 'blockers', 'countdownSeconds', 'dryRun', 'graceMs', 'host', 'lastRun', 'message', 'ok', 'phase', 'quietForMs', 'remainingMs', 'restartGraceMs', 'showSleepButton',
+    'armed', 'armedAt', 'backupIncludePlugins', 'backupOnRestart', 'blockers', 'countdownSeconds', 'dryRun', 'host', 'lastRun', 'message', 'ok', 'phase', 'quietForMs', 'remainingMs', 'restartGraceMs', 'showSleepButton',
   ])
   assert.equal(payload.ok, true)
   assert.equal(payload.phase, 'idle')
@@ -739,7 +739,6 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(payload.showSleepButton, true)
   assert.equal(payload.countdownSeconds, 20)
   assert.equal(payload.armedAt, null, 'no shutdown was armed yet')
-  assert.equal(payload.graceMs, 30000, 'the SHUTDOWN reserve is reported for the troubleshooting')
   assert.equal(payload.restartGraceMs, 0, 'the restart reserve is reported next to it')
   assert.equal(typeof payload.quietForMs, 'number')
   assert.equal(payload.backupOnRestart, true, 'the pre-restart backup is on by default')
@@ -1646,7 +1645,7 @@ test('an empty settings page puts the section at the end', async () => {
   assert.equal(mounted.section().order, 1000, 'the fallback order is the big number')
 })
 
-test('the section shows exactly the five settings, with the Host values', async () => {
+test('the section shows two titled groups, the restart one first', async () => {
   const mounted = mountClient({
     status: {
       ok: true,
@@ -1654,8 +1653,6 @@ test('the section shows exactly the five settings, with the Host values', async 
       showSleepButton: true,
       blockers: [],
       countdownSeconds: 30,
-      graceMs: 30000,
-      sleepGraceMs: 30000,
       restartGraceMs: 0,
       backupOnRestart: true,
       backupIncludePlugins: false,
@@ -1664,40 +1661,68 @@ test('the section shows exactly the five settings, with the Host values', async 
   const panel = await mounted.settled('settings.section')
   assert.ok(panel, 'the settings section must be rendered')
 
-  // 1. to 3. the three dropdowns: the countdown and the two reserves
+  // The two groups, in this order: the restart settings come first.
+  const groups = walk(panel).filter(
+    (node) => node.type === 'div' && typeof node.props['data-dsh-autorestart-group'] === 'string',
+  )
+  assert.deepEqual(
+    groups.map((node) => node.props['data-dsh-autorestart-group']),
+    ['restart', 'shutdown'],
+    'the restart group must come before the shutdown group',
+  )
+  const titles = groups.map((group) => textOf(group.children[0]))
+  assert.equal(titles[0], '重启相关设置', 'the restart group must have a visible title')
+  assert.equal(titles[1], '关机相关设置', 'the shutdown group must have a visible title')
+
+  // The restart group carries three controls: the wait, the two switches.
+  const restartControls = walk(groups[0]).filter(
+    (node) => node.type === 'select' || node.type === 'input',
+  )
+  assert.equal(restartControls.length, 3, 'the restart group has exactly three controls')
+  const restartKeys = restartControls.map((node) => node.props['data-dsh-autorestart-setting'])
+  assert.deepEqual(
+    restartKeys,
+    ['restartGraceMs', 'backupOnRestart', 'backupIncludePlugins'],
+    'the restart group carries the wait and the two backup switches',
+  )
+
+  // The shutdown group carries exactly one: the countdown.
+  const shutdownControls = walk(groups[1]).filter(
+    (node) => node.type === 'select' || node.type === 'input',
+  )
+  assert.equal(shutdownControls.length, 1, 'the shutdown group has exactly one control')
+  assert.equal(
+    shutdownControls[0].props['data-dsh-autorestart-setting'],
+    'sleepCountdownSeconds',
+    'the shutdown group carries the countdown',
+  )
+
+  // The two dropdowns show the values the Host reports.
   const selects = walk(panel).filter((node) => node.type === 'select')
-  assert.equal(selects.length, 3, 'the section has exactly three dropdowns')
-  assert.equal(selects[0].props.value, '30', 'the dropdown shows the countdown the Host reports')
-  const secondsOptions = walk(selects[0]).filter((node) => node.type === 'option').map((node) => node.props.value)
+  assert.equal(selects.length, 2, 'the section has exactly two dropdowns')
+  const byKey = new Map(selects.map((node) => [node.props['data-dsh-autorestart-setting'], node]))
+  assert.equal(byKey.get('restartGraceMs').props.value, '0', 'the restart wait the Host reports is shown')
+  assert.equal(byKey.get('sleepCountdownSeconds').props.value, '30', 'the countdown the Host reports is shown')
+  const secondsOptions = walk(byKey.get('sleepCountdownSeconds'))
+    .filter((node) => node.type === 'option')
+    .map((node) => node.props.value)
   assert.deepEqual(secondsOptions, ['0', '10', '20', '30', '60'])
-  assert.equal(
-    selects[1].props['data-dsh-autorestart-setting'],
-    'restartGraceMs',
-    'the second dropdown is the restart reserve',
-  )
-  assert.equal(selects[1].props.value, '0', 'the restart reserve the Host reports is shown')
-  assert.equal(
-    selects[2].props['data-dsh-autorestart-setting'],
-    'sleepGraceMs',
-    'the third dropdown is the shutdown reserve',
-  )
-  assert.equal(selects[2].props.value, '30', 'the shutdown reserve the Host reports is shown')
-  const graceOptions = walk(selects[1]).filter((node) => node.type === 'option').map((node) => node.props.value)
+  const graceOptions = walk(byKey.get('restartGraceMs'))
+    .filter((node) => node.type === 'option')
+    .map((node) => node.props.value)
   assert.deepEqual(graceOptions, ['0', '5', '10', '20', '30', '60'])
 
-  // 4. and 5. the two backup switches
+  // The two backup switches show the values the Host reports.
   const switches = walk(panel).filter((node) => node.type === 'input')
   assert.equal(switches.length, 2, 'the section has exactly two switches')
-  const byKey = new Map(switches.map((node) => [node.props['data-dsh-autorestart-setting'], node]))
-  assert.deepEqual([...byKey.keys()], ['backupOnRestart', 'backupIncludePlugins'])
-  assert.equal(byKey.get('backupOnRestart').props.checked, true)
-  assert.equal(byKey.get('backupIncludePlugins').props.checked, false)
+  const switchByKey = new Map(switches.map((node) => [node.props['data-dsh-autorestart-setting'], node]))
+  assert.equal(switchByKey.get('backupOnRestart').props.checked, true)
+  assert.equal(switchByKey.get('backupIncludePlugins').props.checked, false)
 
   // The labels and the explanation are on the page.
   const shown = textOf(panel)
-  assert.ok(shown.includes('倒计时秒数'), `the label must be there: ${shown}`)
-  assert.ok(shown.includes('重启前再等几秒'), `the restart reserve label must be there: ${shown}`)
-  assert.ok(shown.includes('关机前再等几秒'), `the shutdown reserve label must be there: ${shown}`)
+  assert.ok(shown.includes('关机倒数秒数'), `the countdown label must be there: ${shown}`)
+  assert.ok(shown.includes('重启前等待'), `the restart wait label must be there: ${shown}`)
   assert.ok(shown.includes('重启前备份'), `the label must be there: ${shown}`)
   assert.ok(shown.includes('备份包含已安装插件'), `the label must be there: ${shown}`)
   assert.ok(shown.includes('不含 profile 里的插件目录'), `the scope must be explained: ${shown}`)
@@ -1708,8 +1733,12 @@ test('the countdown length is written into the profile configuration and read ba
     status: { ok: true, phase: 'idle', showSleepButton: true, blockers: [], countdownSeconds: 20 },
   })
   const panel = await mounted.settled('settings.section')
-  const selects = walk(panel).filter((node) => node.type === 'select')
-  selects[0].props.onChange({ target: { value: '60' } })
+  const countdown = walk(panel).find(
+    (node) => node.type === 'select'
+      && node.props['data-dsh-autorestart-setting'] === 'sleepCountdownSeconds',
+  )
+  assert.ok(countdown, 'the countdown dropdown must be there')
+  countdown.props.onChange({ target: { value: '60' } })
   await settleClient()
 
   const posts = mounted.fetches.filter(
@@ -1718,8 +1747,11 @@ test('the countdown length is written into the profile configuration and read ba
   assert.equal(posts.length, 1)
   assert.deepEqual(JSON.parse(posts[0].init.body), { sleepCountdownSeconds: 60 })
   const after = mounted.render('settings.section')
-  const again = walk(after).filter((node) => node.type === 'select')
-  assert.equal(again[0].props.value, '60')
+  const again = walk(after).find(
+    (node) => node.type === 'select'
+      && node.props['data-dsh-autorestart-setting'] === 'sleepCountdownSeconds',
+  )
+  assert.equal(again.props.value, '60')
 })
 
 test('the pre-restart backup switch is written into the profile configuration and read back', async () => {

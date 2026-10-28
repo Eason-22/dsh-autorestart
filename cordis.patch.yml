@@ -34,12 +34,9 @@
         # callback) queue their work with a timer of their own, and that work
         # is invisible here.
         restartGraceMs: 0
-        # SHUTDOWN reserve (ms): the same idea for the graceful shutdown. The
-        # machine goes off for good, so the delayed work (memory notes, a
-        # summary, an MCP callback) must get its chance: the default is 30
-        # seconds. A DROPDOWN in the settings page: 0 / 5 / 10 / 20 / 30 / 60
-        # seconds. The two windows are independent of each other.
-        sleepGraceMs: 30000
+        # The graceful shutdown has NO reserve of its own: the visible
+        # countdown (sleepCountdownSeconds) IS the wait before the machine
+        # goes off.
         # Upper bound (ms) of a QUEUED inbox message: a message that nobody
         # claims within this window is stuck, so it stops blocking the
         # restart (and the session that holds it is named in the log).

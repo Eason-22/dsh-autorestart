@@ -255,10 +255,9 @@ test('a settle window longer than the countdown never postpones the power-off', 
     // The restart gate would ask for 15 quiet seconds; the standby counts
     // down for 10 and must NOT wait for them.
     settleMs: 15000,
-    // The reserve window is a different knob (it waits for work this plugin
+    // The restart reserve is a different knob (it waits for work this plugin
     // cannot see); this test is about the settle window.
     restartGraceMs: 0,
-    sleepGraceMs: 0,
     sleepCountdownSeconds: 10,
   }, {
     sleepNow: () => clockRef.value,

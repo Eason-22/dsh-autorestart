@@ -144,8 +144,8 @@ show up in the Plugin Manager and in the config editor.
 | `restartCommand` | `''` | Custom restart command. Supports the `{pid}`, `{ppid}` and `{app}` placeholders. |
 | `relaunchDelaySeconds` | `2` | How long the detached helper waits before it kills the app (`ping -n 3`, roughly 2 seconds). |
 | `settleMs` | `2000` | Quiet window in milliseconds: the host must stay silent this long after the last conversation activity before a restart may start. |
-| `restartGraceMs` | `0` | The **restart reserve** in milliseconds: how long the host waits after the last conversation finished before it is really RESTARTED — a dropdown: `0` / `5` / `10` / `20` / `30` / `60` seconds. `0` means "no extra wait". A restart is a daily operation, so the default is none. |
-| `sleepGraceMs` | `30000` | The **shutdown reserve** in milliseconds: how long the machine waits after the last conversation finished before it is really SWITCHED OFF — a dropdown: `0` / `5` / `10` / `20` / `30` / `60` seconds. The machine goes off for good, so the delayed work of the other plugins gets its chance. The two windows are independent. |
+| `restartGraceMs` | `0` | The **restart reserve** in milliseconds: how long the host waits after the last conversation finished before it is really RESTARTED — a dropdown: `0` / `5` / `10` / `20` / `30` / `60` seconds. `0` means "no extra wait". A restart is a daily operation, so the default is none. The settings page calls it *Wait before the restart*. |
+| `sleepCountdownSeconds` | `20` | How many seconds the graceful shutdown counts down before the machine goes down — a dropdown: `0` / `10` / `20` / `30` / `60` seconds. `0` means "switch off right away" (still waiting for the conversations to be idle). **This visible countdown IS the wait before the machine goes off** — the shutdown has no second, invisible reserve. The settings page calls it *Shutdown countdown seconds*. |
 | `queuedGraceMs` | `60000` | Upper bound in milliseconds for a **queued** (unclaimed) inbox message: how long it may hold the restart back before it is treated as stuck. `0` means "no upper bound" (the behaviour before 0.6.2). A **running** conversation always blocks, under every setting. |
 | `autoReloadPage` | `true` | `dsh web`: reload the page automatically when the host boot token changes. |
 | `blockManualRestart` | `true` | Hard-block an agent that tries to kill or restart DSH with a shell command, and point it at `continuum_restart` instead. |
@@ -156,7 +156,6 @@ show up in the Plugin Manager and in the config editor.
 | `maxBackups` | `2` | How many snapshots are kept; older ones are deleted when a new one is written. |
 | `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the relaunched host before it restores the snapshot and launches the host again. |
 | `showSleepButton` | `true` | Whether the moon button of the graceful shutdown is shown at the foot of the left sidebar, next to Settings. |
-| `sleepCountdownSeconds` | `20` | How many seconds the graceful shutdown counts down before the machine goes down — a dropdown: `0` / `10` / `20` / `30` / `60` seconds. `0` means "switch off right away" (still waiting for the conversations to be idle). |
 | `sleepCommand` | `''` | A custom shutdown command for the graceful shutdown. Empty = the host is detected automatically; a value replaces the detected command (`cmd.exe /c …` on Windows, `/bin/sh -c …` everywhere else). |
 
 The two waits are independent of each other, and both default to two seconds:
@@ -176,30 +175,29 @@ work other plugins queue with a timer of their own — a memory plugin that writ
 seconds after the conversation ended, a summary, an MCP callback, a log flush. That work is
 invisible here, so "every agent is idle" does not mean "nothing is happening any more".
 
-**Two reserve windows, because the two situations differ.** A restart and a shutdown are not the
-same thing: a restart is a daily operation (it should happen as soon as the conversations are
-done), while the machine going off is final (the delayed work must get its chance). So there are
-two independent windows:
+**One reserve window, for the restart.** A restart has no countdown of its own: the host restarts
+as soon as the conversations are done. `restartGraceMs` is the extra wait that leaves room for the
+delayed work of the other plugins — and it is the **only** such window:
 
 | Window | Governs | Default | Offered |
 | --- | --- | --- | --- |
 | `restartGraceMs` | the **restart** | `0` (no extra wait) | `0` / `5` / `10` / `20` / `30` / `60` seconds |
-| `sleepGraceMs` | the **shutdown** | `30000` (thirty seconds) | `0` / `5` / `10` / `20` / `30` / `60` seconds |
+| `sleepCountdownSeconds` | the **shutdown** (visible!) | `20` (twenty seconds) | `0` / `10` / `20` / `30` / `60` seconds |
 
 - **The restart gate waits `max(settleMs, restartGraceMs)`** of quiet. With the default (`0`) the
   gate waits for the settle window alone — a restart happens as soon as the conversations are done.
-- **The graceful shutdown waits `sleepGraceMs`** **before** its countdown starts (so the reserve
-  never pushes a countdown that is already running back by a round).
+- **The graceful shutdown has no invisible reserve.** Its **visible countdown** is the wait before
+  the machine goes off: the seconds are on the screen, the user can watch them and cancel them.
+  A second, hidden window next to it would only say the same thing twice — so there is none. The
+  shutdown starts counting down as soon as every conversation is idle.
 - **New activity restarts the timer.** If a conversation starts working again while the host is
   waiting, the reserve starts over — the wait always follows the last activity.
-- **They never inherit each other.** A profile that only knows `restartGraceMs` gets the default
-  shutdown reserve (thirty seconds) and vice versa; a value that is not one of the six offered
-  windows is snapped onto the nearest one.
-- **Where to change them.** Settings → Auto-restart & shut down → *Wait a few more seconds before
-  the restart* and *Wait a few more seconds before the shutdown*. The status interfaces report both:
+- **Where to change them.** Settings → Auto-restart & shut down, in two titled groups:
+  *Restart settings* (the wait before the restart, the two backup switches) and *Shutdown settings*
+  (the countdown of the shutdown). The status interfaces report the restart reserve:
   `GET /health?state=1`, `GET /health?gate=1` and `continuum_status` carry `graceMs` (the restart
-  reserve) **and** `sleepGraceMs` (the shutdown reserve); `GET /sleep` carries `graceMs` (the
-  shutdown reserve, the one that path waits for) and `restartGraceMs` next to it. All of them carry
+  reserve) and `effectiveSettleMs` (the window the gate really uses); `GET /sleep` carries
+  `restartGraceMs` and `countdownSeconds` (the countdown that is really running). All of them carry
   `quietForMs` (how long the host has actually been quiet).
 
 ### Why a queued message cannot block the restart for ever
@@ -439,7 +437,8 @@ record that cannot be read is dropped — asking once more is much better than a
 itself off for ever because of a half-written file.
 
 **For the troubleshooting.** `GET /sleep` reports `armedAt` (when the shutdown was armed) next to
-`phase`, `blockers`, `graceMs` (the shutdown reserve) and `restartGraceMs` (the restart reserve).
+`phase`, `blockers`, `countdownSeconds` (the countdown that is really running) and
+`restartGraceMs` (the restart reserve).
 
 ### Troubleshooting: the machine did not switch off
 
@@ -470,13 +469,13 @@ waiting for something. Here is what it can be, and what to do about it:
    `待执行的重启`). That is normal queueing, not a fault: the restart runs first, the sessions
    come back with it, and the countdown continues afterwards. **What to do:** nothing — wait for
    the restart. (You can also cancel the restart with `continuum_cancel_restart`.)
-3. **The work just ended and the shutdown reserve is still running** (default 30 seconds, so that a
-   memory or summary plugin can still write its notes). **What you see:** `graceMs` is the
-   configured shutdown reserve, `quietForMs` is how long the host has actually been quiet. **What to
-   do:** wait; if another conversation starts working during the wait, the timer starts over (that is
-   the point of the window). Set it to `0` in the settings if you do not want the extra wait. (The
-   restart has its own window — `restartGraceMs`, default none — and the two never
-   influence each other.)
+3. **The work just ended and the countdown has not started yet.** The shutdown has **no invisible
+   reserve**: as soon as every conversation is idle the countdown starts. **What you see:**
+   `phase` is `waiting` while `blockers[]` is empty and `remainingMs` is at its full value only
+   while the conversations are still busy — with an empty list the countdown is already running.
+   **What to do:** nothing; the countdown is on the screen and it can be cancelled there. (The
+   restart has its own window — `restartGraceMs`, default none — and the two never influence each
+   other.)
 4. **Somebody started working during the countdown.** The countdown goes back to "waiting" and
    `remainingMs` returns to its full value. **What you see:** the message says that somebody
    started working again, and `blockers[]` lists who. **What to do:** let them finish.
@@ -549,13 +548,19 @@ more whether the button should stay. The answer is written into the profile conf
 settings section and the prompt always show the same value.
 
 **The settings section.** *Settings → Auto-restart & shut down* is a section of its own in the
-settings sidebar (right below the Agent presets). It carries the three settings that matter:
+settings sidebar (right below the Agent presets). It is split into two titled groups — the restart
+settings first, the shutdown settings after them:
 
-- **Countdown seconds** — the dropdown `0` / `10` / `20` / `30` / `60`. `0` means "no countdown":
-  the machine is switched off as soon as every conversation is idle.
-- **Backup before a restart** (`backupOnRestart`) — whether the pre-restart snapshot is taken at all.
-- **Include the installed plugins in the backup** (`backupIncludePlugins`) — whether that snapshot
-  also contains the plugin directory of the profile. It is greyed out when the backup itself is off.
+- **Restart settings**
+  - **Wait before the restart** (`restartGraceMs`) — the dropdown `0` / `5` / `10` / `20` / `30` /
+    `60` seconds. `0` (the default) means "no extra wait": the host restarts as soon as the
+    conversations are done.
+  - **Backup before a restart** (`backupOnRestart`) — whether the pre-restart snapshot is taken at all.
+  - **Include the installed plugins in the backup** (`backupIncludePlugins`) — whether that snapshot
+    also contains the plugin directory of the profile. It is greyed out when the backup itself is off.
+- **Shutdown settings**
+  - **Shutdown countdown seconds** (`sleepCountdownSeconds`) — the dropdown `0` / `10` / `20` / `30` /
+    `60`. `0` means "no countdown": the machine is switched off as soon as every conversation is idle.
 
 A change is written into the profile configuration at once (through the plugin's own choice route)
 and is read back from the host, so the section never shows a value the host did not take. A malformed

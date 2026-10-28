@@ -135,7 +135,8 @@ test('restartDecision honours defer policy "wait" at the hard deadline', () => {
     hardMs: HARD,
     policy: 'wait',
   });
-  assert.equal(decision.action, 'warn');
+  // The wait is a LONG wait from here on: it is visible, not a quiet loop.
+  assert.equal(decision.action, 'long-wait');
   assert.equal(decision.reason, 'hard-deadline-policy-wait');
   assert.equal(decision.log, 'defer policy wait: still busy after hard deadline');
 });
@@ -150,7 +151,9 @@ test('restartDecision waits at the hard deadline by default and never forces a b
     hardMs: HARD,
     policy: 'auto',
   });
-  assert.equal(decision.action, 'warn');
+  // The hard deadline does not give up and it does not kill anything: it says
+  // out loud that this is a LONG wait, and it names the blockers.
+  assert.equal(decision.action, 'long-wait');
   assert.equal(decision.reason, 'hard-deadline-waiting-for-conversations');
   assert.equal(
     decision.log,
@@ -194,7 +197,7 @@ test('restartDecision gives up when a forced restart was already attempted', () 
     hardMs: HARD,
     policy: 'auto',
   });
-  assert.equal(waiting.action, 'warn');
+  assert.equal(waiting.action, 'long-wait');
   assert.equal(waiting.reason, 'hard-deadline-waiting-for-conversations');
 });
 
@@ -208,7 +211,7 @@ test('restartDecision never forces a busy conversation from a non-deferred phase
     hardMs: HARD,
     policy: 'auto',
   });
-  assert.equal(decision.action, 'warn');
+  assert.equal(decision.action, 'long-wait');
   assert.equal(decision.reason, 'hard-deadline-waiting-for-conversations');
 
   // Even with the opt-in the force path needs the deferred phase.
@@ -220,7 +223,7 @@ test('restartDecision never forces a busy conversation from a non-deferred phase
     policy: 'auto',
     forceRestartWhenBusy: true,
   });
-  assert.equal(forced.action, 'warn');
+  assert.equal(forced.action, 'long-wait');
   assert.equal(forced.reason, 'hard-deadline-waiting-for-conversations');
 });
 
@@ -413,7 +416,7 @@ test('restartDecision waits during the settle window and only force-restarts at 
     softMs: SOFT,
     hardMs: HARD,
   });
-  assert.equal(waiting.action, 'warn');
+  assert.equal(waiting.action, 'long-wait');
   assert.equal(waiting.reason, 'hard-deadline-waiting-for-conversations');
 });
 

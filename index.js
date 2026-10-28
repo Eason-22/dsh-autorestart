@@ -77,6 +77,11 @@ import {
 } from './lib/restart.js'
 import { compareSemver } from './lib/semver.js'
 import {
+  createQueuedTracker,
+  DEFAULT_QUEUED_GRACE_MS,
+  normalizeQueuedGraceMs,
+} from './lib/queued.js'
+import {
   createSleepController,
   COUNTDOWN_CHOICES,
   DEFAULT_COUNTDOWN_SECONDS,
@@ -101,6 +106,15 @@ const GRACE_CHOICES_MS = Object.freeze([0, 3000, 5000, 10000, 20000, 30000])
 
 /** The grace window that is used when nothing was configured. */
 const DEFAULT_GRACE_MS = 10000
+
+/**
+ * How often the "the restart is waiting for a long time" line may be logged.
+ *
+ * The restart gate polls every few seconds, so an unthrottled line would
+ * flood the log with the same sentence. Once a minute is enough to say that
+ * the wait is still going on.
+ */
+const LONG_WAIT_LOG_INTERVAL_MS = 60000
 
 /**
  * Snap a grace value onto the nearest offered choice.
@@ -134,7 +148,7 @@ function snapGraceChoice(value) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.6.1'
+const PLUGIN_VERSION_FALLBACK = '0.6.2'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -382,6 +396,12 @@ function buildConfigSchema() {
       // invisible here — so a short, configurable grace window is left for it.
       restartGraceMs: schemastery.number().min(0).default(DEFAULT_GRACE_MS)
         .description('Milliseconds to wait after the last conversation finished before the host is really restarted or switched off: the grace window for work other plugins queue with a timer (0 / 3 / 5 / 10 / 20 / 30 seconds, default 10).'),
+      // The upper bound of a QUEUED inbox message: a message that nobody
+      // claims within this window is stuck, and it stops blocking the restart.
+      // Without it a single unclaimed message kept the restart pending for
+      // ever (the "the restart never happens" defect).
+      queuedGraceMs: schemastery.number().min(0).default(DEFAULT_QUEUED_GRACE_MS)
+        .description('Milliseconds an unclaimed (queued) inbox message may block the restart: a message that is still unclaimed after this window is treated as stuck and no longer blocks the restart (0 = no upper bound, the old behaviour; default 60000).'),
       autoReloadPage: schemastery.boolean().default(true)
         .description('Reload the web page automatically when the host boot token changes.'),
       blockManualRestart: schemastery.boolean().default(true)
@@ -449,6 +469,10 @@ const DEFAULTS = {
   relaunchDelaySeconds: 2,
   settleMs: 2000,
   restartGraceMs: DEFAULT_GRACE_MS,
+  // The upper bound of a queued (unclaimed) inbox message: after this time it
+  // is treated as stuck and stops blocking the restart. 0 switches the
+  // protection off (the old behaviour: a queued message blocks for ever).
+  queuedGraceMs: DEFAULT_QUEUED_GRACE_MS,
   autoReloadPage: true,
   blockManualRestart: true,
   healthPath: '/__dsh_autorestart/health',
@@ -498,6 +522,9 @@ function normalizeConfig(raw) {
   // The grace window is one of the offered choices as well: a hand-edited
   // profile value is snapped onto the nearest one instead of breaking.
   config.restartGraceMs = snapGraceChoice(config.restartGraceMs)
+  // The upper bound of a queued message is a plain number: a wrong or negative
+  // value falls back to the default, and 0 switches the protection off.
+  config.queuedGraceMs = normalizeQueuedGraceMs(config.queuedGraceMs)
   if (typeof config.sleepCommand !== 'string') config.sleepCommand = ''
   if (typeof config.showSleepButton !== 'boolean') config.showSleepButton = true
   return config
@@ -1233,6 +1260,15 @@ export function createRuntime(ctx, config, options = {}) {
   /** When the last conversation activity was observed; the settle window starts here. */
   let lastActivityAt = Date.now()
 
+  /**
+   * When the "the restart is waiting for a long time" line was logged last.
+   *
+   * The gate polls every few seconds, so the line is rate limited: at most one
+   * per minute for the SAME restart request. A new request (`requestedAt`
+   * changed) logs right away.
+   */
+  let longWaitLog = { at: 0, requestedAt: 0 }
+
   /** Record conversation activity (any agent turn, session event or queued message). */
   const noteActivity = () => {
     lastActivityAt = Date.now()
@@ -1251,6 +1287,53 @@ export function createRuntime(ctx, config, options = {}) {
       if (count === 0 && inbox.hasPending === true) count = 1
     } catch {}
     return count
+  }
+
+  /**
+   * A short human-readable duration for the log ("45s", "2m 5s", "1h 3m").
+   *
+   * @param {number} ms
+   * @returns {string}
+   */
+  const describeWait = (ms) => {
+    const total = Math.max(0, Math.round(Number(ms) || 0))
+    const seconds = Math.floor(total / 1000)
+    if (seconds < 60) return `${seconds}s`
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) {
+      const rest = seconds % 60
+      return rest === 0 ? `${minutes}m` : `${minutes}m ${rest}s`
+    }
+    const hours = Math.floor(minutes / 60)
+    const restMinutes = minutes % 60
+    return restMinutes === 0 ? `${hours}h` : `${hours}h ${restMinutes}m`
+  }
+
+  /**
+   * The readable names of the sessions that hold the restart.
+   *
+   * A session without a title falls back to its id: the log has to say WHO
+   * holds the restart, and an empty name would say nothing.
+   *
+   * @param {any[]} blockedBy
+   * @returns {string}
+   */
+  const describeBlockers = (blockedBy) => {
+    const list = Array.isArray(blockedBy) ? blockedBy : []
+    const names = []
+    for (const entry of list) {
+      if (!entry || typeof entry !== 'object') continue
+      const name = typeof entry.name === 'string' && entry.name.trim() !== ''
+        ? entry.name.trim()
+        : (typeof entry.label === 'string' && entry.label.trim() !== ''
+          ? entry.label.trim()
+          : String(entry.sessionId || ''))
+      if (name === '') continue
+      names.push(name)
+    }
+    if (names.length === 0) return 'another conversation'
+    if (names.length === 1) return names[0]
+    return names.join(', ')
   }
 
   /**
@@ -1330,8 +1413,26 @@ export function createRuntime(ctx, config, options = {}) {
   }
 
   /**
+   * The tracker of the QUEUED messages.
+   *
+   * It remembers for how long a session has had an unclaimed inbox message, so
+   * a message that nobody claims stops blocking the restart instead of
+   * blocking it for ever. A session that is RUNNING is never judged here: a
+   * live turn always blocks, under every grace setting.
+   */
+  const queuedTracker = createQueuedTracker()
+
+  /** The sessions the tracker saw in the last round (for the cleanup). */
+  const queuedSessions = new Set()
+
+  /**
    * Every conversation that is still working, subagents and teammates included.
    * 'running' is a live turn; 'queued' is inbox work that has not started yet.
+   *
+   * A queued message only blocks the restart until the grace window
+   * (`queuedGraceMs`) is over: after that it is stuck — nobody will ever claim
+   * it — so it stops blocking the restart and is named in the log. A running
+   * conversation ALWAYS blocks.
    *
    * Every entry carries the kind of the blocker and a readable name, so the
    * interface can tell a session from a subagent and never has to show a raw
@@ -1345,15 +1446,48 @@ export function createRuntime(ctx, config, options = {}) {
     } catch {
       agents = []
     }
+    const seen = new Set()
     for (const agent of agents) {
       try {
         if (!agent || !agent.id) continue
         const sessionId = String(agent.id)
+        seen.add(sessionId)
         const described = describeBlocker(sessionId, agent)
-        if (agent.status === 'running') out.push({ sessionId, reason: 'running', ...described })
-        else if (pendingInboxCount(agent) > 0) out.push({ sessionId, reason: 'queued', ...described })
+        if (agent.status === 'running') {
+          // A live turn ALWAYS blocks the restart — under every grace
+          // setting. The queued timer of that session is dropped: the work is
+          // being done, so it is not a stuck queue.
+          queuedTracker.forget(sessionId)
+          out.push({ sessionId, reason: 'running', ...described })
+        } else if (pendingInboxCount(agent) > 0) {
+          const observed = queuedTracker.observe(sessionId, true, config.queuedGraceMs)
+          if (observed.becameStale) {
+            // The message has been waiting longer than the grace window and
+            // nobody claimed it: it is stuck. The session is named here, so
+            // the user can see WHICH conversation holds the queue.
+            log.warn(
+              `the queued message of session ${sessionId} has been waiting ${describeWait(observed.ageMs)} and nobody claimed it; it no longer blocks the restart`,
+              {
+                sessionId,
+                ageMs: observed.ageMs,
+                queuedGraceMs: config.queuedGraceMs,
+              },
+            )
+          }
+          if (observed.blocking) out.push({ sessionId, reason: 'queued', ...described })
+        } else {
+          // No queued work any more: the timer of that session is dropped, so
+          // a NEW queue starts counting from zero.
+          queuedTracker.observe(sessionId, false, config.queuedGraceMs)
+        }
       } catch {}
     }
+    // A session that is gone (closed) drops its record as well.
+    for (const sessionId of queuedSessions) {
+      if (!seen.has(sessionId)) queuedTracker.forget(sessionId)
+    }
+    queuedSessions.clear()
+    for (const sessionId of seen) queuedSessions.add(sessionId)
     return out
   }
 
@@ -1720,6 +1854,40 @@ export function createRuntime(ctx, config, options = {}) {
     now: Date.now(),
     settleMs: effectiveSettleMs(),
   })
+
+  /**
+   * The description of a LONG wait, or null when the restart is not waiting
+   * for the long time yet.
+   *
+   * A pending restart that passed the hard deadline while a conversation was
+   * still running is not "just a little longer": it is a long wait, and the
+   * user has to SEE it — how long it has been waiting, why, and who holds it.
+   * The request itself is never dropped: the restart stays pending and fires
+   * as soon as the gate is quiet again.
+   *
+   * @param {number} [now]
+   * @returns {{ since: number, reason: string, waitedMs: number, blockedBy: any[] }|null}
+   */
+  const longWaitInfo = (now = Date.now()) => {
+    const restart = state.restart
+    if (!restart || typeof restart !== 'object') return null
+    const requestedAt = Number.isFinite(restart.requestedAt) ? restart.requestedAt : 0
+    if (requestedAt <= 0) return null
+    const hardMs = Number.isFinite(config.deferHardMs) ? config.deferHardMs : 0
+    // The long wait begins when the hard deadline is reached.
+    const since = requestedAt + hardMs
+    if (now < since) return null
+    const verdict = gate()
+    if (verdict.allow) return null
+    const blockedBy = goalAwareBlockingDetails(runtime, verdict.blockedBy)
+    if (blockedBy.length === 0) return null
+    return {
+      since,
+      reason: 'hard-deadline-waiting-for-conversations',
+      waitedMs: Math.max(0, now - requestedAt),
+      blockedBy,
+    }
+  }
 
   /**
    * Cached session titles, used to label the blocking sessions in the
@@ -2092,6 +2260,28 @@ const titleOfSummary = (item) => {
         }
         return
       }
+      case 'long-wait': {
+        // The hard deadline is over and a conversation still holds the
+        // restart. The request is KEPT — the user asked for a restart, it must
+        // never be dropped silently — and the wait becomes VISIBLE: a clear
+        // log line (rate limited, so the 3s poll does not flood the log) and
+        // the `longWait` block of the state payload.
+        const requestedAt = Number.isFinite(state.restart.requestedAt) ? state.restart.requestedAt : now
+        const waitedMs = Math.max(0, now - requestedAt)
+        const lastAt = longWaitLog.requestedAt === requestedAt ? longWaitLog.at : 0
+        if (now - lastAt >= LONG_WAIT_LOG_INTERVAL_MS) {
+          longWaitLog = { at: now, requestedAt }
+          log.warn(
+            `the restart has been waiting for ${describeWait(waitedMs)}; ${describeBlockers(decision.blockedBy)} still holds it — cancel the restart or wait for that work to finish`,
+            {
+              waitedMs,
+              blockedBy: decision.blockedBy,
+              reason: decision.reason,
+            },
+          )
+        }
+        return
+      }
       case 'restart':
       case 'force-restart': {
         void executeRestart()
@@ -2378,6 +2568,19 @@ const titleOfSummary = (item) => {
     noteActivity,
     busyAgents,
     gate,
+    /**
+     * The description of a long wait (null when there is none).
+     *
+     * @param {number} [now]
+     * @returns {{ since: number, reason: string, waitedMs: number, blockedBy: any[] }|null}
+     */
+    longWaitInfo,
+    /**
+     * The upper bound of a queued (unclaimed) inbox message.
+     *
+     * @returns {number} milliseconds
+     */
+    queuedGraceMs: () => config.queuedGraceMs,
     sessionTitle,
     disarmGoal,
     disarmBlockingGoals,
@@ -3107,6 +3310,7 @@ function registerTools(ctx, runtime, config) {
           quietForMs: { type: 'number' },
           graceMs: { type: 'number' },
           effectiveSettleMs: { type: 'number' },
+          queuedGraceMs: { type: 'number' },
           blockedBy: {
             type: 'array',
             items: {
@@ -3162,6 +3366,8 @@ function registerTools(ctx, runtime, config) {
         // finished) and the quiet window the gate really uses.
         graceMs: runtime.graceMs(),
         effectiveSettleMs: runtime.effectiveSettleMs(),
+        // The upper bound of a queued (unclaimed) inbox message.
+        queuedGraceMs: runtime.queuedGraceMs(),
         blockedBy: blockingDetails(verdict.blockedBy),
         parkedGoals: parkedGoalDetails(),
         recovery: recoveryList(state),
@@ -3417,7 +3623,7 @@ function injectPageHeartbeat(html, bootId, routePath) {
 const AUTORESTART_PROMPT = [
   '## Restart policy (dsh-autorestart)',
   '- When DeepSeek Harness itself must restart (for example to load an installed or updated plugin bundle), do NOT kill or relaunch the app yourself with pwsh/taskkill/Stop-Process/npm scripts. A hard guard blocks such commands anyway (denials mention `blockManualRestart`).',
-  '- Call the `continuum_restart` tool instead (optional arguments: `reason`, `resume`, `defer_seconds`, `parkGoals`). It waits until every conversation is idle (no running turn, no queued inbox work) AND the host has been quiet for `settleMs` (default 2000 ms); the detached helper re-checks that gate immediately before killing, so other conversations are never killed mid-turn. It then relaunches the app, and after boot this plugin resumes the session and continues the work automatically.',
+  '- Call the `continuum_restart` tool instead (optional arguments: `reason`, `resume`, `defer_seconds`, `parkGoals`). It waits until every conversation is idle (no running turn — a running turn ALWAYS blocks; an inbox message nobody claimed blocks only until `queuedGraceMs`, default 60000 ms, after which it is treated as stuck and no longer blocks) AND the host has been quiet for `settleMs` (default 2000 ms); the detached helper re-checks that gate immediately before killing, so other conversations are never killed mid-turn. It then relaunches the app, and after boot this plugin resumes the session and continues the work automatically.',
   '- A goal-driven session is DISARMED automatically before the restart (its current round still finishes, nothing is lost), because such a session would otherwise keep the restart waiting forever: disarming only removes the process-local continuation authority, so no new round starts and the session goes idle. After the restart the goal is re-armed and continues. A goal whose round budget is spent cannot be continued and is reported instead. You can disarm your own goal on demand with `continuum_park_goal`, and retry a stuck recovery with `continuum_recover_now`.',
   '- Persist anything the next turn needs before restarting (workspace files, `todo_write`, goal state); do not rely on in-memory state.',
   '- Inspect the lifecycle with `continuum_status`; cancel a pending restart with `continuum_cancel_restart`.',
@@ -4577,6 +4783,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
           // are needed to tell "waiting for the grace" from "somebody is busy".
           graceMs: config.restartGraceMs,
           effectiveSettleMs: runtime.effectiveSettleMs(),
+          // The upper bound of a queued (unclaimed) inbox message: after this
+          // window it stops blocking the restart.
+          queuedGraceMs: config.queuedGraceMs,
           quietForMs: typeof verdict.quietForMs === 'number' ? verdict.quietForMs : 0,
           busyCount: verdict.blockedBy.length,
           agentCount,
@@ -4644,6 +4853,13 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // The grace window and the quiet window the gate really uses.
             graceMs: config.restartGraceMs,
             effectiveSettleMs: runtime.effectiveSettleMs(),
+            // The upper bound of a queued (unclaimed) inbox message.
+            queuedGraceMs: config.queuedGraceMs,
+            // The long wait: present only when the restart passed the hard
+            // deadline while a conversation was still running. It says how
+            // long the restart has been waiting, why, and who holds it — the
+            // request itself is never dropped.
+            longWait: runtime.longWaitInfo(),
             updatedAt: live.updatedAt,
             // The park route, so the client never has to guess the prefix, and
             // the goals this plugin already disarmed (they are re-armed after
@@ -4670,6 +4886,8 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             blockedBy: [],
             allowRestart: false,
             quietForMs: 0,
+            queuedGraceMs: config.queuedGraceMs,
+            longWait: null,
             parkUrl: resolveParkPath(config),
             recoverUrl: resolveRecoverPath(config),
             choiceUrl: resolveChoicePath(config),

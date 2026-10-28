@@ -76,7 +76,7 @@ what it adds before you install it.
 
 ## Install
 
-Current version: **0.6.1**.
+Current version: **0.6.2**.
 
 From npm — the package is published under the name `dsh-autorestart`:
 
@@ -145,6 +145,7 @@ show up in the Plugin Manager and in the config editor.
 | `relaunchDelaySeconds` | `2` | How long the detached helper waits before it kills the app (`ping -n 3`, roughly 2 seconds). |
 | `settleMs` | `2000` | Quiet window in milliseconds: the host must stay silent this long after the last conversation activity before a restart may start. |
 | `restartGraceMs` | `10000` | Grace window in milliseconds: how long the host waits after the last conversation finished before it is really restarted or switched off — a dropdown: `0` / `3` / `5` / `10` / `20` / `30` seconds. `0` means "no extra wait". |
+| `queuedGraceMs` | `60000` | Upper bound in milliseconds for a **queued** (unclaimed) inbox message: how long it may hold the restart back before it is treated as stuck. `0` means "no upper bound" (the behaviour before 0.6.2). A **running** conversation always blocks, under every setting. |
 | `autoReloadPage` | `true` | `dsh web`: reload the page automatically when the host boot token changes. |
 | `blockManualRestart` | `true` | Hard-block an agent that tries to kill or restart DSH with a shell command, and point it at `continuum_restart` instead. |
 | `healthPath` | `/__dsh_autorestart/health` | Health check route. Returns the boot id, the pid, the phase and the self-check flags. |
@@ -189,6 +190,47 @@ plugin.
   work is done*. The status interfaces report it too: `GET /health?state=1`, `GET /health?gate=1`,
   `continuum_status` and `GET /sleep` all carry `graceMs` (the configured window) and `quietForMs`
   (how long the host has actually been quiet).
+
+### Why a queued message cannot block the restart for ever
+
+**The deadlock.** A conversation whose inbox holds a message nobody claimed yet counts as "busy"
+for the restart gate. That is right while the message is about to be picked up — the agent claims
+it within a second or two — but it is a deadlock when nobody ever claims it. The real case was a
+fresh, empty conversation in the UI with one unclaimed message in its inbox: the gate stayed
+closed, the hard deadline only logged a warning, and the restart never happened.
+
+**The upper bound.** `queuedGraceMs` (default **60000** ms) is how long an unclaimed message may
+hold the restart back:
+
+- **A message claimed inside the window still blocks.** The normal case is unchanged: the agent
+  picks the message up and the restart waits for it.
+- **A message that is still unclaimed after the window is stuck.** It stops blocking the restart,
+  and the log names the session that holds the queue (`the queued message of session <id> has been
+  waiting 61s and nobody claimed it; it no longer blocks the restart`). The restart goes on.
+- **A running conversation always blocks — under every setting.** The bound only ever judges
+  *queued* work; a live turn is never relaxed, and no configuration can make the plugin kill one.
+- **The timer follows the work.** A session that starts working drops its queue timer, and a new
+  queue counts from zero again.
+- **`0` means "as before".** With `queuedGraceMs: 0` an unclaimed message blocks the restart for
+  ever, exactly like it did before this bound existed.
+- **Where to look:** `GET /health?state=1`, `GET /health?gate=1` and `continuum_status` all report
+  `queuedGraceMs`.
+
+### What you see while the restart waits a long time
+
+When the hard deadline (`deferHardMs`) is over and a conversation is still running, the plugin does
+not pretend that everything is fine — and it does not give up either:
+
+- **The request is kept.** The pending restart stays pending, the requester stays checkpointed, and
+  the restart fires as soon as the gate is quiet again. Nothing is cancelled behind your back.
+- **The wait becomes visible.** The log says it once a minute — "the restart has been waiting for
+  17m; `<session>` still holds it — cancel the restart or wait for that work to finish" — and
+  `GET /health?state=1` carries a `longWait` object (`since`, `reason`, `blockedBy`).
+- **The bubble says it too.** The pending-restart pill shows one more line: "waiting for 17m:
+  `<session>` keeps holding it" (「已等 17 分：`<会话>`一直占着」).
+
+A conversation is never killed to make the restart happen: `forceRestartWhenBusy` stays off by
+default, and this plugin never turns it on.
 
 ### Platform note
 

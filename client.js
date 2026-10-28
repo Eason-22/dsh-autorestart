@@ -162,6 +162,12 @@ const ZH = {
   panelParkedGoal: '会话 {session} · {goal}',
   panelWaiting: '已等待 {duration}',
   panelResume: '重启后本会话会自动继续进度',
+  // The long wait: the restart passed the hard deadline while a conversation
+  // was still running. The bubble says how long it has been waiting and who
+  // holds it — the request itself is never dropped.
+  longWaitNote: ' · 已等 {duration}：{blocker}一直占着',
+  longWaitBlockerGeneric: '有会话',
+  longWaitBlockerJoin: '、',
   durationSeconds: '{n} 秒',
   durationMinutes: '{n} 分 {m} 秒',
   durationHours: '{n} 小时 {m} 分',
@@ -306,6 +312,12 @@ const EN = {
   panelParkedGoal: 'session {session} · {goal}',
   panelWaiting: 'Waiting for {duration}',
   panelResume: 'This session resumes its progress automatically after the restart.',
+  // The long wait: the restart passed the hard deadline while a conversation
+  // was still running. The bubble says how long it has been waiting and who
+  // holds it — the request itself is never dropped.
+  longWaitNote: ' · waiting for {duration}: {blocker} keeps holding it',
+  longWaitBlockerGeneric: 'another session',
+  longWaitBlockerJoin: ', ',
   durationSeconds: '{n}s',
   durationMinutes: '{n}m {m}s',
   durationHours: '{n}h {m}m',
@@ -536,10 +548,76 @@ function formatRemainingMs(ms) {
 }
 
 /**
+ * Fill `{name}` placeholders in a locale template.
+ *
+ * The locale API is not assumed to interpolate, so the helpers below do it
+ * themselves. This is the module-level twin of the panel's own `fill`.
+ *
+ * @param {string} template
+ * @param {Record<string, unknown>} vars
+ * @returns {string}
+ */
+function fillTemplate(template, vars) {
+  if (typeof template !== 'string') return ''
+  return template.replace(/\{(\w+)\}/g, (match, name) => (
+    vars && Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : match
+  ))
+}
+
+/**
+ * A duration as a locale string: "45 秒" / "3 分 12 秒" / "2 小时 5 分".
+ *
+ * @param {number} ms
+ * @param {(name: string) => string} [t] the translator
+ * @returns {string}
+ */
+function formatDurationMs(ms, t) {
+  const translate = typeof t === 'function' ? t : (name) => name
+  const totalSeconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000))
+  if (totalSeconds < 60) return fillTemplate(translate('durationSeconds'), { n: totalSeconds })
+  const minutes = Math.floor(totalSeconds / 60)
+  if (minutes < 60) return fillTemplate(translate('durationMinutes'), { n: minutes, m: totalSeconds % 60 })
+  const hours = Math.floor(minutes / 60)
+  return fillTemplate(translate('durationHours'), { n: hours, m: minutes % 60 })
+}
+
+/**
+ * The note of a LONG wait.
+ *
+ * The Host says that the pending restart passed the hard deadline while a
+ * conversation was still running. That is not "a little longer" any more, so
+ * the bubble says it out loud: how long the restart has been waiting and who
+ * holds it. The note is empty when there is no long wait.
+ *
+ * @param {any} info the state payload of the Host
+ * @param {(name: string) => string} [t] the translator
+ * @returns {string}
+ */
+function formatLongWaitNote(info, t) {
+  const translate = typeof t === 'function' ? t : (name) => name
+  const longWait = info && typeof info === 'object' ? info.longWait : null
+  if (!longWait || typeof longWait !== 'object') return ''
+  const blockedBy = Array.isArray(longWait.blockedBy) ? longWait.blockedBy : []
+  const names = []
+  for (const entry of blockedBy) {
+    if (!entry || typeof entry !== 'object') continue
+    const name = typeof entry.name === 'string' && entry.name.trim() !== ''
+      ? entry.name.trim()
+      : (typeof entry.label === 'string' && entry.label.trim() !== '' ? entry.label.trim() : '')
+    if (name !== '') names.push(name)
+  }
+  const blocker = names.length === 0
+    ? translate('longWaitBlockerGeneric')
+    : names.join(translate('longWaitBlockerJoin'))
+  const duration = formatDurationMs(longWait.waitedMs, translate)
+  return fillTemplate(translate('longWaitNote'), { duration, blocker })
+}
+
+/**
  * The named exports of this module.
  *
  * The client module system materializes `factory(require) -> exports`, so
- * these four helpers ARE the module's exports; they are mirrored on
+ * these helpers ARE the module's exports; they are mirrored on
  * `globalThis.__dshAutorestartClient` for the tests that evaluate the file
  * without a loader.
  */
@@ -548,6 +626,7 @@ const SLEEP_EXPORTS = {
   shouldShowSleepButton,
   buildChoiceBody,
   formatRemainingMs,
+  formatLongWaitNote,
 }
 
 if (typeof globalThis !== 'undefined' && globalThis !== null) {
@@ -952,6 +1031,18 @@ if (moduleLoader) moduleLoader.load({
       whiteSpace: 'nowrap',
     }
 
+    // The extra line of a LONG wait: how long the restart has been waiting and
+    // who holds it. It is a separate element (not more text in the same span)
+    // so the bubble can tell "the ordinary status" from "the long wait", and
+    // it stays inside the clipped pill — the composer row never grows.
+    const LONG_WAIT_STYLE = {
+      minWidth: 0,
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap',
+      opacity: 0.85,
+    }
+
     // The details panel: anchored to the wrapper, above the pill, left
     // aligned. It uses the host theme tokens (background / border / label
     // color) so it follows the app theme.
@@ -1269,6 +1360,15 @@ if (moduleLoader) moduleLoader.load({
             ? `${t('busyPrefix')}${otherBusy}${t('busySuffix')}`
             : t('idle')
 
+      // The long wait: the Host says that the restart passed the hard
+      // deadline while a conversation was still running. The bubble shows one
+      // more line about it — how long it has been waiting and who holds it.
+      const longWaitText = formatLongWaitNote(info, t)
+      const tooltipText = otherBusy > 0 ? t('tooltipBusy') : t('tooltip')
+      const titleText = parkError
+        ? fill(t('tooltipWithError'), { message: parkError })
+        : (longWaitText === '' ? tooltipText : `${tooltipText} ${longWaitText}`)
+
       if (pulsing) ensurePulseStyle()
 
       /**
@@ -1330,12 +1430,23 @@ if (moduleLoader) moduleLoader.load({
           'div',
           {
             style: PILL_STYLE,
-            title: parkError
-              ? fill(t('tooltipWithError'), { message: parkError })
-              : (otherBusy > 0 ? t('tooltipBusy') : t('tooltip')),
+            title: titleText,
           },
           h('span', { style: dotStyle(DOT_STYLE, pulsing), 'aria-hidden': 'true' }),
           h('span', { style: TEXT_STYLE }, h('b', null, t('label')), status),
+          // One more line for the long wait: how long the restart has been
+          // waiting and who holds it. It is only there when the Host says so.
+          longWaitText === ''
+            ? null
+            : h(
+              'span',
+              {
+                style: LONG_WAIT_STYLE,
+                'data-dsh-autorestart-long-wait': 'true',
+                title: longWaitText,
+              },
+              longWaitText,
+            ),
           // One park button per goal-driven blocker that can be parked. It
           // lives inside the pill, so the slot still has a single root.
           goalActive.map((entry, index) => {
@@ -1393,9 +1504,13 @@ if (moduleLoader) moduleLoader.load({
       const pulsing = info.allowRestart === true && !prefersReducedMotion()
       if (pulsing) ensurePulseStyle()
 
+      // The long wait is worth a word in the tooltip too: the dot is
+      // icon-only, so the text is the only place where it can be read.
+      const longWaitText = formatLongWaitNote(info, t)
+
       return h('span', {
         style: dotStyle(SIDEBAR_DOT_STYLE, pulsing),
-        title: t('tooltip'),
+        title: longWaitText === '' ? t('tooltip') : `${t('tooltip')} ${longWaitText}`,
         role: 'status',
         'aria-live': 'polite',
         'aria-label': t('dotAria'),

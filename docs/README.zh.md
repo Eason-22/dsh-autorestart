@@ -137,7 +137,7 @@ agent/status(running) ──► 写 checkpoint（<DSH_HOME>\storages\dsh-autores
 
 ## 安装
 
-当前版本：**0.6.1**。
+当前版本：**0.6.2**。
 
 ```powershell
 # 在 dsh 里（或对 Agent 说）：把工作区里的这个包安装为 profile bundle
@@ -173,6 +173,7 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 | `relaunchDelaySeconds` | `2` | 脱离的 helper 在杀掉应用**之前**等几秒（`ping -n 3`，约 2 秒） |
 | `settleMs` | `2000` | 静默窗口（ms）：最后一次会话活动之后，宿主要安静这么久，重启才允许开始 |
 | `restartGraceMs` | `10000` | 宽限期（ms）：最后一个会话收工后，再等这么久才真正重启/关机——**下拉框：0 / 3 / 5 / 10 / 20 / 30 秒**，默认 10；`0` = 不额外等 |
+| `queuedGraceMs` | `60000` | **排队消息的上限**（ms）：一条没人认领的 inbox 消息最多挡多久的重启；超过就算卡住，不再挡路（并在日志里点名那个会话）。`0` = 没有上限（0.6.2 之前的行为）。**正在跑的会话在任何设置下都照样挡路** |
 | `autoReloadPage` | `true` | `dsh web`：host 重启（bootId 变化）后让页面自动 reload |
 | `blockManualRestart` | `true` | 硬拦截 agent 用 shell 命令手动杀掉/重启 DSH，并引导到 `continuum_restart` |
 | `healthPath` | `/__dsh_autorestart/health` | 健康检查路由（返回 bootId/pid/phase/自检标志） |
@@ -196,6 +197,29 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 - **`0` 就是「和以前一样」**：`restartGraceMs: 0` 时行为与 0.4.0 完全一致。
 - **在哪改**：设置 → 自动重启与关机 → 「收工后再等几秒（给记忆/总结类插件留时间）」。
 - **怎么排障**：状态接口都带着它 —— `GET /health?state=1`、`GET /health?gate=1`、`continuum_status`、`GET /sleep` 都会报 `graceMs`（配了多宽限期）和 `quietForMs`（已经安静了多久）。
+
+### 为什么「排队的消息」不能永远挡着重启
+
+**死锁是怎么来的。** 一个会话的 inbox 里躺着一条**没人认领**的消息时，它在重启闸门眼里就算「忙」。消息马上要被领走时这是对的 —— agent 一两秒就来领了；但**没人会领**的时候就是死锁。真实现场就是：UI 里新开的一个**空会话**（一个轮次都没跑过），inbox 里有条没人认领的消息 → 闸门永远关着 → 硬期限到了也只是记一条告警 → **重启永远不触发**。
+
+**上限就是为这件事留的。** `queuedGraceMs`（默认 **60000** 毫秒）是一条没人认领的消息最多能挡多久的重启：
+
+- **窗口内被认领 → 照样挡**：正常情况完全没变，agent 把消息领走，重启继续等它。
+- **超过窗口还没人领 → 卡住了**：它**不再挡路**，日志里点名那个占着队列的会话（`the queued message of session <id> has been waiting 61s and nobody claimed it; it no longer blocks the restart`），重启照常往下走。
+- **正在跑的会话在任何设置下都照样挡**：这个上限只管**排队**的活，**在跑的轮次永远不放宽**，也没有任何配置能让插件去杀掉一个正在跑的会话。
+- **计时跟着活走**：会话开始干活 → 排队计时清掉；之后再排队 → 从零重新计。
+- **`0` 就是「和以前一样」**：`queuedGraceMs: 0` 时，没人认领的消息永远挡着重启，和 0.6.2 之前完全一致。
+- **在哪看**：`GET /health?state=1`、`GET /health?gate=1`、`continuum_status` 都会报 `queuedGraceMs`。
+
+### 长期等待的时候，用户看到什么
+
+硬期限（`deferHardMs`）到了、还有会话在跑的时候，插件**不再装作「一切正常，只是在等一会儿」**，但也**不会放弃**：
+
+- **请求留着**：待重启仍然是待重启，请求方的会话仍然记在检查点里，闸门一 quiet 就照常重启。**不会在用户背后把请求悄悄丢掉**（不 cancel、不 releaseRequesters）。
+- **等待变得看得见**：日志每分钟最多一条（不是每 3 秒刷屏）——「已等待 17 分钟，XXX 一直占着；可以取消或等它收工」；`GET /health?state=1` 里多一个 `longWait` 对象（`since` / `reason` / `blockedBy`）。
+- **气泡里也说一句**：待重启的胶囊多显示一行「已等 17 分：XXX 一直占着」（英文：`waiting for 17m: XXX keeps holding it`）。
+
+**不会**为了重启去强杀任何会话：`forceRestartWhenBusy` 默认仍然是关的，这个插件也不会去打开它。
 
 ## Agent 工具与"它怎么知道该用插件"
 
@@ -532,8 +556,11 @@ A restart is never scheduled while another DSH conversation is still working.
 
 1. Conversation gate: busyAgents() inspects every live agent (subagents and
    teammates included). An agent blocks the restart when its status is 'running'
-   or when it still has queued inbox work (inbox.nextTurn / inbox.nextStep, or
-   inbox.hasPending). The verdict is { allow:false, reason:'conversation-active',
+   (ALWAYS, under every setting) or when it still has queued inbox work
+   (inbox.nextTurn / inbox.nextStep, or inbox.hasPending) — the queued work only
+   blocks until queuedGraceMs (default 60000 ms) is over; after that it is
+   treated as stuck, it stops blocking and the session that holds it is named in
+   the log. The verdict is { allow:false, reason:'conversation-active',
    blockedBy:[...] }.
 2. Settle gate: even with no busy conversation, the host must have been quiet for
    settleMs (default 2000 ms) since the last observed activity (agent/status,

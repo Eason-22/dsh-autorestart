@@ -33,6 +33,12 @@
         # here. A DROPDOWN in the settings page: 0 / 3 / 5 / 10 / 20 / 30
         # seconds. `0` means "no extra wait" (the behaviour of 0.4.0).
         restartGraceMs: 10000
+        # Upper bound (ms) of a QUEUED inbox message: a message that nobody
+        # claims within this window is stuck, so it stops blocking the
+        # restart (and the session that holds it is named in the log).
+        # Without it a single unclaimed message kept the restart pending for
+        # ever. `0` switches the protection off (the old behaviour).
+        queuedGraceMs: 60000
         # dsh web: reload the page when the host boot token changes
         autoReloadPage: true
         # hard-block shell commands that would kill/relaunch DSH by hand

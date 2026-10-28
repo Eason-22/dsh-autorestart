@@ -134,14 +134,14 @@ function snapGraceChoice(value) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.6.0'
+const PLUGIN_VERSION_FALLBACK = '0.6.1'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
  *
  * The one-time announcement is bound to this constant. It used to follow the
  * version in package.json, and that made every release resurrect the card the
- * user had already answered (0.5.0 -> 0.6.0 brought "收工关机" back). A release
+ * user had already answered (0.5.0 -> 0.6.1 brought "收工关机" back). A release
  * is not news about the feature, so the two are decoupled.
  *
  * WHEN TO RAISE IT: only when the feature itself changed so much that the
@@ -213,7 +213,7 @@ function featureAnnouncements() {
  * - not only when it is exactly that version:
  *
  *   - the announcement used to carry the version of the PACKAGE, so a user
- *     who answered it on the release 0.6.0 recorded "0.6.0" while the feature
+ *     who answered it on the release 0.6.1 recorded "0.6.1" while the feature
  *     itself stands at "0.5.0". With an equality check that record would
  *     look stale, and the very same card would be shown to a user who already
  *     dismissed it;

@@ -61,16 +61,22 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 | 系统提示词 | 一段「重启政策」说明，告诉 agent 怎么请求重启、插件会做什么 |
 | 宿主事件 | `agent/status`（跟踪哪些会话在忙）、`tools/pre-execute`（拦下"手动杀/重启 DSH"的 shell 命令）、启动时的恢复流程 |
 | profile 行 | 一条 bundle 行：`dsh-autorestart` |
-| 写文件 | 只在 `<DSH_HOME>/storages/dsh-autorestart/` 下写：`state.json`（检查点）、`backups/`（重启前快照）、`restart-<代次>.cmd` / `restart-<代次>-watch.ps1`（脱离进程的重启 helper）、`last-rollback.json`（回退报告）。唯一会写进 profile 的时机是**回退**：把快照里的 `cordis.patch.yml`、`package.json`、`pnpm-lock.yaml` 和 `node_modules` 拷回去 |
+| 写文件 | 只在 `<DSH_HOME>/storages/dsh-autorestart/` 下写：`state.json`（检查点）、`backups/`（重启前快照）、`restart-<代次>.cmd` / `restart-<代次>-watch.ps1`（脱离进程的重启 helper）、`last-rollback.json`（回退报告）、`restart-outcome.json`（插件自己判定的那次重启的结论）、`access.json`（当前实例的带 token 访问链接，权限 `0600`）。唯一会写进 profile 的时机是**回退**：把快照里的 `cordis.patch.yml`、`package.json`、`pnpm-lock.yaml` 和 `node_modules` 拷回去 |
 
 ## 重启前备份与自动回退
 
 - **每次重启前**先给 profile 拍快照：`cordis.patch.yml`、`package.json`、`pnpm-lock.yaml`，以及（默认开启）已安装插件目录 `node_modules`。本机实测：**2.76 秒 / 117.6 MB / 5,562 个文件**。
 - 快照放在 `storages/dsh-autorestart/backups/<时间戳>/`，带 `manifest.json`；**只保留最新 2 份**，写新快照时自动删旧的。
-- 重启后 helper 会跑一个隐藏的看护脚本，轮询健康端点 **90 秒**（`rollbackTimeoutMs`）：正常回答就静默退出，**什么都不动**。
-- 宿主**一直不回应**时：把快照拷回去 → 写 `last-rollback.json`（含"本次重启之后"的崩溃日志尾部，旧日志不会被误当证据）→ **自动再拉起一次**。
-- 下次启动时 `continuum_status` 会报 `lastRollback`（时间、等了多久、是否回滚、快照路径、崩溃日志名与尾部摘要）。
-- 开关：`backupOnRestart`（默认 `true`）、`backupIncludePlugins`（默认 `true`，关掉就只备配置文件）、`maxBackups`（默认 `2`）、`rollbackTimeoutMs`（默认 `90000`）。
+- 看护脚本跑在**宿主进程之外**（所以宿主被杀它也活着），等**新实例**最多 **90 秒**（`rollbackTimeoutMs`）：新实例把自己的端口和 boot id 写进 `access.json`，看护脚本据此找到**新实例**的健康端点（桌面版每次 `--port 0` 端口随机，旧端口没有意义）。正常回答就静默退出，**什么都不动**。
+- 宿主**一直不回应**时：把快照拷回去 → 写 `last-rollback.json`（含"本次重启之后"的崩溃日志尾部，旧日志不会被误当证据）→ **不会再拉起第二个宿主**（已经起来的那一个由它自己继续，回退分支绝不 `Start-Process` 第二个 app）。
+- 拷回本身也有**时间上限**（`rollbackCopyTimeoutMs`，默认 120 秒/步）：拷不完就放弃，并把原因写进报告。
+- **托管模式（`restartMode: command`）也有同一张安全网**：重启命令通常会把插件自己所在的进程一起杀掉，所以看护脚本在命令**之前**就启动了，由它来确认新实例有没有起来。命令起不来或以非零码退出时，插件**如实报错**（带退出码和输出）并把快照拷回去，绝不静默当成功。
+- 下次启动时 `continuum_status` 会报 `lastRollback`（时间、等了多久、是否回滚、**失败原因**、快照路径、崩溃日志名与尾部摘要）。
+- 开关：`backupOnRestart`（默认 `true`）、`backupIncludePlugins`（默认 `true`，关掉就只备配置文件）、`maxBackups`（默认 `2`）、`rollbackTimeoutMs`（默认 `90000`）、`restartCommandTimeoutMs`（默认 `30000`）、`rollbackCopyTimeoutMs`（默认 `120000`）。
+
+### 重启后的访问链接（token 是一次性的）
+
+`dsh web` 的 boot token **每个进程都不一样**，重启后浏览器手里那条旧链接会 401，用户就被挡在门外。所以插件把当前实例的访问链接写进 `storages/dsh-autorestart/access.json`（权限 `0600`，里面是密钥），并在 `continuum_status` 与日志里报出来；前端发现手里那条链接过期时，会自己跟到新链接上。
 
 ### 首次安装只问一次：备份要不要连已装插件一起备
 
@@ -181,7 +187,9 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 | `backupOnRestart` | `true` | 每次重启前给 profile 拍快照；重启后起不来时能自动回退 |
 | `backupIncludePlugins` | `true` | 快照里是否带上已安装插件目录（本机约 117 MB、多约 3 秒）；关掉就只备配置文件 |
 | `maxBackups` | `2` | 保留几份快照；写新的时自动删旧的 |
-| `rollbackTimeoutMs` | `90000` | 看护脚本等新宿主多久（毫秒），超时就回退快照并再拉起一次 |
+| `rollbackTimeoutMs` | `90000` | 看护脚本等新宿主多久（毫秒），超时就回退快照（**不会再拉起第二个宿主**） |
+| `restartCommandTimeoutMs` | `30000` | 重启命令最多让插件等多久（毫秒）。前台跑着宿主的命令永远不返回——那会报「还在运行」，不算失败 |
+| `rollbackCopyTimeoutMs` | `120000` | 拷回快照的**每一步**最多花多久（毫秒）：拷不完就放弃，并把原因写进回退报告 |
 | `showSleepButton` | `true` | 收工关机的月亮按钮是否显示在左侧栏最底部、设置按钮旁边 |
 | `sleepCountdownSeconds` | `20` | **关机倒数秒数**：收工关机在真正关机前倒数几秒——**下拉框：0 / 10 / 20 / 30 / 60 秒**，默认 20；`0` 表示**不倒数、立即关机**（仍会先等所有会话收工）。**这段看得见的倒数就是关机前的那段等待** —— 关机没有第二个看不见的预留 |
 | `sleepCommand` | `''` | 收工关机的自定义关机命令；留空 = 自动识别宿主（Windows 用 `cmd.exe /c …`，其它平台用 `/bin/sh -c …`） |

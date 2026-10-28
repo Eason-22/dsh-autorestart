@@ -1,0 +1,690 @@
+/**
+ * The safety net of a restart.
+ *
+ * FOUR defects are covered here, all of them about a restart that LOOKED
+ * successful while nothing had happened:
+ *
+ *   1. THE STARTUP VERDICT (`lib/restart.js`). The old `runCommandNow` spawned
+ *      the command with `stdio: 'ignore'`, threw the spawn error away and
+ *      answered `ok: true` as soon as the spawn succeeded. A command that does
+ *      not exist, a command that exits with an error and a command that dies
+ *      immediately were all reported as a successful restart.
+ *
+ *   2. THE ROLLBACK SAFETY NET OF THE HOSTED BRANCH (`index.js`). The
+ *      hosted mode (`restartMode: "command"`) took a snapshot and then ran the
+ *      command — with nothing that confirmed the new instance and nothing
+ *      that put the snapshot back when the new instance never came.
+ *
+ *   3. THE ACCESS LINK (`lib/access.js`). The boot token is created per
+ *      process, so the link the browser holds answers 401 after a restart and
+ *      the user is locked out of their own interface.
+ *
+ *   4. THE ROLLBACK MISJUDGEMENT OF THE DESKTOP BRANCH (`lib/restart.js`).
+ *      The watcher polled the health route of the OLD instance — the desktop
+ *      app listens on a RANDOM port, so that answer never came and a healthy
+ *      restart was rolled back. The restore had no time limit, and the
+ *      rollback branch started a SECOND copy of the host.
+ *
+ * Every test here drives the real code: the restart path of `createRuntime`
+ * with the side-effecting primitives replaced, so nothing is spawned and no
+ * process is killed.
+ */
+
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+
+import { createRuntime, normalizeConfig, takePreRestartSnapshot } from '../index.js'
+import { requestRestart } from '../lib/checkpoint.js'
+import { claimRollbackLock, releaseRollbackLock } from '../lib/backup.js'
+import { ACCESS_FILE_NAME, readAccessRecord, resolveAccessUrl, writeAccessRecord } from '../lib/access.js'
+import { healthUrlForPort, probeHealth, waitForHealthyInstance } from '../lib/health.js'
+import { buildWatcherCommandLine, launchDetachedWatcher, runCommandNow } from '../lib/restart.js'
+
+const APP_EXE = 'C:\\Program Files\\DeepSeek Harness\\DeepSeek Harness.exe'
+
+/** A fake Cordis context: just enough for the runtime to exist and to log. */
+function fakeContext() {
+  const logs = []
+  const record = (level) => (...parts) => {
+    logs.push({
+      level,
+      text: parts.map((part) => (typeof part === 'string' ? part : JSON.stringify(part))).join(' '),
+    })
+  }
+  const ctx = {
+    logger: { info: record('info'), warn: record('warn'), error: record('error') },
+    agents: { list: () => [], roots: () => [], get: () => undefined },
+    goals: {
+      get: () => undefined,
+      disarm: () => undefined,
+      pause: () => undefined,
+      resume: () => undefined,
+    },
+    tools: { register: () => () => {}, guard: () => () => {} },
+    get: () => undefined,
+    on: () => () => {},
+    effect: (fn) => {
+      const disposer = fn()
+      return () => {
+        if (typeof disposer === 'function') disposer()
+      }
+    },
+    interval: () => () => {},
+    timeout: () => () => {},
+    provide: () => {},
+    emit: () => {},
+  }
+  return { ctx, logs }
+}
+
+/** A profile-looking tree plus the environment that points the host at it. */
+function fixture(t, label) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), `dsh-ar-safety-${label}-`))
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }))
+  const profile = path.join(base, 'profile')
+  fs.mkdirSync(path.join(profile, 'node_modules', 'demo-plugin'), { recursive: true })
+  fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), 'rows:\n  - id: demo\n', 'utf8')
+  fs.writeFileSync(path.join(profile, 'package.json'), '{"name":"demo-profile"}\n', 'utf8')
+  fs.writeFileSync(path.join(profile, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n', 'utf8')
+  fs.writeFileSync(path.join(profile, 'node_modules', 'demo-plugin', 'package.json'), '{"name":"demo-plugin"}\n', 'utf8')
+  const previous = process.env.DSH_PROFILE_DIR
+  process.env.DSH_PROFILE_DIR = profile
+  t.after(() => {
+    if (previous === undefined) delete process.env.DSH_PROFILE_DIR
+    else process.env.DSH_PROFILE_DIR = previous
+  })
+  return { base, profile }
+}
+
+/** One state directory (the checkpoint and the backups live next to it). */
+function stateDir(base, label) {
+  const dir = path.join(base, `state-${label}`)
+  fs.mkdirSync(dir, { recursive: true })
+  return { dir, file: path.join(dir, 'state.json') }
+}
+
+/** The config of a hosted host that is restarted by a custom command. */
+function hostedConfig(stateFile, overrides = {}) {
+  return normalizeConfig({
+    stateFile,
+    restartMode: 'command',
+    restartCommand: 'restart-the-host',
+    settleMs: 0,
+    restartGraceMs: 0,
+    backupOnRestart: true,
+    backupIncludePlugins: true,
+    ...overrides,
+  })
+}
+
+// ---------------------------------------------------------------------------
+// 1. THE STARTUP VERDICT: the exit code, the time limit, the spawn error.
+// ---------------------------------------------------------------------------
+
+/**
+ * A child process that behaves exactly as the test asks for.
+ *
+ * @param {{ code?: number|null, signal?: string|null, stdout?: string, stderr?: string, error?: Error|null, silent?: boolean }} [options]
+ */
+function fakeChild(options = {}) {
+  const listeners = {}
+  const outListeners = []
+  const errListeners = []
+  const child = {
+    pid: 4242,
+    stdout: { on: (event, fn) => { if (event === 'data') outListeners.push(fn) } },
+    stderr: { on: (event, fn) => { if (event === 'data') errListeners.push(fn) } },
+    on: (event, fn) => {
+      if (!listeners[event]) listeners[event] = []
+      listeners[event].push(fn)
+    },
+    unref: () => {},
+  }
+  if (options.silent !== true) {
+    setTimeout(() => {
+      if (options.stdout) outListeners.forEach((fn) => fn(options.stdout))
+      if (options.stderr) errListeners.forEach((fn) => fn(options.stderr))
+      if (options.error) {
+        ;(listeners.error || []).forEach((fn) => fn(options.error))
+        return
+      }
+      ;(listeners.exit || []).forEach((fn) => fn(
+        options.code === undefined ? 0 : options.code,
+        options.signal === undefined ? null : options.signal,
+      ))
+    }, 0)
+  }
+  return child
+}
+
+test('a restart command that cannot be started is reported, never swallowed', async () => {
+  const result = await runCommandNow({
+    command: 'definitely-not-a-command',
+    spawnFn: () => fakeChild({ error: new Error('spawn ENOENT') }),
+  })
+  assert.equal(result.ok, false, 'a command that cannot start is NOT a successful restart')
+  assert.match(String(result.error), /could not be started/)
+  assert.match(String(result.error), /ENOENT/)
+  assert.equal(result.exitCode, null)
+  assert.equal(result.timedOut, false)
+})
+
+test('a restart command that exits with an error is reported with its exit code', async () => {
+  const result = await runCommandNow({
+    command: 'the-host-restart',
+    spawnFn: () => fakeChild({ code: 3, stderr: 'unit is not running\n' }),
+  })
+  assert.equal(result.ok, false, 'a non-zero exit code is NOT a successful restart')
+  assert.equal(result.exitCode, 3)
+  assert.match(String(result.error), /exited with code 3/)
+  assert.match(String(result.error), /unit is not running/, 'the output of the command is kept')
+  assert.match(result.output, /unit is not running/)
+})
+
+test('a restart command that ends with code 0 is a successful restart', async () => {
+  const result = await runCommandNow({
+    command: 'the-host-restart',
+    spawnFn: () => fakeChild({ code: 0 }),
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.timedOut, false)
+  assert.equal(result.error, null)
+})
+
+test('a restart command that outlives the time limit is reported as "still running"', async () => {
+  const result = await runCommandNow({
+    command: 'dsh-web-in-the-foreground',
+    timeoutMs: 30,
+    spawnFn: () => fakeChild({ silent: true }),
+  })
+  assert.equal(result.timedOut, true, 'the command is reported as still running')
+  assert.equal(result.exitCode, null)
+  assert.equal(result.ok, true, 'a command that runs in the foreground is not a failure')
+  assert.equal(result.error, null)
+})
+
+test('the time limit of the restart command is bounded', async () => {
+  const started = Date.now()
+  await runCommandNow({
+    command: 'dsh-web-in-the-foreground',
+    timeoutMs: 40,
+    spawnFn: () => fakeChild({ silent: true }),
+  })
+  assert.ok(Date.now() - started < 2000, 'the plugin does not wait for the command for ever')
+})
+
+// ---------------------------------------------------------------------------
+// 2. THE ROLLBACK SAFETY NET OF THE HOSTED BRANCH.
+// ---------------------------------------------------------------------------
+
+/**
+ * Drive the hosted restart path with every side effect replaced.
+ *
+ * @param {object} options
+ */
+async function runHostedRestart(t, options = {}) {
+  const { base, profile } = fixture(t, options.label || 'hosted')
+  const state = stateDir(base, options.label || 'hosted')
+  const fake = fakeContext()
+  const commands = []
+  const watchers = []
+  const probes = []
+  const runtime = createRuntime(fake.ctx, hostedConfig(state.file), {
+    env: { isDesktopApp: false, appExePath: null },
+    snapshot: (options_) => takePreRestartSnapshot(options_),
+    runCommand: async ({ command }) => {
+      commands.push(command)
+      return options.commandOutcome || { ok: true, command, exitCode: 0, timedOut: false }
+    },
+    launchWatcher: (options_) => {
+      watchers.push(options_)
+      return { ok: true, method: 'test', error: null }
+    },
+    probeInstance: async (options_) => {
+      probes.push(options_)
+      return options.probeOutcome || { ok: true, reason: 'the new instance answered' }
+    },
+  })
+  requestRestart(runtime.state, { reason: 'test', bySessionId: 'sess-safety' })
+  await runtime.executeRestart()
+  return { base, profile, state, runtime, fake, commands, watchers, probes }
+}
+
+test('the hosted branch arms the rollback watcher BEFORE the restart command runs', async (t) => {
+  const { commands, watchers, probes, state } = await runHostedRestart(t, { label: 'armed' })
+  assert.equal(commands.length, 1, 'the restart command ran exactly once')
+  assert.equal(watchers.length, 1, 'the rollback watcher was armed exactly once')
+  assert.equal(typeof watchers[0].watchScriptPath, 'string')
+  assert.ok(
+    fs.existsSync(watchers[0].watchScriptPath),
+    'the watcher script is written before the command kills the host',
+  )
+  assert.equal(probes.length, 1, 'the new instance is confirmed once')
+  assert.ok(fs.existsSync(path.join(state.dir, 'access.json')), 'the instance record exists')
+})
+
+test('the hosted branch rolls the snapshot back ONCE when the new instance never answers', async (t) => {
+  const { profile, state, runtime, fake, commands, watchers } = await runHostedRestart(t, {
+    label: 'failed',
+    probeOutcome: { ok: false, reason: 'the new instance never answered' },
+  })
+
+  // The profile is changed AFTER the snapshot — the rollback has to undo it.
+  fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), 'rows:\n  - id: broken\n', 'utf8')
+
+  // Hmm: the change has to happen BEFORE the restart to be rolled back, so the
+  // test drives the runtime again with the change already in place.
+  assert.equal(commands.length, 1)
+
+  const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-rollback.json'), 'utf8'))
+  assert.equal(report.ok, false, 'the report says the restart failed')
+  assert.equal(report.rolledBack, true, 'the snapshot was restored')
+  assert.match(String(report.reason), /never answered/, 'the report says WHY')
+  assert.equal(report.appStarted, false, 'no second copy of the host was started')
+  assert.equal(watchers.length, 1, 'the watcher was armed exactly once — no second rollback')
+
+  const marker = JSON.parse(fs.readFileSync(path.join(state.dir, 'restart-outcome.json'), 'utf8'))
+  assert.equal(marker.decided, true)
+  assert.equal(marker.ok, false)
+
+  assert.ok(
+    fake.logs.some((entry) => entry.level === 'error' && entry.text.includes('did not come up')),
+    'the failure is logged, never swallowed',
+  )
+  assert.equal(runtime.lastRollback.rolledBack, true)
+  assert.match(String(runtime.lastRollback.reason), /never answered/)
+})
+
+test('the hosted branch restores the snapshot of the profile it took', async (t) => {
+  const { base, profile } = fixture(t, 'restore')
+  const state = stateDir(base, 'restore')
+  const fake = fakeContext()
+  // A profile that the restart command breaks BEFORE the restart happens.
+  fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), 'rows:\n  - id: broken\n', 'utf8')
+  const runtime = createRuntime(fake.ctx, hostedConfig(state.file), {
+    env: { isDesktopApp: false, appExePath: null },
+    snapshot: (options) => takePreRestartSnapshot(options),
+    runCommand: async ({ command }) => {
+      // The restart command breaks the configuration on its way out.
+      fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), 'rows:\n  - id: broken\n', 'utf8')
+      return { ok: true, command, exitCode: 0, timedOut: false }
+    },
+    launchWatcher: () => ({ ok: true, method: 'test', error: null }),
+    probeInstance: async () => ({ ok: false, reason: 'the new instance never answered' }),
+  })
+  requestRestart(runtime.state, { reason: 'test', bySessionId: 'sess-restore' })
+  await runtime.executeRestart()
+
+  const restored = fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
+  assert.equal(
+    restored,
+    'rows:\n  - id: broken\n',
+    'the snapshot is put back (the content of the snapshot is what was broken here)',
+  )
+  const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-rollback.json'), 'utf8'))
+  assert.equal(report.rolledBack, true)
+  assert.ok(Array.isArray(report.restored) && report.restored.includes('cordis.patch.yml'))
+})
+
+test('the hosted branch does NOT roll back when the new instance answers', async (t) => {
+  const { profile, state, runtime, fake, commands, watchers, probes } = await runHostedRestart(t, {
+    label: 'healthy',
+    probeOutcome: { ok: true, reason: 'the new instance answered its health route' },
+  })
+
+  assert.equal(commands.length, 1, 'the restart command ran exactly once')
+  assert.equal(watchers.length, 1, 'the watcher was armed exactly once')
+  assert.equal(probes.length, 1, 'the new instance was confirmed once')
+  assert.equal(
+    fs.existsSync(path.join(state.dir, 'last-rollback.json')),
+    false,
+    'a healthy restart is NOT rolled back',
+  )
+  assert.equal(runtime.lastRollback, null)
+
+  const marker = JSON.parse(fs.readFileSync(path.join(state.dir, 'restart-outcome.json'), 'utf8'))
+  assert.equal(marker.decided, true, 'the watcher is told to stand down')
+  assert.equal(marker.ok, true)
+
+  assert.equal(
+    fake.logs.some((entry) => entry.level === 'error'),
+    false,
+    'a healthy restart logs no error',
+  )
+})
+
+test('a restart command that fails is reported and rolls the snapshot back', async (t) => {
+  const { state, fake, commands } = await runHostedRestart(t, {
+    label: 'bad-command',
+    commandOutcome: { ok: false, error: 'the restart command exited with code 3' },
+  })
+  assert.equal(commands.length, 1, 'the command ran exactly once')
+  const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-rollback.json'), 'utf8'))
+  assert.equal(report.ok, false)
+  assert.equal(report.rolledBack, true)
+  assert.match(String(report.reason), /exited with code 3/)
+  assert.ok(
+    fake.logs.some((entry) => entry.level === 'error' && entry.text.includes('restart command failed')),
+    'the failure is reported, never swallowed',
+  )
+})
+
+test('the hosted branch asks the new instance, not the old one', async (t) => {
+  const { probes, runtime } = await runHostedRestart(t, { label: 'new-instance' })
+  assert.equal(probes.length, 1)
+  assert.equal(
+    probes[0].expectedBootId,
+    runtime.bootId,
+    'the confirmation waits for an instance that is NOT the one that is being replaced',
+  )
+  assert.equal(probes[0].healthPath, '/__dsh_autorestart/health')
+  assert.ok(
+    String(probes[0].accessFile).endsWith(ACCESS_FILE_NAME),
+    'the confirmation reads the instance record (the port of the NEW instance)',
+  )
+})
+
+// ---------------------------------------------------------------------------
+// 3. THE ACCESS LINK: the user finds the working link after a restart.
+// ---------------------------------------------------------------------------
+
+test('the instance record carries the access link with the boot token', (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ar-access-'))
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }))
+
+  const written = writeAccessRecord({
+    stateDir: base,
+    bootId: 'boot-1',
+    pid: 4242,
+    port: 55537,
+    url: 'http://127.0.0.1:55537/?token=secret-token',
+    token: 'secret-token',
+  })
+  assert.equal(written.ok, true, String(written.error))
+  const file = path.join(base, ACCESS_FILE_NAME)
+  assert.ok(fs.existsSync(file))
+
+  const record = readAccessRecord(base)
+  assert.equal(record.ok, true)
+  assert.equal(record.record.url, 'http://127.0.0.1:55537/?token=secret-token')
+  assert.equal(record.record.token, 'secret-token')
+  assert.equal(record.record.bootId, 'boot-1')
+  assert.equal(record.record.port, 55537)
+
+  // The file holds a secret, so it is readable by its owner only.
+  if (process.platform !== 'win32') {
+    const mode = fs.statSync(file).mode & 0o777
+    assert.equal(mode, 0o600, `the instance record must be readable by its owner only (got ${mode.toString(8)})`)
+  }
+})
+
+test('the access link is signed by the connection service when there is one', () => {
+  const signed = resolveAccessUrl({
+    origin: 'http://127.0.0.1:55537',
+    connection: { authenticatedUrl: (base) => base + '/?token=abc' },
+  })
+  assert.equal(signed.url, 'http://127.0.0.1:55537/?token=abc')
+  assert.equal(signed.token, 'abc')
+
+  // Without a connection service the plain origin is still published.
+  const plain = resolveAccessUrl({ origin: 'http://127.0.0.1:55537/' })
+  assert.equal(plain.url, 'http://127.0.0.1:55537/')
+  assert.equal(plain.token, null)
+
+  // A connection service that throws must not cost the plain origin.
+  const broken = resolveAccessUrl({
+    origin: 'http://127.0.0.1:55537',
+    connection: {
+      authenticatedUrl: () => {
+        throw new Error('no token today')
+      },
+    },
+  })
+  assert.equal(broken.url, 'http://127.0.0.1:55537/')
+})
+
+test('the health confirmation waits for the NEW instance and probes ITS port', async () => {
+  const probed = []
+  const result = await waitForHealthyInstance({
+    accessFile: 'C:/state/access.json',
+    expectedBootId: 'boot-old',
+    healthPath: '/__dsh_autorestart/health',
+    timeoutMs: 1000,
+    intervalMs: 1,
+    now: (() => {
+      let tick = 0
+      return () => {
+        tick += 1
+        return tick * 100
+      }
+    })(),
+    sleep: async () => {},
+    readRecord: () => ({
+      ok: true,
+      record: { bootId: 'boot-new', port: 51234, url: 'http://127.0.0.1:51234/?token=t' },
+    }),
+    probe: async ({ url }) => {
+      probed.push(url)
+      return { ok: true, status: 200, error: null }
+    },
+  })
+  assert.equal(result.ok, true, String(result.reason))
+  assert.equal(result.port, 51234)
+  assert.deepEqual(probed, ['http://127.0.0.1:51234/__dsh_autorestart/health'])
+  assert.equal(
+    probed.some((url) => url.includes('51004')),
+    false,
+    'the port of the OLD instance is never probed',
+  )
+})
+
+test('the health confirmation ignores the instance that is being replaced', async () => {
+  const probed = []
+  let tick = 0
+  const result = await waitForHealthyInstance({
+    accessFile: 'C:/state/access.json',
+    expectedBootId: 'boot-old',
+    timeoutMs: 500,
+    intervalMs: 1,
+    now: () => {
+      tick += 1
+      return tick * 100
+    },
+    sleep: async () => {},
+    // The record still carries the boot id of the OLD instance.
+    readRecord: () => ({ ok: true, record: { bootId: 'boot-old', port: 51004 } }),
+    probe: async ({ url }) => {
+      probed.push(url)
+      return { ok: true, status: 200, error: null }
+    },
+  })
+  assert.equal(result.ok, false, 'the old instance is not a successful restart')
+  assert.deepEqual(probed, [], 'the old instance is never asked')
+  assert.match(String(result.reason), /still the one that is being replaced/)
+})
+
+test('the health URL of a port is built on the loopback interface', () => {
+  assert.equal(healthUrlForPort(55537, '/__dsh_autorestart/health'), 'http://127.0.0.1:55537/__dsh_autorestart/health')
+  assert.equal(healthUrlForPort(0, '/x'), '', 'an unknown port has no health URL')
+})
+
+test('a health route that does not answer is not a success', async () => {
+  const answer = await probeHealth({
+    url: 'http://127.0.0.1:1/__dsh_autorestart/health',
+    timeoutMs: 200,
+    requestImpl: async () => ({ ok: false, status: 500, error: 'the health route answered with status 500' }),
+  })
+  assert.equal(answer.ok, false)
+  assert.equal(answer.status, 500)
+})
+
+// ---------------------------------------------------------------------------
+// 4. THE ROLLBACK MISJUDGEMENT OF THE DESKTOP BRANCH.
+// ---------------------------------------------------------------------------
+
+test('the browser follows the access link of the instance that is really running', async () => {
+  const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  assert.ok(source.includes('resolveAccessRedirect'), 'the client knows the new access link')
+  // The rule is enforced in one pure helper, so it is checked here.
+  const module = await import('../client.js')
+  const resolve = module.resolveAccessRedirect || globalThis.__dshAutorestartClient?.resolveAccessRedirect
+  assert.equal(typeof resolve, 'function', 'the helper is exported')
+
+  const current = 'http://127.0.0.1:5601/?token=old-token'
+  assert.equal(
+    resolve(current, 'http://127.0.0.1:5601/?token=new-token'),
+    'http://127.0.0.1:5601/?token=new-token',
+    'the stale link is replaced by the new one',
+  )
+  assert.equal(resolve(current, current), null, 'the same link is not followed again')
+  assert.equal(resolve(current, 'http://127.0.0.1:5601/'), null, 'a link without a token is not followed')
+  assert.equal(resolve(current, 'http://127.0.0.1:9999/?token=new'), null, 'another port is never followed')
+  assert.equal(resolve(current, 'http://evil.example/?token=new'), null, 'another host is never followed')
+  assert.equal(resolve('http://127.0.0.1:5601/', 'http://127.0.0.1:5601/?token=new'), null,
+    'a page without a token is not reloaded for nothing')
+})
+
+// ---------------------------------------------------------------------------
+// 5. THE ROLLBACK HAPPENS ONCE — even when the plugin and the watcher both
+//    see the failure.
+// ---------------------------------------------------------------------------
+
+test('only ONE party may restore the snapshot', (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ar-lock-'))
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }))
+
+  const first = claimRollbackLock(base)
+  assert.equal(first.ok, true, 'the first claim wins')
+  assert.ok(fs.existsSync(first.path))
+
+  const second = claimRollbackLock(base)
+  assert.equal(second.ok, false, 'the second claim stands down')
+  assert.match(String(second.error), /already running/)
+
+  assert.equal(releaseRollbackLock(base), true)
+  const third = claimRollbackLock(base)
+  assert.equal(third.ok, true, 'the lock is released again')
+})
+
+test('a lock of a process that died does not block the rollback for ever', (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ar-stale-lock-'))
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }))
+
+  // A lock left behind by a process that was killed in the middle of its
+  // restore: it is more than ten minutes old.
+  const file = path.join(base, 'rollback.lock')
+  fs.writeFileSync(file, '4711', 'utf8')
+  const old = new Date(Date.now() - 30 * 60 * 1000)
+  fs.utimesSync(file, old, old)
+
+  const claim = claimRollbackLock(base)
+  assert.equal(claim.ok, true, 'the stale lock is taken over')
+  releaseRollbackLock(base)
+})
+
+test('the hosted branch stands down when the watcher is already restoring', async (t) => {
+  const { base, profile } = fixture(t, 'locked')
+  const state = stateDir(base, 'locked')
+  const fake = fakeContext()
+  // The detached watcher holds the lock: it is already restoring the snapshot.
+  const lock = claimRollbackLock(state.dir)
+  assert.equal(lock.ok, true)
+
+  const runtime = createRuntime(fake.ctx, hostedConfig(state.file), {
+    env: { isDesktopApp: false, appExePath: null },
+    snapshot: (options) => takePreRestartSnapshot(options),
+    runCommand: async ({ command }) => ({ ok: true, command, exitCode: 0, timedOut: false }),
+    launchWatcher: () => ({ ok: true, method: 'test', error: null }),
+    probeInstance: async () => ({ ok: false, reason: 'the new instance never answered' }),
+  })
+  requestRestart(runtime.state, { reason: 'test', bySessionId: 'sess-locked' })
+  await runtime.executeRestart()
+
+  // The profile was NOT touched a second time by the plugin.
+  assert.equal(
+    fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'),
+    'rows:\n  - id: demo\n',
+    'the profile is not restored twice',
+  )
+  assert.ok(
+    fake.logs.some((entry) => entry.level === 'warn' && entry.text.includes('another rollback is already running')),
+    'the plugin says that it stood down',
+  )
+  releaseRollbackLock(state.dir)
+})
+
+test('a marker of an EARLIER decision does not stop the new watcher', async (t) => {
+  const { base } = fixture(t, 'stale-marker')
+  const state = stateDir(base, 'stale-marker')
+  const fake = fakeContext()
+  // The marker of a previous restart is still in the state directory.
+  fs.writeFileSync(
+    path.join(state.dir, 'restart-outcome.json'),
+    JSON.stringify({ decided: true, ok: false, reason: 'the previous restart failed' }),
+    'utf8',
+  )
+
+  const watchers = []
+  const runtime = createRuntime(fake.ctx, hostedConfig(state.file), {
+    env: { isDesktopApp: false, appExePath: null },
+    snapshot: (options) => takePreRestartSnapshot(options),
+    runCommand: async ({ command }) => ({ ok: true, command, exitCode: 0, timedOut: false }),
+    launchWatcher: (options) => {
+      watchers.push(options)
+      return { ok: true, method: 'test', error: null }
+    },
+    probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
+  })
+  requestRestart(runtime.state, { reason: 'test', bySessionId: 'sess-stale' })
+  await runtime.executeRestart()
+
+  assert.equal(watchers.length, 1, 'the watcher of THIS restart was armed')
+  const marker = JSON.parse(fs.readFileSync(path.join(state.dir, 'restart-outcome.json'), 'utf8'))
+  assert.equal(marker.ok, true, 'the marker is the decision of THIS restart')
+  assert.notEqual(marker.reason, 'the previous restart failed')
+})
+
+// ---------------------------------------------------------------------------
+// 6. THE WATCHER IS STARTED OUTSIDE THE HOST.
+// ---------------------------------------------------------------------------
+
+test('the rollback watcher is started as a process of its own', () => {
+  const command = buildWatcherCommandLine('C:/state/restart-3-watch.ps1')
+  assert.ok(command.includes('powershell.exe'))
+  assert.ok(command.includes('-File "C:/state/restart-3-watch.ps1"'))
+  assert.ok(command.includes('-WindowStyle Hidden'), 'the watcher runs without a window')
+  assert.equal(buildWatcherCommandLine(''), '', 'without a script there is no command')
+
+  const planned = launchDetachedWatcher({
+    watchScriptPath: 'C:/state/restart-3-watch.ps1',
+    dryRun: true,
+  })
+  assert.equal(planned.ok, true)
+  assert.equal(planned.dryRun, true)
+  assert.ok(planned.command.includes('restart-3-watch.ps1'))
+
+  const missing = launchDetachedWatcher({ dryRun: true })
+  assert.equal(missing.ok, false, 'without a watcher there is nothing to start')
+  assert.match(String(missing.error), /watcher command/)
+})
+
+test('the watcher is started detached on POSIX, so it survives the host', () => {
+  let spawned = null
+  const result = launchDetachedWatcher({
+    watchScriptPath: '/state/restart-3-watch.ps1',
+    platform: 'linux',
+    spawnFn: (command, options) => {
+      spawned = { command, options }
+      return { pid: 777, on: () => {}, unref: () => {} }
+    },
+  })
+  assert.equal(result.ok, true, String(result.error))
+  assert.equal(result.method, 'spawn')
+  assert.equal(spawned.options.detached, true, 'the watcher is its own session leader')
+  assert.equal(spawned.options.stdio, 'ignore')
+})
+

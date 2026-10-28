@@ -61,8 +61,18 @@
         # Keep at most this many snapshots; older ones are deleted automatically.
         maxBackups: 2
         # How long the detached watcher waits for the relaunched host (ms) before
-        # it restores the snapshot and launches the host again.
+        # it restores the snapshot. The watcher NEVER launches a second copy of
+        # the host: it restores the files and writes the report.
         rollbackTimeoutMs: 90000
+        # How long the restart command may run (ms) before the plugin stops
+        # waiting for it. A command that starts the host in the foreground never
+        # returns — that is not a failure, but it is reported as "still running"
+        # instead of "restarted".
+        restartCommandTimeoutMs: 30000
+        # How long ONE restore step may take (ms): the configuration files, then
+        # the installed plugin tree. A restore that does not finish in time is
+        # given up and the reason is written into the rollback report.
+        rollbackCopyTimeoutMs: 120000
         # 收工关机：Show the graceful-shutdown button at the foot of the left
         # sidebar, next to the Settings row (root scope: it is there even when
         # no conversation is open).

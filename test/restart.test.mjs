@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   DEFAULT_IMAGE_NAME,
   DEFAULT_RELAUNCH_DELAY_SECONDS,
+  DEFAULT_ROLLBACK_COPY_TIMEOUT_MS,
   DEFAULT_ROLLBACK_TIMEOUT_MS,
   DEFAULT_TASK_NAME,
   buildCustomCommand,
@@ -171,15 +172,17 @@ test('scheduleDetachedRestart dry-run honours task name and delay', () => {
   assert.equal(result.command.includes('ping -n 3 127.0.0.1'), true);
 });
 
-test('runCommandNow dry-run reports the command without spawning', () => {
+test('runCommandNow dry-run reports the command without spawning', async () => {
   const command = buildRestartCommand({ appExePath: APP_EXE });
-  const result = runCommandNow({ command, dryRun: true });
+  const result = await runCommandNow({ command, dryRun: true });
   assert.equal(result.ok, true);
   assert.equal(result.dryRun, true);
   assert.equal(result.command, command);
   assert.equal(result.pid, null);
+  assert.equal(result.exitCode, null);
+  assert.equal(result.timedOut, false);
 
-  const missing = runCommandNow({ dryRun: true });
+  const missing = await runCommandNow({ dryRun: true });
   assert.equal(missing.ok, false);
   assert.equal(typeof missing.error, 'string');
 });
@@ -265,32 +268,70 @@ test('scheduleDetachedRestart gate dry-run plans the helper script without writi
 // its health route, and puts the pre-restart snapshot back when it never does.
 // ---------------------------------------------------------------------------
 
-test('buildWatchScript polls the health route, rolls the snapshot back and relaunches', () => {
+test('buildWatchScript waits for the NEW instance, rolls the snapshot back and starts nothing', () => {
   const script = buildWatchScript({
     healthUrl: 'http://127.0.0.1:51004/__dsh_autorestart/health',
+    healthPath: '/__dsh_autorestart/health',
+    portFile: 'C:/state/access.json',
+    expectedBootId: 'boot-old',
+    outcomeFile: 'C:/state/restart-outcome.json',
     backupDir: 'C:/state/backups/2026-10-25T12-00-00-000Z',
     profileDir: 'C:/Users/x/.dsh/profiles/desktop',
     reportPath: 'C:/state/last-rollback.json',
     appExePath: APP_EXE,
     timeoutMs: 90000,
+    rollbackTimeoutMs: 120000,
+    since: '2026-10-25T12:00:00.000Z',
+    selfCleanPaths: ['C:/state/restart-3-watch.ps1', 'C:/state/restart-3.cmd'],
   });
 
   assert.equal(script.includes('\r\n'), true, 'the watcher uses CRLF lines');
   assert.ok(script.includes('Invoke-RestMethod'), 'it polls the health route');
   assert.ok(script.includes('AddMilliseconds(90000)'), 'it honours the configured timeout');
-  assert.ok(script.includes('robocopy $configBackup $profile /E'), 'it restores the configuration files');
+
+  // THE PORT OF THE NEW INSTANCE, not the port of the old one: the desktop app
+  // listens on a random port, so the old one is worthless.
+  assert.ok(script.includes("'C:/state/access.json'"), 'it reads the instance record');
+  assert.ok(script.includes("'boot-old'"), 'it knows the boot id of the instance it replaces');
   assert.ok(
-    script.includes("robocopy $pluginsBackup (Join-Path $profile 'node_modules') /MIR"),
-    'it restores the plugin tree',
+    script.includes("'http://127.0.0.1:' + $record.port + $healthPath"),
+    'the health URL is built from the port the NEW instance published',
   );
+  assert.ok(script.includes('$record.bootId -ne $expected'), 'it waits for a DIFFERENT instance');
+
+  // The restore is bounded: a robocopy that hangs is given up.
+  assert.ok(script.includes('robocopy $src $dst /E'), 'it restores the configuration files');
+  assert.ok(script.includes('robocopy $src $dst /MIR'), 'it restores the plugin tree');
+  assert.ok(script.includes('Wait-Job $job -Timeout 120'), 'the restore has a time limit');
+  assert.ok(script.includes('Stop-Job $job'), 'a restore that hangs is stopped');
+  assert.ok(script.includes('rollbackError'), 'the reason is written into the report');
+
   assert.ok(script.includes('last-rollback.json'), 'it writes the report where the plugin reads it');
   assert.ok(
     script.includes('UTF8Encoding($false)'),
     'the report must be written without a BOM (the plugin parses it with JSON.parse)',
   );
-  assert.ok(script.includes('Start-Process -FilePath $exe'), 'it launches the host again');
   assert.ok(script.includes('[datetime]'), 'the crash log is filtered to this restart');
+
+  // NO SECOND COPY OF THE HOST. The old behaviour launched a second app next
+  // to the one that was already starting up.
+  assert.equal(
+    script.includes('Start-Process'),
+    false,
+    'the rollback branch must not start a second copy of the host',
+  );
+  assert.ok(script.includes('appStarted = $false'), 'the report says that nothing was started');
+
+  // The watcher cleans up after itself.
+  assert.ok(script.includes('Remove-Item -LiteralPath $p -Force'), 'it removes its helper files');
+  assert.ok(script.includes("'C:/state/restart-3-watch.ps1'"), 'the watcher script is cleaned up');
+  assert.ok(script.includes("'C:/state/restart-3.cmd'"), 'the gate script is cleaned up');
+
+  // The marker of a decision the plugin made itself.
+  assert.ok(script.includes('$marker.decided -eq $true'), 'it stands down when the plugin decided');
+
   assert.equal(DEFAULT_ROLLBACK_TIMEOUT_MS, 90000);
+  assert.equal(DEFAULT_ROLLBACK_COPY_TIMEOUT_MS, 120000);
 });
 
 test('the gated helper runs the watcher only after the relaunch', () => {

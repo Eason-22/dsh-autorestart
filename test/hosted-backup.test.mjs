@@ -125,6 +125,8 @@ test('the hosted mode snapshots the profile before the restart command runs', as
       commands.push(command)
       return { ok: true, command, pid: null }
     },
+    // The new instance is confirmed without waiting for a real health route.
+    probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(runtime)
 
@@ -165,6 +167,8 @@ test('the hosted mode takes no snapshot when backupOnRestart is false', async (t
       commands.push(command)
       return { ok: true, command, pid: null }
     },
+    // The new instance is confirmed without waiting for a real health route.
+    probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(runtime)
 
@@ -195,6 +199,8 @@ test('the desktop app and the hosted command share ONE pre-restart snapshot entr
       hostedCommands.push(command)
       return { ok: true, command, pid: null }
     },
+    // The new instance is confirmed without waiting for a real health route.
+    probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(hostedRuntime)
   await hostedRuntime.executeRestart()
@@ -258,6 +264,8 @@ test('a failed snapshot does not block the restart command', async (t) => {
       commands.push(command)
       return { ok: true, command, pid: null }
     },
+    // The new instance is confirmed without waiting for a real health route.
+    probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(runtime)
 

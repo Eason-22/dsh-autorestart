@@ -64,7 +64,7 @@ what it adds before you install it.
 | System prompt | One "Restart policy" section that tells the agent how to ask for a restart and what the plugin will do |
 | Harness hooks | `agent/status` (tracks which conversations are busy), `tools/pre-execute` (blocks a shell command that would kill or relaunch DSH by hand), and the boot pass that resumes interrupted sessions |
 | Profile row | One bundle row, `dsh-autorestart` |
-| Writes | Only under `<DSH_HOME>/storages/dsh-autorestart/` — `state.json` (checkpoint), `backups/` (pre-restart snapshots), `restart-<gen>.cmd` / `restart-<gen>-watch.ps1` (the detached helper), `last-rollback.json` (rollback report). The only time it writes into the profile itself is a rollback, which copies that snapshot's `cordis.patch.yml`, `package.json`, `pnpm-lock.yaml` and `node_modules` back |
+| Writes | Only under `<DSH_HOME>/storages/dsh-autorestart/` — `state.json` (checkpoint), `backups/` (pre-restart snapshots), `restart-<gen>.cmd` / `restart-<gen>-watch.ps1` (the detached helper), `last-rollback.json` (rollback report), `restart-outcome.json` (the decision of a restart the plugin judged itself), `access.json` (the access link of the running instance, mode `0600`). The only time it writes into the profile itself is a rollback, which copies that snapshot's `cordis.patch.yml`, `package.json`, `pnpm-lock.yaml` and `node_modules` back |
 
 ## Why
 
@@ -198,7 +198,9 @@ show up in the Plugin Manager and in the config editor.
 | `backupOnRestart` | `true` | Snapshot the profile before every restart, so a restart that leaves the host unable to boot can be rolled back. |
 | `backupIncludePlugins` | `true` | Include the installed plugin tree in that snapshot (about 117 MB here, ~3 s). `false` keeps only the configuration files. |
 | `maxBackups` | `2` | How many snapshots are kept; older ones are deleted when a new one is written. |
-| `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the relaunched host before it restores the snapshot and launches the host again. |
+| `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the new host before it restores the snapshot. |
+| `restartCommandTimeoutMs` | `30000` | How long the restart command may run before the plugin stops waiting for it. A command that starts the host in the foreground never returns — that is reported as "still running", not as a failure. |
+| `rollbackCopyTimeoutMs` | `120000` | How long ONE restore step (the configuration files, then the plugin tree) may take. A restore that does not finish in time is given up and the reason is written into the rollback report. |
 | `showSleepButton` | `true` | Whether the moon button of the graceful shutdown is shown at the foot of the left sidebar, next to Settings. |
 | `sleepCommand` | `''` | A custom shutdown command for the graceful shutdown. Empty = the host is detected automatically; a value replaces the detected command (`cmd.exe /c …` on Windows, `/bin/sh -c …` everywhere else). |
 
@@ -350,23 +352,43 @@ it was started from, so a restart that leaves the host unable to boot can be und
   like this one the full snapshot measures about 117 MB and takes under three seconds.
 - **How many are kept:** the newest `maxBackups` snapshots (default `2`); older ones are deleted when
   a new one is written.
-- **How a failed boot is detected:** the detached helper that kills and relaunches the host also runs
-  a small PowerShell watcher. It polls the health route for `rollbackTimeoutMs` (default `90000`). A
-  healthy answer ends the watch and nothing is touched.
+- **How a failed boot is detected:** a small watcher runs **outside** the host process (so it survives
+  the host being killed). It waits for the **new** instance and probes **its** health route for
+  `rollbackTimeoutMs` (default `90000`). The new instance publishes its own port and its own boot id
+  in `<storage>/dsh-autorestart/access.json`, so the watcher never mistakes the old instance (or the
+  old port) for the new one. A healthy answer ends the watch and nothing is touched.
 - **What happens when the host never answers:** the watcher copies the snapshot back over the profile
-  (configuration files, and the plugin tree when the snapshot holds one), writes
+  (configuration files, and the plugin tree when the snapshot holds one) and writes
   `last-rollback.json` next to the checkpoint — including the tail of the newest crash log written
-  *after* this restart — and launches the host again with the restored configuration.
+  *after* this restart and the reason the restore failed, if it did. It does **not** start a second
+  copy of the host: the instance that was launched is left alone, so there is never a second window
+  or a second web server.
+- **The hosted mode has the same safety net.** With `restartMode: command` the restart command
+  usually kills the very process the plugin runs in, so the plugin cannot confirm anything itself.
+  The watcher is therefore started **before** the command runs, and it is the one that decides
+  whether the new instance came up.
+- **The command is judged, not assumed.** A restart command that cannot be started, or that exits
+  with an error, is reported as a failure (with its exit code and output) and the snapshot is
+  restored — it is never reported as a successful restart.
 - **How you learn about it:** the next boot reports it. `continuum_status` gains a `lastRollback`
-  object (`at`, `waitedMs`, `rolledBack`, `backupDir`, `crashLog`, `crashTail`), and the next restart
-  clears the report so it is never mistaken for a fresh one.
+  object (`at`, `waitedMs`, `rolledBack`, `reason`, `backupDir`, `crashLog`, `crashTail`), and the
+  next restart clears the report so it is never mistaken for a fresh one.
 - **Turning it off:** `backupOnRestart: false` skips the snapshot entirely (no rollback point, and no
   watcher), which is what a user who keeps their own backups may prefer. `backupIncludePlugins:
   false` keeps the snapshot but limits it to the configuration files.
 
 The rollback is deliberately conservative: it only runs when the relaunched host never answers its
 own health route. A slow start inside `rollbackTimeoutMs` is never treated as a failure, and a
-healthy host is never touched.
+healthy host is never touched. The restore itself is bounded as well: every copy step gives up after
+`rollbackCopyTimeoutMs` (default `120000`) and says so in the report.
+
+### The access link after a restart
+
+The boot token of `dsh web` is created **per process**, so the link the browser holds answers `401`
+after a restart — the user would be locked out of their own interface. The plugin therefore writes
+the access link of the running instance into `<storage>/dsh-autorestart/access.json` (mode `0600`:
+the file holds a secret), and reports it in `continuum_status` and in the log. The browser half
+follows that link when the one it holds is stale, so the session comes back on its own.
 
 ### The one-time install question
 

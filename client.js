@@ -1106,6 +1106,47 @@ function cancelFailureText(body, t) {
 }
 
 /**
+ * The URL the browser has to move to after a restart, or null.
+ *
+ * THE LOCKOUT. The boot token of `dsh web` is created PER PROCESS, so the
+ * link the browser holds answers 401 after a restart: the user sits in front
+ * of a page that cannot talk to its own host. The Host publishes the access
+ * link of the instance that is really running, so the browser can follow it —
+ * that is the way back in.
+ *
+ * The rules (ALL of them must hold, or nothing happens at all):
+ *   - the access link carries a token;
+ *   - the current URL carries a token too — a URL without one is an ordinary
+ *     session, and following the link would reload the page for nothing;
+ *   - the two tokens differ (otherwise there is nothing to follow);
+ *   - the origin and the path are the same: the plugin never sends the
+ *     browser to another host or to another page.
+ *
+ * @param {string} currentUrl the URL the browser is on
+ * @param {string} accessUrl the access link the Host published
+ * @returns {string|null} the URL to move to, or null
+ */
+function resolveAccessRedirect(currentUrl, accessUrl) {
+  const from = typeof currentUrl === 'string' ? currentUrl : ''
+  const to = typeof accessUrl === 'string' ? accessUrl : ''
+  if (from === '' || to === '') return null
+  let current
+  let next
+  try {
+    current = new URL(from)
+    next = new URL(to, from)
+  } catch {
+    return null
+  }
+  if (next.origin !== current.origin) return null
+  if (next.pathname !== current.pathname) return null
+  const currentToken = current.searchParams.get('token')
+  const nextToken = next.searchParams.get('token')
+  if (!currentToken || !nextToken || currentToken === nextToken) return null
+  return next.toString()
+}
+
+/**
  * The named exports of this module.
  *
  * The client module system materializes `factory(require) -> exports`, so
@@ -1125,6 +1166,7 @@ const SLEEP_EXPORTS = {
   groupBlockers,
   summarizeBlockers,
   truncateBlockerName,
+  resolveAccessRedirect,
   // The two dictionaries, so a test can build a translator without a Host.
   dictionaries: { zh: ZH, en: EN },
 }
@@ -1216,6 +1258,26 @@ if (moduleLoader) moduleLoader.load({
       })
     }
 
+    /**
+     * Follow the access link the Host published, when the one the browser
+     * holds is stale.
+     *
+     * After a restart the boot token of the old link is dead, so the browser
+     * would sit on a page that cannot talk to its host. The Host reports the
+     * access link of the instance that is really running; when it differs,
+     * the browser moves there.
+     */
+    function followAccessUrl(body) {
+      if (typeof window === 'undefined' || !window.location) return
+      const target = resolveAccessRedirect(window.location.href, body && body.accessUrl)
+      if (!target) return
+      try {
+        window.location.replace(target)
+      } catch {
+        // A browser that refuses the navigation must not break the poll.
+      }
+    }
+
     async function pollOnce() {
       if (stateStore.inFlight) return
       stateStore.inFlight = true
@@ -1228,6 +1290,11 @@ if (moduleLoader) moduleLoader.load({
         const body = await response.json()
         if (!body || typeof body !== 'object') return
         stateStore.info = body
+        // The boot token is created per process: after a restart the link the
+        // browser holds answers 401. The Host publishes the access link of
+        // the instance that is really running — following it is the way back
+        // into the interface.
+        followAccessUrl(body)
         if (body.pendingRestart === true) {
           if (stateStore.pendingSince === null) stateStore.pendingSince = Date.now()
         } else {

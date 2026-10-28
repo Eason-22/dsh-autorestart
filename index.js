@@ -63,18 +63,33 @@ import {
 } from './lib/lifecycle.js'
 import {
   backupsRoot,
+  claimRollbackLock,
   clearRollbackReport,
   createBackup,
   readRollbackReport,
+  releaseRollbackLock,
+  restoreBackup,
+  ROLLBACK_LOCK_NAME,
   ROLLBACK_REPORT_NAME,
 } from './lib/backup.js'
 import {
+  accessFilePath,
+  readAccessRecord,
+  resolveAccessUrl,
+  writeAccessRecord,
+} from './lib/access.js'
+import { waitForHealthyInstance } from './lib/health.js'
+import {
   buildCustomCommand,
   buildWatchScript,
+  DEFAULT_COMMAND_TIMEOUT_MS,
+  DEFAULT_ROLLBACK_COPY_TIMEOUT_MS,
   DEFAULT_ROLLBACK_TIMEOUT_MS,
   detectEnvironment,
+  launchDetachedWatcher,
   runCommandNow,
   scheduleDetachedRestart,
+  writeTextFileAtomic,
 } from './lib/restart.js'
 import { compareSemver } from './lib/semver.js'
 import { isWorkSessionEvent } from './lib/activity.js'
@@ -125,6 +140,114 @@ const DEFAULT_RESTART_GRACE_MS = 0
  * the wait is still going on.
  */
 const LONG_WAIT_LOG_INTERVAL_MS = 60000
+
+/**
+ * The marker the plugin writes when it has decided the restart ITSELF.
+ *
+ * The rollback watcher is the fallback for the case that the plugin dies
+ * with the host (a hosted restart kills the very process the plugin runs in).
+ * When the plugin survives the restart command, it decides alone — and writes
+ * this marker, so the watcher stands down instead of rolling back a restart
+ * that was fine.
+ */
+const RESTART_OUTCOME_FILE = 'restart-outcome.json'
+
+/**
+ * The name of the rollback report of a restart that the plugin decided itself.
+ *
+ * It is the same file the detached watcher writes (`last-rollback.json`), so
+ * the interface shows the rollback either way.
+ */
+const RESTART_REPORT_NAME = ROLLBACK_REPORT_NAME
+
+/**
+ * Resolve the connection service of the host, when it provides one.
+ *
+ * The connection service signs the access URL of the running host (the boot
+ * token). It is optional: a host without it still gets the plain origin.
+ *
+ * @param {any} ctx
+ * @returns {any|null}
+ */
+function resolveConnectionService(ctx) {
+  try {
+    if (ctx && ctx.connection && typeof ctx.connection.authenticatedUrl === 'function') return ctx.connection
+  } catch {}
+  try {
+    if (ctx && typeof ctx.get === 'function') {
+      const service = ctx.get('connection')
+      if (service && typeof service.authenticatedUrl === 'function') return service
+    }
+  } catch {}
+  return null
+}
+
+/**
+ * The access link of the running instance, or null.
+ *
+ * @param {any} runtime
+ * @returns {string|null}
+ */
+function accessUrlOf(runtime) {
+  try {
+    const record = runtime.accessRecord
+    if (record && typeof record.url === 'string' && record.url !== '') return record.url
+  } catch {}
+  return null
+}
+
+/**
+ * Publish the instance record of the running host.
+ *
+ * The record carries three things that nobody else knows:
+ *
+ *   - the PORT this instance listens on (the desktop app uses a random one,
+ *     so the port of the previous instance is worthless);
+ *   - the BOOT ID of this instance, so a watcher can tell "the new instance"
+ *     from "the old one";
+ *   - the ACCESS LINK with the boot token, so the user finds the working link
+ *     after a restart instead of being locked out by a 401.
+ *
+ * The file is written with the mode 0600: it holds a secret.
+ *
+ * @param {any} ctx the plugin context
+ * @param {any} runtime the runtime of this plugin
+ * @param {object} config the normalized config
+ * @param {string} origin the origin of the web server (`protocol//host:port`)
+ * @returns {{ ok: boolean, path: string|null, url: string|null, error: string|null }}
+ */
+function publishInstanceRecord(ctx, runtime, config, origin) {
+  const stateDir = path.dirname(runtime.stateFile)
+  try {
+    const { url, token } = resolveAccessUrl({
+      origin,
+      connection: resolveConnectionService(ctx),
+    })
+    const written = writeAccessRecord({
+      stateDir,
+      bootId: runtime.bootId,
+      pid: process.pid,
+      port: runtime.webPort,
+      url,
+      token,
+    })
+    if (!written.ok) {
+      runtime.log.warn('could not publish the instance record:', written.error)
+      return { ok: false, path: written.path, url, error: written.error }
+    }
+    runtime.log.info('the instance record was published', {
+      path: written.path,
+      port: runtime.webPort,
+      // The token itself is a secret: the record carries it, the log only
+      // says that there is one.
+      hasToken: Boolean(token),
+    })
+    return { ok: true, path: written.path, url, error: null }
+  } catch (error) {
+    runtime.log.warn('could not publish the instance record:', String(error))
+    return { ok: false, path: null, url: null, error: String(error) }
+  }
+}
 
 /**
  * Snap a reserve value onto the nearest offered choice.
@@ -501,6 +624,10 @@ const DEFAULTS = {
   backupIncludePlugins: true,
   maxBackups: 2,
   rollbackTimeoutMs: 90000,
+  // How long the restart command may run before the plugin stops waiting for
+  // it, and how long ONE restore step may take before the watcher gives up.
+  restartCommandTimeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
+  rollbackCopyTimeoutMs: DEFAULT_ROLLBACK_COPY_TIMEOUT_MS,
   // Graceful shutdown ("收工关机"): the button at the foot of the left sidebar,
   // the countdown before the machine is switched off and the optional custom
   // shutdown command (empty = the host is detected automatically).
@@ -531,6 +658,15 @@ function normalizeConfig(raw) {
   const rollbackTimeout = Number(config.rollbackTimeoutMs)
   config.rollbackTimeoutMs =
     Number.isFinite(rollbackTimeout) && rollbackTimeout >= 1000 ? Math.trunc(rollbackTimeout) : 90000
+  // How long the restart command may run, and how long ONE restore step may
+  // take. Both are bounded, so neither a hung command nor a hung `robocopy`
+  // can hold the restart for ever.
+  const commandTimeout = Number(config.restartCommandTimeoutMs)
+  config.restartCommandTimeoutMs =
+    Number.isFinite(commandTimeout) && commandTimeout >= 1000 ? Math.trunc(commandTimeout) : DEFAULT_COMMAND_TIMEOUT_MS
+  const copyTimeout = Number(config.rollbackCopyTimeoutMs)
+  config.rollbackCopyTimeoutMs =
+    Number.isFinite(copyTimeout) && copyTimeout >= 1000 ? Math.trunc(copyTimeout) : DEFAULT_ROLLBACK_COPY_TIMEOUT_MS
   // The countdown of the graceful shutdown is one of the offered choices: a
   // profile that still carries an old value (15, 45, …) is snapped onto the
   // nearest one instead of breaking, and 0 means "no countdown at all".
@@ -1215,7 +1351,9 @@ function findOwnEntry(editor) {
  *   snapshot?: Function,
  *   runCommand?: Function,
  *   scheduleDetached?: Function,
- * }} [options] `env` replaces parts of the detected environment and the three
+ *   launchWatcher?: Function,
+ *   probeInstance?: Function,
+ * }} [options] `env` replaces parts of the detected environment and the
  *   functions replace the side-effecting primitives of the restart path. They
  *   exist so a restart can be exercised without spawning a process or touching
  *   the real profile; production never passes them.
@@ -1232,6 +1370,16 @@ export function createRuntime(ctx, config, options = {}) {
   const scheduleDetachedFn = typeof options.scheduleDetached === 'function'
     ? options.scheduleDetached
     : scheduleDetachedRestart
+  // The rollback watcher is started OUTSIDE the host process, so it survives the
+  // death of the host — which is what a hosted restart does.
+  const launchWatcherFn = typeof options.launchWatcher === 'function'
+    ? options.launchWatcher
+    : launchDetachedWatcher
+  // The health confirmation of the new instance (in-process; the detached
+  // watcher has its own, outside the host).
+  const probeInstanceFn = typeof options.probeInstance === 'function'
+    ? options.probeInstance
+    : waitForHealthyInstance
   const stateFile = resolveStateFile(config)
 
   const loaded = readState(stateFile, Date.now())
@@ -1244,6 +1392,20 @@ export function createRuntime(ctx, config, options = {}) {
   const boot = beginBoot(state, { pid: process.pid, now: Date.now() })
   state = boot.state
   const bootId = state.bootId
+
+  // THE INSTANCE RECORD exists from the first moment of this boot: it carries
+  // the boot id (which tells the rollback watcher that this instance is the
+  // one being replaced). As soon as the web server is known, the record is
+  // written again — with the port of this instance and its access link.
+  try {
+    writeAccessRecord({
+      stateDir: path.dirname(stateFile),
+      bootId,
+      pid: process.pid,
+    })
+  } catch (error) {
+    log.warn('could not write the instance record:', String(error))
+  }
 
   let pollTimer
   let recoverTimer
@@ -2197,6 +2359,187 @@ const titleOfSummary = (item) => {
     return 'http://127.0.0.1:' + port + resolveHealthPath(config)
   }
 
+  /**
+   * The state directory of this plugin (the checkpoint, the backups, the
+   * instance record and the helper scripts live next to each other).
+   */
+  const stateDirOf = () => path.dirname(stateFile)
+
+  /**
+   * Write the marker that tells the rollback watcher "the plugin has decided
+   * on its own — stand down".
+   *
+   * The watcher is the fallback for the case that the plugin dies with the
+   * host. When the plugin SURVIVES the restart command it decides alone, and
+   * this marker keeps the watcher from rolling back a restart that was fine.
+   *
+   * @param {{ decided: boolean, ok?: boolean, reason?: string }} outcome
+   * @returns {boolean} whether the marker was written
+   */
+  const writeRestartOutcome = (outcome) => {
+    const file = path.join(stateDirOf(), RESTART_OUTCOME_FILE)
+    try {
+      fs.writeFileSync(file, JSON.stringify({
+        decided: true,
+        ok: outcome && outcome.ok === true,
+        reason: outcome && typeof outcome.reason === 'string' ? outcome.reason : '',
+        at: new Date().toISOString(),
+        bootId,
+      }, null, 2), 'utf8')
+      return true
+    } catch (error) {
+      log.warn('could not write the restart outcome marker:', String(error))
+      return false
+    }
+  }
+
+  /**
+   * Write the rollback report of a restart that FAILED, so the interface can
+   * say what happened.
+   *
+   * The report has the same shape as the one the detached watcher writes, so
+   * there is exactly ONE place that reads it.
+   *
+   * @param {{ rolledBack: boolean, reason: string, backupDir?: string|null, restored?: string[] }} details
+   * @returns {boolean} whether the report was written
+   */
+  const writeRestartReport = (details) => {
+    const file = path.join(stateDirOf(), RESTART_REPORT_NAME)
+    try {
+      fs.writeFileSync(file, JSON.stringify({
+        ok: false,
+        at: new Date().toISOString(),
+        waitedMs: 0,
+        rolledBack: details.rolledBack === true,
+        rollbackError: details.rolledBack === true ? null : details.reason,
+        reason: details.reason,
+        backupDir: details.backupDir ?? null,
+        restored: Array.isArray(details.restored) ? details.restored : [],
+        // The plugin restores the files; it never starts a second host.
+        appStarted: false,
+      }, null, 2), 'utf8')
+      return true
+    } catch (error) {
+      log.warn('could not write the rollback report:', String(error))
+      return false
+    }
+  }
+
+  /**
+   * Put the pre-restart snapshot back over the live profile.
+   *
+   * This is the in-process half of the rollback: it runs when the plugin
+   * itself can see that the restart failed (the restart command did not
+   * start, or the new instance never answered). The detached watcher does
+   * the same thing when the plugin died with the host.
+   *
+   * @param {{ backup: any, profileDir: string|null, reason: string }} details
+   * @returns {{ rolledBack: boolean, restored: string[], error: string|null }}
+   */
+  const rollbackInProcess = ({ backup, profileDir, reason }) => {
+    const restored = []
+    if (!backup || backup.ok !== true || typeof backup.dir !== 'string' || backup.dir === '') {
+      log.error('the restart failed and there is no snapshot to roll back to:', reason)
+      writeRestartReport({ rolledBack: false, reason, backupDir: null, restored })
+      return { rolledBack: false, restored, error: 'no snapshot to roll back to' }
+    }
+    if (typeof profileDir !== 'string' || profileDir === '') {
+      log.error('the restart failed and the profile directory is unknown:', reason)
+      writeRestartReport({ rolledBack: false, reason, backupDir: backup.dir, restored })
+      return { rolledBack: false, restored, error: 'the profile directory is unknown' }
+    }
+    // THE LOCK: the detached watcher may be restoring the snapshot at the same
+    // time. Exactly ONE of them copies the files — two copies at once would
+    // write the same files (117 MB of plugin tree) at the same time.
+    const lock = claimRollbackLock(stateDirOf())
+    if (!lock.ok) {
+      log.warn('another rollback is already running; this one stands down:', lock.error)
+      return { rolledBack: false, restored, error: lock.error }
+    }
+    let result = null
+    try {
+      result = restoreBackup({ backupDir: backup.dir, profileDir })
+    } catch (error) {
+      result = { ok: false, restored: [], error: String(error) }
+    } finally {
+      releaseRollbackLock(stateDirOf())
+    }
+    if (result && result.ok === true) {
+      log.warn('the pre-restart snapshot was restored:', {
+        reason,
+        restored: result.restored,
+        backupDir: backup.dir,
+      })
+      writeRestartReport({ rolledBack: true, reason, backupDir: backup.dir, restored: result.restored })
+      return { rolledBack: true, restored: result.restored, error: null }
+    }
+    const error = (result && result.error) || 'the restore failed'
+    log.error('the pre-restart snapshot could not be restored:', reason, error)
+    writeRestartReport({ rolledBack: false, reason, backupDir: backup.dir, restored })
+    return { rolledBack: false, restored, error }
+  }
+
+  /**
+   * Arm the rollback watcher: the process that confirms the new instance and
+   * puts the snapshot back when it never comes.
+   *
+   * The watcher is started OUTSIDE the host process, because the restart
+   * command usually kills the host itself — in that case the plugin cannot
+   * confirm anything any more, and the watcher is the only safety net left.
+   *
+   * @param {{ backup: any, profileDir: string|null, gateScriptPath?: string|null }} details
+   * @returns {{ ok: boolean, method: string, error: string|null, scriptPath: string|null }}
+   */
+  const armRollbackWatcher = ({ backup, profileDir, gateScriptPath = null }) => {
+    if (!backup || backup.ok !== true || typeof backup.dir !== 'string' || backup.dir === '') {
+      log.warn('no pre-restart snapshot: the automatic rollback is not armed')
+      return { ok: false, method: 'none', error: 'no snapshot', scriptPath: null }
+    }
+    if (typeof profileDir !== 'string' || profileDir === '') {
+      log.warn('the profile directory is unknown: the automatic rollback is not armed')
+      return { ok: false, method: 'none', error: 'the profile directory is unknown', scriptPath: null }
+    }
+    const stateDir = stateDirOf()
+    const scriptPath = path.join(stateDir, 'restart-' + state.generation + '-watch.ps1')
+    const script = buildWatchScript({
+      // The fallback health URL (the port of the OLD instance). It is only
+      // used when the host publishes no instance record at all.
+      healthUrl: restartHealthUrl() ?? '',
+      healthPath: resolveHealthPath(config),
+      // The instance record: the port of the NEW instance and its boot id.
+      portFile: accessFilePath(stateDir),
+      expectedBootId: bootId,
+      outcomeFile: path.join(stateDir, RESTART_OUTCOME_FILE),
+      backupDir: backup.dir,
+      profileDir,
+      reportPath: path.join(stateDir, ROLLBACK_REPORT_NAME),
+      lockFile: path.join(stateDir, ROLLBACK_LOCK_NAME),
+      timeoutMs: config.rollbackTimeoutMs,
+      rollbackTimeoutMs: config.rollbackCopyTimeoutMs,
+      since: new Date().toISOString(),
+      selfCleanPaths: [scriptPath, gateScriptPath].filter(Boolean),
+    })
+    const written = writeTextFileAtomic(scriptPath, script)
+    if (!written.ok) {
+      log.error('could not write the rollback watcher:', written.error)
+      return { ok: false, method: 'none', error: written.error, scriptPath }
+    }
+    const result = launchWatcherFn({
+      watchScriptPath: scriptPath,
+      platform: env.platform,
+    })
+    if (!result || result.ok !== true) {
+      log.error('could not start the rollback watcher:', (result && result.error) || 'unknown error')
+      return { ok: false, method: (result && result.method) || 'none', error: (result && result.error) || null, scriptPath }
+    }
+    log.warn('the rollback watcher is armed', {
+      scriptPath,
+      method: result.method,
+      timeoutMs: config.rollbackTimeoutMs,
+    })
+    return { ok: true, method: result.method, error: null, scriptPath }
+  }
+
   /** Execute the restart now; the detached helper survives our own death. */
   const executeRestart = async () => {
     stopPolling()
@@ -2256,6 +2599,15 @@ const titleOfSummary = (item) => {
         log,
         profile: resolveProfileDirDetailed(),
       })
+      // The snapshot is the rollback point of BOTH branches.
+      const backup = snapshot && snapshot.backup ? snapshot.backup : null
+      const profileDir = snapshot && snapshot.profileDir ? snapshot.profileDir : null
+      // The marker of an EARLIER decision must not confuse this restart's
+      // watcher: it would stand down before it even looked at the new
+      // instance. It is removed BEFORE the watcher is armed.
+      try {
+        fs.rmSync(path.join(stateDir, RESTART_OUTCOME_FILE), { force: true })
+      } catch {}
 
       if (useCustomCommand) {
         const command = buildCustomCommand({
@@ -2265,9 +2617,67 @@ const titleOfSummary = (item) => {
           appExePath: env.appExePath || '',
         })
         log.warn('running custom restart command:', command)
-        // A failed snapshot never blocks the restart: the command runs anyway.
-        const outcome = runCommandFn({ command })
-        if (outcome && outcome.ok === false) rollbackRestart(outcome.error || 'custom command failed')
+
+        // (1) THE SAFETY NET. The restart command usually kills THIS process
+        // (that is what restarting the host means), so the plugin cannot
+        // confirm anything once the command runs. The watcher is started
+        // BEFORE the command: it waits for the new instance outside the host
+        // and puts the snapshot back when the new instance never comes.
+        armRollbackWatcher({ backup, profileDir })
+
+        try {
+          // (2) THE COMMAND, with a real success judgement. The old code only
+          // looked at "the spawn did not throw", so a command that does not
+          // exist or that exits with an error was reported as a successful
+          // restart.
+          const outcome = await runCommandFn({
+            command,
+            timeoutMs: config.restartCommandTimeoutMs,
+          })
+          if (!outcome || outcome.ok !== true) {
+            const reason = (outcome && outcome.error) || 'the restart command failed'
+            log.error('the restart command failed; the pre-restart snapshot is restored:', reason)
+            rollbackInProcess({ backup, profileDir, reason })
+            writeRestartOutcome({ decided: true, ok: false, reason })
+            return
+          }
+          if (outcome.timedOut === true) {
+            log.warn(
+              `the restart command is still running after ${config.restartCommandTimeoutMs}ms; `
+              + 'the new instance is confirmed by the rollback watcher',
+              { command, timeoutMs: config.restartCommandTimeoutMs },
+            )
+          } else {
+            log.warn('the restart command finished', { command, exitCode: outcome.exitCode ?? null })
+          }
+
+          // (3) THE HEALTH CONFIRMATION — only possible when this process
+          // survived the command. The new instance publishes its own port and
+          // its own boot id; the confirmation waits for THAT instance and not
+          // for the one that is being replaced.
+          const confirmed = await probeInstanceFn({
+            accessFile: accessFilePath(stateDir),
+            expectedBootId: bootId,
+            healthPath: resolveHealthPath(config),
+            timeoutMs: config.rollbackTimeoutMs,
+          })
+          if (confirmed && confirmed.ok === true) {
+            log.warn('the new instance answered its health route:', confirmed)
+            writeRestartOutcome({ decided: true, ok: true, reason: 'the new instance answered' })
+            return
+          }
+          const reason = (confirmed && confirmed.reason) || 'the new instance never answered'
+          log.error('the new instance did not come up; the pre-restart snapshot is restored:', reason)
+          rollbackInProcess({ backup, profileDir, reason })
+          writeRestartOutcome({ decided: true, ok: false, reason })
+        } catch (error) {
+          // The command has already run: a retry would restart the host a
+          // SECOND time. The snapshot is restored and the reason is reported.
+          const reason = 'the hosted restart failed: ' + String(error)
+          log.error(reason)
+          rollbackInProcess({ backup, profileDir, reason })
+          writeRestartOutcome({ decided: true, ok: false, reason })
+        }
       } else {
         const aborts = Number(state.restart.gateAborts) || 0
         const url = aborts > 20 ? null : restartGateUrl()
@@ -2277,29 +2687,41 @@ const titleOfSummary = (item) => {
           log.warn('the web server port is unknown; scheduling an UNGATED restart (the helper cannot re-check the idle gate)')
         }
         // The snapshot was already taken above (the shared entry).
-        const backup = snapshot && snapshot.backup ? snapshot.backup : null
-        const profileDir = snapshot && snapshot.profileDir ? snapshot.profileDir : null
         const healthUrl = restartHealthUrl()
-        const watchScriptPath = backup && backup.ok === true && healthUrl !== null && profileDir !== null
+        const gateScriptPath = url === null ? null : path.join(stateDir, 'restart-' + state.generation + '.cmd')
+        // The watcher does NOT need the port of the old instance (it reads the
+        // port of the NEW one from the instance record), so it is armed as
+        // soon as there is a snapshot and a profile directory.
+        const watchScriptPath = backup && backup.ok === true && profileDir !== null
           ? path.join(stateDir, 'restart-' + state.generation + '-watch.ps1')
           : null
         const watchScript = watchScriptPath === null
           ? null
           : buildWatchScript({
+            // The fallback URL of the OLD instance. The watcher uses the port
+            // of the NEW instance (from the instance record) — the desktop
+            // app listens on a random port, so the old one is worthless.
             healthUrl,
+            healthPath: resolveHealthPath(config),
+            portFile: accessFilePath(stateDir),
+            expectedBootId: bootId,
+            outcomeFile: path.join(stateDir, RESTART_OUTCOME_FILE),
             backupDir: backup.dir,
             profileDir,
             reportPath: path.join(stateDir, ROLLBACK_REPORT_NAME),
-            appExePath: env.appExePath,
+            lockFile: path.join(stateDir, ROLLBACK_LOCK_NAME),
             timeoutMs: config.rollbackTimeoutMs,
+            rollbackTimeoutMs: config.rollbackCopyTimeoutMs,
             // Only a crash log written after this point belongs to this restart.
             since: new Date().toISOString(),
+            // The watcher removes the helper scripts when it ends.
+            selfCleanPaths: [watchScriptPath, gateScriptPath].filter(Boolean),
           })
         const result = scheduleDetachedFn({
           appExePath: env.appExePath,
           relaunchDelaySeconds: config.relaunchDelaySeconds,
           gateUrl: url,
-          scriptPath: url === null ? null : path.join(stateDir, 'restart-' + state.generation + '.cmd'),
+          scriptPath: gateScriptPath,
           watchScriptPath,
           watchScript,
         })
@@ -2583,9 +3005,26 @@ const titleOfSummary = (item) => {
         waitedMs: Number.isFinite(report.waitedMs) ? report.waitedMs : null,
         rolledBack: report.rolledBack === true,
         backupDir: typeof report.backupDir === 'string' ? report.backupDir : null,
+        // WHY the restart failed. Without it the interface can only say "it was
+        // rolled back", which is the half of the story the user needs most.
+        reason: typeof report.reason === 'string'
+          ? report.reason
+          : (typeof report.rollbackError === 'string' ? report.rollbackError : ''),
         crashLog: typeof report.crashLog === 'string' ? report.crashLog : null,
         crashTail: tail.length > 4000 ? tail.slice(-4000) : tail,
       }
+    },
+    /**
+     * The instance record of the running host: the port it listens on and the
+     * access link (with the boot token) that still works.
+     *
+     * After a restart the OLD link answers 401 — the boot token is created per
+     * process — so this is the link the user needs to get back into the
+     * interface.
+     */
+    get accessRecord() {
+      const read = readAccessRecord(path.dirname(stateFile))
+      return read && read.ok === true ? read.record : null
     },
     env,
     stateFile,
@@ -3462,6 +3901,8 @@ function registerTools(ctx, runtime, config) {
           profileDirSource: { type: 'string' },
           backupIncludePlugins: { type: 'boolean' },
           lastRollback: { type: 'object' },
+          // The access link of the running instance (with the boot token).
+          accessUrl: { type: 'string' },
           environment: { type: 'object' },
           sessions: { type: 'array', items: { type: 'object' } },
         },
@@ -3498,6 +3939,10 @@ function registerTools(ctx, runtime, config) {
         backupIncludePlugins: config.backupIncludePlugins !== false,
         // Present only when the previous restart had to be rolled back.
         ...(runtime.lastRollback ? { lastRollback: runtime.lastRollback } : {}),
+        // The access link of THIS instance (with the boot token). The boot
+        // token is created per process, so the link the browser holds answers
+        // 401 after a restart — this is the link that still works.
+        ...(accessUrlOf(runtime) ? { accessUrl: accessUrlOf(runtime) } : {}),
         environment: {
           platform: runtime.env.platform,
           isDesktopApp: runtime.env.isDesktopApp,
@@ -5202,6 +5647,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             backupIncludePlugins: config.backupIncludePlugins !== false,
             parkedGoals: parkedGoalList(runtime),
             recovery: recoveryList(live),
+            // THE ACCESS LINK of this instance (with the boot token). The boot
+            // token is created per process, so the link the browser holds
+            // answers 401 after a restart. The client needs the new link to
+            // get the user back into the interface.
+            accessUrl: accessUrlOf(runtime),
           })
         } catch {
           // The banner must never break the health route: fall back to "no restart".
@@ -5286,6 +5736,13 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       const origin = typeof webServer.getOrigin === 'function' ? String(webServer.getOrigin()) : ''
       const portMatch = /:(\d+)\/?$/.exec(origin)
       if (portMatch) runtime.webPort = Number(portMatch[1])
+      // THE INSTANCE RECORD. The new instance publishes its own port and its
+      // own access link (with the boot token), so:
+      //   - the rollback watcher learns the port of the NEW instance instead
+      //     of guessing the (random) port of the old one;
+      //   - the user finds the access link of the new instance after a
+      //     restart, instead of being locked out by a 401.
+      publishInstanceRecord(ctx, runtime, config, origin)
     } catch {}
     try {
       target.effect(() => webServer.register(route), 'dsh-autorestart: health route')

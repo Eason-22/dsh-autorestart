@@ -143,6 +143,26 @@ The tool reports what happened: `cancelled` (whether the restart request itself 
 { "ok": true, "cancelled": false, "scope": "mine", "remainingRequesters": 1, "sessionId": "sess-a", "phase": "deferred" }
 ```
 
+### The capsule: click it for the details and for the way out
+
+The capsule in the composer row is 22px high and ONE line wide, so it carries numbers only
+(`待重启 · 已等 16 分钟 · 3 项任务在跑`) — never a name and never a hint. Clicking it (or pressing
+Enter/Space on it) opens a small panel above it:
+
+- how many tasks the restart is waiting for;
+- how many OTHER sessions wait for the same restart;
+- one button: **Cancel my restart**.
+
+The button opens a confirmation (no timeout, nothing counts down): *Cancel your restart?* — and what
+cancelling means right now (only you, or you while the others still get their restart). Only the
+confirmation sends the request; `Esc`, a click outside the panel or **Never mind** closes it without
+doing anything.
+
+The request withdraws ONLY this session's restart request (`POST /__dsh_autorestart/cancel` with
+`{ "sessionId": "…", "scope": "mine" }`): the other sessions keep theirs, and the restart still
+happens for them. There is no "cancel everybody" in the panel — that stays an explicit tool call
+(`continuum_cancel_restart` with `scope: "all"`).
+
 ## Configuration
 
 Every key has a default, written in the `insert` row of `cordis.patch.yml`. To override a key, add

@@ -625,6 +625,20 @@ function resolveSleepPath(config) {
 }
 
 /**
+ * Resolve the cancel-route path: a sibling of the health route, under the same
+ * prefix (`POST /cancel` withdraws ONE session's own restart request).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveCancelPath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/cancel`
+}
+
+/**
  * Resolve the announcements-route path: a sibling of the health route, under
  * the same prefix (`GET /announcements` reports the feature announcements the
  * user has not seen yet, `POST /announcements` records that it saw one).
@@ -4152,6 +4166,124 @@ function buildParkRoute(ctx, runtime, config) {
 }
 
 /**
+ * Build the POST `/cancel` route: withdraw ONE session's own restart request.
+ *
+ * It is the sibling of the `/park` route next to the health route and uses the
+ * same authentication rule (loopback OR a request the connection service
+ * admits). Body: `{ "sessionId": string, "scope"?: "mine" }`.
+ *
+ * The route NEVER cancels the request of everybody: `scope: "all"` is
+ * refused, that operation belongs to the tool (where the caller says it out
+ * loud). The answer reports what happened: `{ ok, cancelled, reason,
+ * remainingRequesters, sessionId }`.
+ *
+ * @param {object} ctx
+ * @param {object} runtime
+ * @param {object} config
+ */
+function buildCancelRoute(ctx, runtime, config) {
+  const routePath = resolveCancelPath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      if (!req || req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then((payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+        const scope = typeof body.scope === 'string' && body.scope.trim() !== '' ? body.scope.trim() : 'mine'
+        const answer = (statusCode, value) => {
+          res.statusCode = statusCode
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify(value))
+        }
+        if (scope !== 'mine') {
+          // "Cancel everybody" is a tool operation: the route says no.
+          answer(400, {
+            ok: false,
+            cancelled: false,
+            reason: 'scope-not-allowed',
+            error: 'This route can only withdraw one session\'s own request (scope "mine").',
+            remainingRequesters: 0,
+            sessionId,
+          })
+          return
+        }
+        if (sessionId === '') {
+          answer(400, {
+            ok: false,
+            cancelled: false,
+            reason: 'session-id-required',
+            error: 'The session id is required: without it the own request cannot be identified.',
+            remainingRequesters: 0,
+            sessionId: '',
+          })
+          return
+        }
+        const outcome = cancelOwnRestart(runtime.state, { sessionId, now: Date.now() })
+        if (!outcome.removed) {
+          // Nothing was changed: the caller is not a requester (or the
+          // request is already gone). The reason says which.
+          const error = outcome.reason === 'not-a-requester'
+            ? 'This session did not request the pending restart, so nothing was cancelled.'
+            : outcome.reason === 'no-restart-pending'
+              ? 'There is no pending restart to cancel.'
+              : 'The own request could not be identified, so nothing was cancelled.'
+          runtime.log.warn(`the cancel route refused the request of session ${sessionId}: ${outcome.reason}`)
+          answer(200, {
+            ok: false,
+            cancelled: false,
+            reason: outcome.reason,
+            error,
+            remainingRequesters: outcome.remaining,
+            sessionId,
+          })
+          return
+        }
+        // Release ONLY this session's continuation request.
+        runtime.releaseRequesters([sessionId])
+        if (outcome.cancelled) runtime.stopPolling()
+        runtime.persist()
+        runtime.log.info(
+          outcome.cancelled
+            ? `session ${sessionId} withdrew the last restart request through the cancel route; the pending restart is cancelled`
+            : `session ${sessionId} withdrew its restart request through the cancel route; ${outcome.remaining} requester(s) remain`,
+        )
+        answer(200, {
+          ok: true,
+          cancelled: outcome.cancelled,
+          reason: outcome.reason,
+          remainingRequesters: outcome.remaining,
+          sessionId,
+        })
+      }).catch((error) => {
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ ok: false, error: describeError(error) }))
+      })
+    },
+  }
+}
+
+/**
  * Build the POST `/recover` route: retry the post-restart recovery for the
  * still-pending sessions right now.
  *
@@ -5057,6 +5189,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // the restart).
             parkUrl: resolveParkPath(config),
             recoverUrl: resolveRecoverPath(config),
+            // The route that withdraws ONE session's own restart request (the
+            // manual "cancel my restart" of the pill).
+            cancelUrl: resolveCancelPath(config),
             // The route that persists the one-time install choice, plus the
             // value that is effective right now.
             choiceUrl: resolveChoicePath(config),
@@ -5082,6 +5217,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             longWait: null,
             parkUrl: resolveParkPath(config),
             recoverUrl: resolveRecoverPath(config),
+            cancelUrl: resolveCancelPath(config),
             choiceUrl: resolveChoicePath(config),
             announcementsUrl: resolveAnnouncementsPath(config),
             backupOnRestart: config.backupOnRestart !== false,
@@ -5143,6 +5279,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
     const recoverRoute = buildRecoverRoute(ctx, runtime, config)
     const handoffRoute = buildHandoffRoute(ctx, runtime, config)
     const choiceRoute = buildChoiceRoute(ctx, runtime, config)
+    const cancelRoute = buildCancelRoute(ctx, runtime, config)
     const announcementsRoute = buildAnnouncementsRoute(ctx, runtime, config)
     const sleepRoute = sleep ? buildSleepRoute(ctx, runtime, config, sleep) : null
     try {
@@ -5175,6 +5312,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       target.effect(() => webServer.register(choiceRoute), 'dsh-autorestart: choice route')
     } catch (error) {
       runtime.log.warn('could not register the choice route:', String(error))
+    }
+    try {
+      target.effect(() => webServer.register(cancelRoute), 'dsh-autorestart: cancel route')
+    } catch (error) {
+      runtime.log.warn('could not register the cancel route:', String(error))
     }
     try {
       target.effect(() => webServer.register(announcementsRoute), 'dsh-autorestart: announcements route')

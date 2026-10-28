@@ -126,5 +126,27 @@
     "disabled": "The button is currently switched off; you can turn it on in the settings.",
     "button": "Got it",
     "error": "Could not record it: {message}"
+  },
+  "restartPanel": {
+    "cancelPanelTasks": "This restart is still waiting for {n} task(s) to finish",
+    "cancelPanelOthers": "{n} other session(s) are waiting for this restart too",
+    "cancelPanelOthersAfter": "{n} session(s) are still waiting",
+    "cancelPanelAria": "Pending restart details",
+    "cancelButton": "Cancel my restart",
+    "cancelButtonAria": "Cancel my restart",
+    "cancelConfirmTitle": "Cancel your restart?",
+    "cancelConfirmOnlyMe": "After this, the restart will not happen.",
+    "cancelConfirmOthers": "{n} other session(s) are waiting for this restart too — cancelling only affects you; they will still restart.",
+    "cancelConfirmUnknown": "The current session is unknown, so its own request cannot be withdrawn.",
+    "cancelConfirmButton": "Cancel it",
+    "cancelConfirmButtonAria": "Confirm the cancellation",
+    "cancelDismissButton": "Never mind",
+    "cancelDismissButtonAria": "Keep the restart",
+    "cancelFailed": "The restart could not be cancelled.",
+    "cancelFailedWith": "The restart could not be cancelled: {message}",
+    "cancelNotRequester": "This session did not request the pending restart, so nothing was cancelled.",
+    "cancelNothingPending": "There is no pending restart to cancel.",
+    "cancelUnknownSession": "The current session is unknown, so its own request cannot be withdrawn.",
+    "cancelNoRoute": "The cancel route is not available (the Host is too old)."
   }
 }

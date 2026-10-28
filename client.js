@@ -194,6 +194,29 @@ const ZH = {
   durationMinutesShort: '{n} 分钟',
   durationHoursShort: '{n} 小时',
   durationHoursMinutesShort: '{n} 小时 {m} 分',
+  // The manual cancel of the capsule: the panel, the confirmation and the
+  // readable reasons. The capsule's own text stays free of hints — the panel
+  // is the discoverability.
+  cancelPanelTasks: '这次重启还在等 {n} 个任务结束',
+  cancelPanelOthers: '还有 {n} 个会话也在等这次重启',
+  cancelPanelOthersAfter: '还剩 {n} 个会话在等',
+  cancelPanelAria: '待重启详情',
+  cancelButton: '取消我的这次重启',
+  cancelButtonAria: '取消我的这次重启',
+  cancelConfirmTitle: '取消你的这次重启？',
+  cancelConfirmOnlyMe: '取消后这次重启就不会发生了。',
+  cancelConfirmOthers: '还有 {n} 个会话也在等这次重启——取消只影响你自己，他们仍会重启。',
+  cancelConfirmUnknown: '当前会话未知，无法只撤自己。',
+  cancelConfirmButton: '确认取消',
+  cancelConfirmButtonAria: '确认取消这次重启',
+  cancelDismissButton: '再想想',
+  cancelDismissButtonAria: '算了，不取消',
+  cancelFailed: '没能取消这次重启。',
+  cancelFailedWith: '没能取消这次重启：{message}',
+  cancelNotRequester: '这个会话没有请求这次重启，所以什么都没取消。',
+  cancelNothingPending: '现在没有待重启的请求。',
+  cancelUnknownSession: '当前会话未知，无法只撤自己。',
+  cancelNoRoute: '找不到取消接口（宿主版本太旧）。',
   // The one-time install prompt (the choice is asked exactly once).
   // "Backup" is the verb and BOTH options share the "configuration" base:
   // the plugins are an ADDITION to the configuration, never a rival of it.
@@ -364,6 +387,29 @@ const EN = {
   durationMinutesShort: '{n} min',
   durationHoursShort: '{n}h',
   durationHoursMinutesShort: '{n}h {m}m',
+  // The manual cancel of the capsule: the panel, the confirmation and the
+  // readable reasons. The capsule's own text stays free of hints — the panel
+  // is the discoverability.
+  cancelPanelTasks: 'This restart is still waiting for {n} task(s) to finish',
+  cancelPanelOthers: '{n} other session(s) are waiting for this restart too',
+  cancelPanelOthersAfter: '{n} session(s) are still waiting',
+  cancelPanelAria: 'Pending restart details',
+  cancelButton: 'Cancel my restart',
+  cancelButtonAria: 'Cancel my restart',
+  cancelConfirmTitle: 'Cancel your restart?',
+  cancelConfirmOnlyMe: 'After this, the restart will not happen.',
+  cancelConfirmOthers: '{n} other session(s) are waiting for this restart too — cancelling only affects you; they will still restart.',
+  cancelConfirmUnknown: 'The current session is unknown, so its own request cannot be withdrawn.',
+  cancelConfirmButton: 'Cancel it',
+  cancelConfirmButtonAria: 'Confirm the cancellation',
+  cancelDismissButton: 'Never mind',
+  cancelDismissButtonAria: 'Keep the restart',
+  cancelFailed: 'The restart could not be cancelled.',
+  cancelFailedWith: 'The restart could not be cancelled: {message}',
+  cancelNotRequester: 'This session did not request the pending restart, so nothing was cancelled.',
+  cancelNothingPending: 'There is no pending restart to cancel.',
+  cancelUnknownSession: 'The current session is unknown, so its own request cannot be withdrawn.',
+  cancelNoRoute: 'The cancel route is not available (the Host is too old).',
   // The one-time install prompt (the choice is asked exactly once).
   // "Backup" is the verb and BOTH options share the "configuration" base:
   // the plugins are an ADDITION to the configuration, never a rival of it.
@@ -1036,6 +1082,30 @@ function formatLongWaitNoteParts(info, t) {
 }
 
 /**
+ * The readable reason why a manual cancel did not work.
+ *
+ * The Host answers with a machine reason (`not-a-requester`,
+ * `session-id-required`, …); the panel of the capsule shows something a
+ * person can act on.
+ *
+ * @param {any} body the answer of the Host
+ * @param {(name: string) => string} [t] the translator
+ * @returns {string}
+ */
+function cancelFailureText(body, t) {
+  const translate = typeof t === 'function' ? t : (name) => name
+  if (body && typeof body.error === 'string' && body.error.trim() !== '') return body.error.trim()
+  if (body && typeof body.reason === 'string') {
+    if (body.reason === 'not-a-requester') return translate('cancelNotRequester')
+    if (body.reason === 'no-restart-pending') return translate('cancelNothingPending')
+    if (body.reason === 'session-id-required' || body.reason === 'no-session-id') {
+      return translate('cancelUnknownSession')
+    }
+  }
+  return translate('cancelFailed')
+}
+
+/**
  * The named exports of this module.
  *
  * The client module system materializes `factory(require) -> exports`, so
@@ -1051,6 +1121,7 @@ const SLEEP_EXPORTS = {
   formatLongWaitNote,
   formatLongWaitNoteParts,
   formatCompactDurationMs,
+  cancelFailureText,
   groupBlockers,
   summarizeBlockers,
   truncateBlockerName,
@@ -1084,6 +1155,7 @@ if (moduleLoader) moduleLoader.load({
     // is only the fallback for an older Host.
     const ROUTE_PREFIX = HEALTH_URL.split('?')[0].replace(/\/[^/]*$/, '')
     const DEFAULT_PARK_URL = ROUTE_PREFIX + '/park'
+    const DEFAULT_CANCEL_URL = ROUTE_PREFIX + '/cancel'
     // The route that persists the one-time install choice.
     const DEFAULT_CHOICE_URL = ROUTE_PREFIX + '/choice'
     // The browser-side record of the one-time install choice. The prompt is
@@ -1375,6 +1447,17 @@ if (moduleLoader) moduleLoader.load({
     }
 
     /**
+     * The route that withdraws ONE session's own restart request: the one the
+     * Host sent with the state payload, or the one derived from the health
+     * path.
+     */
+    function cancelUrlFor(info) {
+      const sent = info && typeof info.cancelUrl === 'string' ? info.cancelUrl.trim() : ''
+      if (sent.startsWith('/')) return sent
+      return DEFAULT_CANCEL_URL
+    }
+
+    /**
      * Whether the one-time install prompt may be shown.
      *
      * It may be shown only while the browser has no record of a choice yet,
@@ -1531,6 +1614,30 @@ if (moduleLoader) moduleLoader.load({
     const PANEL_MUTED_STYLE = {
       margin: '4px 0 0',
       opacity: 0.75,
+    }
+
+    // The confirmation box INSIDE the panel: it is the second step of the
+    // manual cancel (the button opens it, only the confirmation cancels).
+    // It has NO timeout: it stays until the user decides.
+    const CONFIRM_STYLE = {
+      marginTop: 8,
+      paddingTop: 8,
+      borderTop: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.32))',
+    }
+
+    // The buttons of the panel: they look like the pill's own buttons, only
+    // smaller, and they are real buttons (focusable, Enter/Space work).
+    const PANEL_BUTTON_STYLE = {
+      marginTop: 8,
+      padding: '3px 10px',
+      borderRadius: 6,
+      border: '1px solid var(--dsw-alias-border-l1, rgba(127,127,127,.32))',
+      background: 'transparent',
+      color: 'var(--dsw-alias-label-primary, inherit)',
+      font: 'inherit',
+      fontSize: 12,
+      lineHeight: '16px',
+      cursor: 'pointer',
     }
 
     // The park button lives inside the pill and reuses the pill's own button
@@ -1764,6 +1871,20 @@ if (moduleLoader) moduleLoader.load({
       // The message of the last failed park request (the Host's own message).
       // It is shown in the pill's tooltip: the pill has no details panel.
       const [parkError, setParkError] = useState('')
+      // The manual cancel: the panel, the confirmation and its outcome.
+      const [panelOpen, setPanelOpen] = useState(false)
+      const [confirmOpen, setConfirmOpen] = useState(false)
+      const [cancelling, setCancelling] = useState(false)
+      const [cancelError, setCancelError] = useState('')
+      // How many OTHER sessions still wait for the restart, as the Host
+      // reported it after the cancellation (null = use the polled value).
+      const [sessionsLeft, setSessionsLeft] = useState(null)
+      // True after this session withdrew its own request: the capsule stays
+      // until the restart is really over.
+      const [withdrawn, setWithdrawn] = useState(false)
+      // True when the restart this session was waiting for is GONE (nobody
+      // waits for it any more): the capsule has nothing left to say.
+      const [gone, setGone] = useState(false)
       const t = translate ?? ((name) => name)
 
       const pending = Boolean(info && info.pendingRestart === true)
@@ -1779,12 +1900,47 @@ if (moduleLoader) moduleLoader.load({
         }
       }, [pending])
 
+      // The panel and the confirmation never outlive the pending state.
+      useEffect(() => {
+        if (!pending) {
+          setPanelOpen(false)
+          setConfirmOpen(false)
+          setCancelError('')
+          setSessionsLeft(null)
+          setWithdrawn(false)
+          setGone(false)
+        }
+      }, [pending])
+
+      // A click OUTSIDE the panel closes it (Esc does the same inside the
+      // capsule). The listener only exists while the panel is open.
+      useEffect(() => {
+        if (!panelOpen) return undefined
+        const onOutside = () => {
+          setPanelOpen(false)
+          setConfirmOpen(false)
+        }
+        if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
+        document.addEventListener('click', onOutside)
+        return () => {
+          if (typeof document.removeEventListener === 'function') {
+            document.removeEventListener('click', onOutside)
+          }
+        }
+      }, [panelOpen])
+
       if (!info || info.pendingRestart !== true) return null
+      // The restart this session waited for is gone (nobody waits for it any
+      // more): the capsule has nothing left to say.
+      if (gone) return null
 
       const waiters = Array.isArray(info.waiters) ? info.waiters : []
       const key = String(sessionId)
       const waiting = waiters.some((waiter) => String(waiter) === key)
-      if (!waiting) return null
+      // After this session withdrew its own request it is no longer a waiter,
+      // but the restart may still be pending for the others: the capsule stays
+      // until the restart is really over.
+      if (!waiting && !withdrawn) return null
 
       const blockedBy = Array.isArray(info.blockedBy) ? info.blockedBy : []
       // One entry per SESSION: a conversation that is running *and* still has
@@ -1850,7 +2006,106 @@ if (moduleLoader) moduleLoader.load({
         ? fill(t('tooltipWithError'), { message: parkError })
         : (detail === '' ? tooltipText : `${tooltipText} ${detail}`)
 
+      // The panel: how many tasks the restart waits for, and how many OTHER
+      // sessions wait for the same restart.
+      const taskCount = longWait.hasLongWait ? longWait.count : others.length
+      const otherWaiters = waiters.filter((waiter) => String(waiter) !== key).length
+      const sessionsWaiting = sessionsLeft === null ? otherWaiters : sessionsLeft
+      // The session that asks for the cancel: without it the own request
+      // cannot be identified, so nothing is sent.
+      const ownSessionId = sessionId === null || sessionId === undefined ? '' : String(sessionId)
+
       if (pulsing) ensurePulseStyle()
+
+      /**
+       * Open the panel. A double click is only an ALIAS for it: it never
+       * cancels anything.
+       */
+      const openPanel = (event) => {
+        if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+        setPanelOpen(true)
+        setCancelError('')
+      }
+
+      /** Close the panel (and the confirmation) without cancelling. */
+      const closePanel = () => {
+        setPanelOpen(false)
+        setConfirmOpen(false)
+      }
+
+      /** The keyboard of the capsule: Enter/Space opens the panel, Esc closes it. */
+      const onPillKeyDown = (event) => {
+        if (!event) return
+        const pressed = event.key
+        if (pressed === 'Enter' || pressed === ' ' || pressed === 'Spacebar') {
+          if (typeof event.preventDefault === 'function') event.preventDefault()
+          openPanel(event)
+          return
+        }
+        if (pressed === 'Escape') {
+          if (typeof event.stopPropagation === 'function') event.stopPropagation()
+          closePanel()
+        }
+      }
+
+      /**
+       * Withdraw THIS session's own restart request.
+       *
+       * The Host answers what happened: whether the restart is gone, how many
+       * sessions still wait for it, and — when it did not work — WHY.
+       */
+      const cancelOwnRestartRequest = async () => {
+        if (ownSessionId === '') {
+          setCancelError(t('cancelUnknownSession'))
+          return
+        }
+        const url = cancelUrlFor(info)
+        if (url === '') {
+          setCancelError(t('cancelNoRoute'))
+          return
+        }
+        setCancelling(true)
+        setCancelError('')
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: ownSessionId, scope: 'mine' }),
+          })
+          let body = null
+          try {
+            body = await response.json()
+          } catch {
+            body = null
+          }
+          if (!response.ok || !body || body.ok !== true) {
+            // It did not work: the confirmation closes and the panel says
+            // WHY (a silent failure would leave the user guessing).
+            setConfirmOpen(false)
+            setCancelError(cancelFailureText(body, t))
+            return
+          }
+          setConfirmOpen(false)
+          setWithdrawn(true)
+          if (typeof body.remainingRequesters === 'number') setSessionsLeft(body.remainingRequesters)
+          // The restart is gone: the capsule has nothing left to say.
+          if (body.cancelled === true) {
+            setGone(true)
+            setPanelOpen(false)
+          }
+        } catch (error) {
+          setCancelError(fill(t('cancelFailedWith'), { message: describeError(error) }))
+        } finally {
+          setCancelling(false)
+        }
+      }
+
+      /** The body of the confirmation: what cancelling means, right now. */
+      const confirmBody = ownSessionId === ''
+        ? t('cancelConfirmUnknown')
+        : sessionsWaiting > 0
+          ? fill(t('cancelConfirmOthers'), { n: sessionsWaiting })
+          : t('cancelConfirmOnlyMe')
 
       /**
        * Park the goal of one blocking session and ask for the restart now.
@@ -1900,6 +2155,109 @@ if (moduleLoader) moduleLoader.load({
         }
       }
 
+      /**
+       * The panel of the capsule: the status of the pending restart and the
+       * manual way out of it. It FLOATS above the capsule (the wrapper is
+       * the positioning anchor), so the composer row never grows.
+       */
+      const panel = panelOpen
+        ? h(
+          'div',
+          {
+            className: 'dsh-autorestart-pill-panel',
+            'data-dsh-autorestart-panel': 'true',
+            role: 'dialog',
+            'aria-label': t('cancelPanelAria'),
+            style: PANEL_STYLE,
+            // A click inside the panel is not a click outside it.
+            onClick: (event) => {
+              if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+            },
+          },
+          h('p', { style: { margin: 0 } }, fill(t('cancelPanelTasks'), { n: taskCount })),
+          sessionsWaiting > 0
+            ? h(
+              'p',
+              { style: { margin: '4px 0 0' } },
+              fill(sessionsLeft === null ? t('cancelPanelOthers') : t('cancelPanelOthersAfter'), { n: sessionsWaiting }),
+            )
+            : null,
+          ownSessionId === ''
+            ? h('p', { style: { margin: '4px 0 0' } }, t('cancelUnknownSession'))
+            : null,
+          cancelError !== ''
+            ? h(
+              'p',
+              { style: { margin: '4px 0 0', color: 'var(--dsw-alias-state-error, #d33)' } },
+              cancelError,
+            )
+            : null,
+          confirmOpen
+            ? h(
+              'div',
+              {
+                className: 'dsh-autorestart-pill-confirm',
+                'data-dsh-autorestart-confirm': 'true',
+                role: 'dialog',
+                'aria-label': t('cancelConfirmTitle'),
+                style: CONFIRM_STYLE,
+              },
+              h('p', { style: { margin: 0, fontWeight: 600 } }, t('cancelConfirmTitle')),
+              h('p', { style: { margin: '4px 0 0' } }, confirmBody),
+              ownSessionId === ''
+                ? null
+                : h(
+                  'div',
+                  { style: { display: 'flex', gap: 8, marginTop: 8 } },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      style: PANEL_BUTTON_STYLE,
+                      title: t('cancelConfirmButtonAria'),
+                      'aria-label': t('cancelConfirmButtonAria'),
+                      disabled: cancelling,
+                      onClick: (event) => {
+                        if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+                        void cancelOwnRestartRequest()
+                      },
+                    },
+                    t('cancelConfirmButton'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      style: PANEL_BUTTON_STYLE,
+                      title: t('cancelDismissButtonAria'),
+                      'aria-label': t('cancelDismissButtonAria'),
+                      onClick: (event) => {
+                        if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+                        setConfirmOpen(false)
+                      },
+                    },
+                    t('cancelDismissButton'),
+                  ),
+                ),
+            )
+            : h(
+              'button',
+              {
+                type: 'button',
+                style: PANEL_BUTTON_STYLE,
+                title: t('cancelButtonAria'),
+                'aria-label': t('cancelButtonAria'),
+                disabled: cancelling,
+                onClick: (event) => {
+                  if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
+                  setConfirmOpen(true)
+                },
+              },
+              t('cancelButton'),
+            ),
+        )
+        : null
+
       return h(
         'div',
         {
@@ -1912,6 +2270,15 @@ if (moduleLoader) moduleLoader.load({
           {
             style: PILL_STYLE,
             title: titleText,
+            // The capsule opens the panel. A DOUBLE click is only an alias
+            // for it — it never cancels anything.
+            role: 'button',
+            tabIndex: 0,
+            'aria-haspopup': 'dialog',
+            'aria-expanded': panelOpen,
+            onClick: openPanel,
+            onDoubleClick: openPanel,
+            onKeyDown: onPillKeyDown,
           },
           h('span', { style: dotStyle(DOT_STYLE, pulsing), 'aria-hidden': 'true' }),
           h('span', { style: TEXT_STYLE }, h('b', null, t('label')), status),
@@ -1962,6 +2329,7 @@ if (moduleLoader) moduleLoader.load({
             )
           }),
         ),
+        panel,
       )
     }
 

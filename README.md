@@ -111,13 +111,37 @@ so you can call them yourself.
 | --- | --- | --- |
 | `continuum_restart` | Requests a graceful restart. The restart waits until every conversation is idle and the host has been quiet for `settleMs`, then the app is relaunched and this session resumes automatically. | `reason` (string, recorded in the checkpoint and the log), `resume` (boolean, default `true`), `defer_seconds` (number, extra seconds to wait before the first idle check), `parkGoals` (boolean, default `true`) — disarm a goal-driven session before the restart |
 | `continuum_status` | Read-only snapshot of the lifecycle: whether a restart is pending, which sessions were checkpointed, why each blocking session blocks, the goals this plugin disarmed, the last recovery action per session, the handoffs, the state file path and the detected restart environment. | `include_sessions` (boolean, default `true`) — include the per-session checkpoint entries |
-| `continuum_cancel_restart` | Cancels a pending restart and releases the continuation request of every requester. Does nothing when no restart is pending. | none |
+| `continuum_cancel_restart` | Withdraws a pending restart request. By default it withdraws **only the calling session's own request** (`scope: "mine"`); the other sessions that asked for the same restart keep it. `scope: "all"` cancels the request for everyone. Does nothing when no restart is pending. | `scope` (string, `mine` (default) or `all`), `reason` (string, recorded in the log) |
 | `continuum_park_goal` | Disarms the goal of a session so that it no longer blocks the restart. The current round still finishes and the goal is re-armed after the restart. | `sessionId` (string, optional) — defaults to the calling session |
 | `continuum_recover_now` | Re-runs the recovery immediately instead of waiting for the next restart, and reports the action and the reason for each session. | `sessionId` (string, optional) — defaults to all sessions pending recovery |
 | `continuum_handoff` | Hands a session whose conversation exceeded the model context window over to a fresh session, carrying the goal objective, the recorded reasons and a bounded tail of the conversation. | `sessionId` (string, optional) — defaults to the calling session, `maxChars` (number, default `20000`) — character budget for the conversation tail |
 
 A goal is an enhancement, not a requirement: without one, the plugin injects a single continuation
 message instead of re-arming a goal.
+
+### Cancelling a restart: only your own request, or everybody's
+
+A restart request is **coalesced**: several sessions may ask for the same restart, and the plugin
+keeps every requester in `restart.requesters` so that all of them are resumed after that one
+restart. That is why "cancel" has to say **whose** request it cancels:
+
+| Scope | What happens |
+| --- | --- |
+| `mine` (the default) | Only the **calling session's** request is withdrawn. The restart stays pending while other requesters remain, and `restart.bySessionId` is re-pointed at one of them. When the calling session was the **last** requester, the restart really goes away: the phase returns to `idle` and the session is released. |
+| `all` | The request is cancelled for **everybody**: every requester is released and the pending restart is gone. This is "nobody restarts any more". |
+
+Two calls are refused, and both leave the state untouched — a silent "cancel everything" is never
+the fallback:
+
+- the calling session is unknown (the tool was called without a session) → refused;
+- the calling session did **not** ask for the pending restart → refused.
+
+The tool reports what happened: `cancelled` (whether the restart request itself is gone),
+`remainingRequesters` (how many sessions still wait for it), `scope` and `phase`.
+
+```json
+{ "ok": true, "cancelled": false, "scope": "mine", "remainingRequesters": 1, "sessionId": "sess-a", "phase": "deferred" }
+```
 
 ## Configuration
 

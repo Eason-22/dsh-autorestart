@@ -193,7 +193,7 @@ test('the shutdown intent is written to the checkpoint and survives the restart'
   // The restart happens: the pending restart is consumed (the boot recovery
   // clears it) — the INTENT must survive that.
   const cancel = tools.find((entry) => entry.name === 'continuum_cancel_restart')
-  cancel.execute({})
+  cancel.execute({ scope: 'all' })
   assert.equal(readState(file).restart, null, 'the pending restart is gone')
 
   // The intent is still there: the user did not press the button twice.
@@ -212,7 +212,7 @@ test('once the restart is done the shutdown counts down', async () => {
   assert.equal((await callSleep(routes, 'GET')).phase, 'waiting')
 
   // The restart is done (the boot recovery consumed it).
-  tools.find((entry) => entry.name === 'continuum_cancel_restart').execute({})
+  tools.find((entry) => entry.name === 'continuum_cancel_restart').execute({ scope: 'all' })
   fireTicks(timers)
 
   const counting = await callSleep(routes, 'GET')

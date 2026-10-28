@@ -139,7 +139,7 @@ test('three restart requests coalesce into one cycle with three requesters', () 
   assert.deepEqual(normalized.restart.requesters.map((item) => item.sessionId), ['c', 'b', 'a'])
 })
 
-test('cancelling a coalesced restart releases every requester', () => {
+test('cancelling a coalesced restart with scope "all" releases every requester', () => {
   const { file } = tempStateFile('cancel-all')
   const fake = createFakeContext()
   apply(fake.ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
@@ -149,7 +149,8 @@ test('cancelling a coalesced restart releases every requester', () => {
   const before = JSON.parse(fs.readFileSync(file, 'utf8'))
   assert.equal(before.restart.requesters.length, 3)
   assert.equal(before.restart.bySessionId, 's-c')
-  assert.equal(cancel.execute({ reason: 'no longer needed' }).cancelled, true)
+  // The explicit "nobody restarts any more": the whole request goes.
+  assert.equal(cancel.execute({ reason: 'no longer needed', scope: 'all' }).cancelled, true)
   const after = JSON.parse(fs.readFileSync(file, 'utf8'))
   assert.equal(after.restart, null)
   for (const id of ['s-a', 's-b', 's-c']) assert.equal(after.sessions[id], undefined, 'every requester is released')

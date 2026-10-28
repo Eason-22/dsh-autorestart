@@ -421,7 +421,9 @@ test('continuum_cancel_restart releases the pending continuation', () => {
   const restart = fake.tools.find((tool) => tool.name === 'continuum_restart')
   const cancel = fake.tools.find((tool) => tool.name === 'continuum_cancel_restart')
   restart.execute({ reason: 'test' }, { agent: { id: 'sess-cancel' } })
-  const result = cancel.execute({ reason: 'changed my mind' })
+  // The default scope is "mine": the calling session withdraws its own
+  // request. It was the only requester, so the restart really goes away.
+  const result = cancel.execute({ reason: 'changed my mind' }, { agent: { id: 'sess-cancel' } })
   assert.equal(result.cancelled, true)
   const state = JSON.parse(fs.readFileSync(file, 'utf8'))
   assert.equal(state.restart, null)

@@ -258,7 +258,7 @@ restart gate: action=wait reason=agents-busy-within-soft-window busyCount=1 quie
 | `continuum_recover_now` | **立刻重跑恢复**（不用等下一次重启）：重试卡住的会话，返回每个会话的动作 + 原因。参数 `sessionId`（省略 = 所有待恢复会话） |
 | `continuum_handoff` | **会话接力**：把一个已经超出模型 context window 的会话交给一个**全新的会话**继续（带去 goal 目标、检查点里记录的接手原因和一段有界的对话尾部），旧会话保留成存档、goal 被解除。参数 `sessionId`（省略 = 调用方自己的会话）/ `maxChars`（默认 `20000`） |
 | `continuum_status` | 只读：phase、generation、是否有待重启、检查点路径、识别的重启环境、被记录的会话、每个阻塞会话的阻塞原因、被停泊的 goal |
-| `continuum_cancel_restart` | 取消待重启，并释放该会话的续接请求 |
+| `continuum_cancel_restart` | 撤回待重启请求。默认**只撤调用方自己那一份**（`scope: "mine"`），别的会话排队的重启不受影响；`scope: "all"` 才是"所有人都别重启了"。参数 `scope`（`mine`（默认）/ `all`）/ `reason`（写进日志） |
 
 除了工具本身（模型在工具表里能看到名字/描述），插件还有两层保证：
 
@@ -283,6 +283,28 @@ restart gate: action=wait reason=agents-busy-within-soft-window busyCount=1 quie
 
 所以**不需要改 AGENTS.md**——这是 Host 插件钩子（工具注册 + system prompt section + tools.guard），对 profile 内所有 agent 生效；
 你当然也可以额外在 AGENTS.md 里写一条团队规范，但它只是重复。
+
+### 取消重启：只撤自己 vs 全撤
+
+重启请求是**合并**的：好几个会话可以同时请求同一次重启，插件把每个请求者都记在 `restart.requesters` 里，
+重启成功后**一起**被唤醒。所以"取消"必须说清楚**撤的是谁的请求**：
+
+| scope | 会发生什么 |
+| --- | --- |
+| `mine`（默认） | 只撤掉**调用方自己**那一份。别的会话还在等这次重启 → 重启请求**保留**，`restart.bySessionId` 改指向剩下的第一个请求者；调用方是**最后一个**请求者时，重启才真的消失：phase 回到 `idle`，这个会话被释放。 |
+| `all` | 为**所有人**取消：所有请求者都被释放，待重启请求消失。也就是"所有人都别重启了"。 |
+
+有两种调用会被**拒绝**，而且**不改动任何状态**——"顺手全撤"永远不是兜底行为：
+
+- 不知道调用方是哪个会话（调用时没有会话）→ 拒绝；
+- 调用方**并没有**请求这次重启（只是在别人的会话名下）→ 拒绝。
+
+工具会回报结果：`cancelled`（重启请求本身是否真的没了）、`remainingRequesters`（还有几个会话在等）、
+`scope`、`phase`。例如只撤自己、别人的请求还在时：
+
+```json
+{ "ok": true, "cancelled": false, "scope": "mine", "remainingRequesters": 1, "sessionId": "sess-a", "phase": "deferred" }
+```
 
 ## 收工关机（Graceful shutdown）
 

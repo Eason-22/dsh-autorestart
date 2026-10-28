@@ -26,6 +26,7 @@ import path from 'node:path'
 import {
   armSleep,
   beginBoot,
+  cancelOwnRestart,
   cancelRestart,
   clearSleep,
   disarmedRecord,
@@ -2087,20 +2088,31 @@ const titleOfSummary = (item) => {
   }
 
   /**
-   * Release the continuation request of EVERY session that asked for the current
+   * Release the continuation request of the sessions that asked for the current
    * restart (cancel / give-up paths). Requests are coalesced into ONE restart, so
    * releasing only the last requester would leave the others pinned as pending.
+   *
+   * `only` releases EXACTLY those sessions — that is how one session withdraws
+   * its own request without touching the requests of the other sessions.
+   *
+   * @param {string[]|null} [only] the sessions to release; null = every requester
    */
-  const releaseRequesters = () => {
-    const restart = state.restart
-    if (!restart) return
+  const releaseRequesters = (only = null) => {
     const ids = new Set()
-    if (Array.isArray(restart.requesters)) {
-      for (const requester of restart.requesters) {
-        if (requester && typeof requester.sessionId === 'string' && requester.sessionId) ids.add(requester.sessionId)
+    if (Array.isArray(only)) {
+      for (const sessionId of only) {
+        if (typeof sessionId === 'string' && sessionId) ids.add(sessionId)
       }
+    } else {
+      const restart = state.restart
+      if (!restart) return
+      if (Array.isArray(restart.requesters)) {
+        for (const requester of restart.requesters) {
+          if (requester && typeof requester.sessionId === 'string' && requester.sessionId) ids.add(requester.sessionId)
+        }
+      }
+      if (typeof restart.bySessionId === 'string' && restart.bySessionId) ids.add(restart.bySessionId)
     }
-    if (typeof restart.bySessionId === 'string' && restart.bySessionId) ids.add(restart.bySessionId)
     for (const sessionId of ids) {
       const entry = state.sessions ? state.sessions[sessionId] : undefined
       if (!entry) continue
@@ -3647,11 +3659,19 @@ function registerTools(ctx, runtime, config) {
 
   tool({
     name: 'continuum_cancel_restart',
-    description: 'Cancel a restart previously requested through continuum_restart. Does nothing when no restart is pending.',
+    description:
+      'Cancel a restart requested through continuum_restart. By default ONLY the calling session\'s own request is '
+      + 'withdrawn (scope "mine"): the other sessions that asked for the same restart keep it. Use scope "all" to '
+      + 'cancel the request for EVERYONE ("nobody restarts any more"). Does nothing when no restart is pending.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
+        scope: {
+          type: 'string',
+          enum: ['mine', 'all'],
+          description: 'Whose request to cancel: "mine" (the default) withdraws only the calling session\'s own request and leaves the requests of the other sessions alone; "all" cancels the request for every session.',
+        },
         reason: { type: 'string', description: 'Optional note recorded in the log.' },
       },
     },
@@ -3663,20 +3683,99 @@ function registerTools(ctx, runtime, config) {
         properties: {
           ok: { type: 'boolean' },
           cancelled: { type: 'boolean' },
+          scope: { type: 'string' },
+          remainingRequesters: { type: 'integer' },
+          sessionId: { type: 'string' },
           phase: { type: 'string' },
+          error: { type: 'string' },
         },
       },
       (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
     ),
-    execute(args = {}) {
+    execute(args = {}, exec) {
       const state = runtime.state
-      const hadPending = state.restart !== null
-      runtime.releaseRequesters()
-      cancelRestart(state, { now: Date.now() })
-      runtime.stopPolling()
+      const now = Date.now()
+      const scope = args.scope === 'all' ? 'all' : 'mine'
+      const agent = exec && exec.agent
+      const sessionId = agent && agent.id ? String(agent.id) : ''
+      const reason = typeof args.reason === 'string' && args.reason.trim() !== '' ? args.reason.trim() : ''
+
+      // How many sessions are waiting for the pending restart.
+      const requesterCount = () => {
+        const restart = state.restart
+        if (!restart) return 0
+        const ids = new Set()
+        if (Array.isArray(restart.requesters)) {
+          for (const requester of restart.requesters) {
+            if (requester && typeof requester.sessionId === 'string' && requester.sessionId) ids.add(requester.sessionId)
+          }
+        }
+        if (typeof restart.bySessionId === 'string' && restart.bySessionId) ids.add(restart.bySessionId)
+        return ids.size
+      }
+
+      if (scope === 'all') {
+        // The explicit "nobody restarts any more": the whole request goes.
+        const hadPending = state.restart !== null
+        runtime.releaseRequesters()
+        cancelRestart(state, { now })
+        runtime.stopPolling()
+        runtime.persist()
+        if (hadPending) log.info('pending restart cancelled for EVERYONE:', reason || '(no reason)')
+        return { ok: true, cancelled: hadPending, scope: 'all', remainingRequesters: 0, phase: state.phase }
+      }
+
+      // scope "mine": withdraw ONLY the calling session's request.
+      if (state.restart === null) {
+        // Nothing is pending: the tool does nothing, as before.
+        return { ok: true, cancelled: false, scope: 'mine', remainingRequesters: 0, phase: state.phase }
+      }
+      if (sessionId === '') {
+        // The calling session is unknown: refuse instead of guessing. A
+        // silent "cancel everything" is exactly the accident this scope
+        // exists to prevent.
+        log.warn('the restart request of the calling session could not be withdrawn: the calling session is unknown; nothing was cancelled')
+        return {
+          ok: false,
+          cancelled: false,
+          scope: 'mine',
+          remainingRequesters: requesterCount(),
+          phase: state.phase,
+          error: 'The calling session is unknown, so its own request cannot be identified. Nothing was cancelled. Call this tool from the session that requested the restart, or pass scope "all" to cancel the request for everyone.',
+        }
+      }
+      const outcome = cancelOwnRestart(state, { sessionId, now })
+      if (!outcome.removed) {
+        log.warn(`session ${sessionId} did not request the pending restart; nothing was cancelled`)
+        return {
+          ok: false,
+          cancelled: false,
+          scope: 'mine',
+          remainingRequesters: outcome.remaining,
+          sessionId,
+          phase: state.phase,
+          error: 'This session did not request the pending restart, so nothing was cancelled. Pass scope "all" to cancel the request for every session.',
+        }
+      }
+      // Release ONLY this session's continuation request: the other sessions
+      // stay pinned for the restart they asked for.
+      runtime.releaseRequesters([sessionId])
+      if (outcome.cancelled) {
+        // The last requester left: the restart is really over.
+        runtime.stopPolling()
+        log.info(`session ${sessionId} withdrew the last restart request; the pending restart is cancelled`, reason || '')
+      } else {
+        log.info(`session ${sessionId} withdrew its restart request; ${outcome.remaining} requester(s) remain`)
+      }
       runtime.persist()
-      if (hadPending) log.info('pending restart cancelled:', typeof args.reason === 'string' ? args.reason : '(no reason)')
-      return { ok: true, cancelled: hadPending, phase: state.phase }
+      return {
+        ok: true,
+        cancelled: outcome.cancelled,
+        scope: 'mine',
+        remainingRequesters: outcome.remaining,
+        sessionId,
+        phase: state.phase,
+      }
     },
   })
 }
@@ -3719,7 +3818,7 @@ const AUTORESTART_PROMPT = [
   '- Call the `continuum_restart` tool instead (optional arguments: `reason`, `resume`, `defer_seconds`, `parkGoals`). It waits until every conversation is idle (no running turn — a running turn ALWAYS blocks; an inbox message nobody claimed blocks only until `queuedGraceMs`, default 60000 ms, after which it is treated as stuck and no longer blocks) AND the host has been quiet for `settleMs` (default 2000 ms); the detached helper re-checks that gate immediately before killing, so other conversations are never killed mid-turn. It then relaunches the app, and after boot this plugin resumes the session and continues the work automatically.',
   '- A goal-driven session is DISARMED automatically before the restart (its current round still finishes, nothing is lost), because such a session would otherwise keep the restart waiting forever: disarming only removes the process-local continuation authority, so no new round starts and the session goes idle. After the restart the goal is re-armed and continues. A goal whose round budget is spent cannot be continued and is reported instead. You can disarm your own goal on demand with `continuum_park_goal`, and retry a stuck recovery with `continuum_recover_now`.',
   '- Persist anything the next turn needs before restarting (workspace files, `todo_write`, goal state); do not rely on in-memory state.',
-  '- Inspect the lifecycle with `continuum_status`; cancel a pending restart with `continuum_cancel_restart`.',
+  '- Inspect the lifecycle with `continuum_status`; cancel a pending restart with `continuum_cancel_restart`. Its default scope is `mine`: it withdraws ONLY the calling session\'s own request and leaves the requests of the other sessions alone (a restart request is coalesced, so several sessions can wait for the same restart). Use `scope: "all"` to cancel the request for EVERYONE.',
   '- A session whose context exceeds the model window can be handed off to a fresh session with `continuum_handoff` (it carries the goal objective, the recorded reasons and a bounded tail of the conversation); this plugin refuses to auto-resume such a session, so hand it off instead of retrying it.',
   '- For multi-turn objectives prefer a durable goal (`create_goal`): after a restart the plugin re-arms it and the goal round driver keeps producing rounds. No goal is required for restart continuation — without one the plugin injects a single continuation message that continues the work in a fresh turn.',
 ].join('\n')

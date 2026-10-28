@@ -171,17 +171,17 @@ const ZH = {
   panelWaiting: '已等待 {duration}',
   panelResume: '重启后本会话会自动继续进度',
   // The long wait: the restart passed the hard deadline while a conversation
-  // was still running. The bubble says how long it has been waiting and who
-  // holds it — the request itself is never dropped.
-  longWaitNote: ' · 已等 {duration}：{blocker}一直占着',
+  // was still running. The capsule is ONE clipped line of 22px: it holds a
+  // number and a duration, NEVER a name. Every name goes into the tooltip,
+  // where there is room for all of them.
+  longWaitPill: ' · 已等 {duration} · {n} 项任务在跑',
+  longWaitTooltip: '已等 {duration}。在跑：{blockers}',
   // The blockers of one list. They are grouped by the session that created
-  // them (N subagents of one session are ONE item), the bubble names only a
-  // couple of them and the tooltip names them ALL. One rule, three
-  // surfaces: the long-wait line, the waiting sentence of the bubble and the
-  // list of the shutdown card.
+  // them (N subagents of one session are ONE item), the tooltip names them
+  // ALL and the shutdown card lists them. One rule, two surfaces: the
+  // tooltip of the capsule and the list of the shutdown card.
   blockerGeneric: '有会话',
   blockerJoin: '、',
-  blockerClause: '：{blockers}',
   blockerGroupSubagents: '{label}（{n} 个子智能体）',
   blockerGroupSubagentsGeneric: '{n} 个子智能体',
   blockerMore: '…等 {n} 项',
@@ -189,6 +189,11 @@ const ZH = {
   durationSeconds: '{n} 秒',
   durationMinutes: '{n} 分 {m} 秒',
   durationHours: '{n} 小时 {m} 分',
+  // The COMPACT duration of the capsule: it can afford "16 分钟", not
+  // "16 分 37 秒" — the capsule is one clipped line.
+  durationMinutesShort: '{n} 分钟',
+  durationHoursShort: '{n} 小时',
+  durationHoursMinutesShort: '{n} 小时 {m} 分',
   // The one-time install prompt (the choice is asked exactly once).
   // "Backup" is the verb and BOTH options share the "configuration" base:
   // the plugins are an ADDITION to the configuration, never a rival of it.
@@ -337,16 +342,16 @@ const EN = {
   panelWaiting: 'Waiting for {duration}',
   panelResume: 'This session resumes its progress automatically after the restart.',
   // The long wait: the restart passed the hard deadline while a conversation
-  // was still running. The bubble says how long it has been waiting and who
-  // holds it — the request itself is never dropped.
-  longWaitNote: ' · waiting for {duration}: {blocker} keeps holding it',
+  // was still running. The capsule is ONE clipped line of 22px: it holds a
+  // number and a duration, NEVER a name. Every name goes into the tooltip,
+  // where there is room for all of them.
+  longWaitPill: ' · waiting for {duration} · {n} task(s) running',
+  longWaitTooltip: 'Waiting for {duration}. Running: {blockers}',
   // The blockers of one list: they are grouped by the session that created
-  // them (N subagents of one session are ONE item), the bubble names only a
-  // couple of them and the tooltip names them ALL. One rule, three
-  // surfaces.
+  // them (N subagents of one session are ONE item), the tooltip names them
+  // ALL and the shutdown card lists them. One rule, two surfaces.
   blockerGeneric: 'another session',
   blockerJoin: ', ',
-  blockerClause: ': {blockers}',
   blockerGroupSubagents: '{label} ({n} subagents)',
   blockerGroupSubagentsGeneric: '{n} subagents',
   blockerMore: '… and {n} more',
@@ -354,6 +359,11 @@ const EN = {
   durationSeconds: '{n}s',
   durationMinutes: '{n}m {m}s',
   durationHours: '{n}h {m}m',
+  // The COMPACT duration of the capsule: it can afford "16 min", not
+  // "16m 37s" — the capsule is one clipped line.
+  durationMinutesShort: '{n} min',
+  durationHoursShort: '{n}h',
+  durationHoursMinutesShort: '{n}h {m}m',
   // The one-time install prompt (the choice is asked exactly once).
   // "Backup" is the verb and BOTH options share the "configuration" base:
   // the plugins are an ADDITION to the configuration, never a rival of it.
@@ -616,6 +626,30 @@ function formatDurationMs(ms, t) {
   return fillTemplate(translate('durationHours'), { n: hours, m: minutes % 60 })
 }
 
+/**
+ * A duration as a COMPACT locale string: "45 秒" / "3 分钟" / "2 小时 5 分".
+ *
+ * The capsule of the pending restart is ONE clipped line of 22px: it can
+ * afford "16 分钟", not "16 分 37 秒". The precise duration belongs into the
+ * tooltip, where there is room for it.
+ *
+ * @param {number} ms
+ * @param {(name: string) => string} [t] the translator
+ * @returns {string}
+ */
+function formatCompactDurationMs(ms, t) {
+  const translate = typeof t === 'function' ? t : (name) => name
+  const totalSeconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000))
+  if (totalSeconds < 60) return fillTemplate(translate('durationSeconds'), { n: totalSeconds })
+  const minutes = Math.floor(totalSeconds / 60)
+  if (minutes < 60) return fillTemplate(translate('durationMinutesShort'), { n: minutes })
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest === 0
+    ? fillTemplate(translate('durationHoursShort'), { n: hours })
+    : fillTemplate(translate('durationHoursMinutesShort'), { n: hours, m: rest })
+}
+
 /* ------------------------------------------------------------------ *
  * The blocker lists: ONE rule for every surface that names them.
  *
@@ -629,13 +663,16 @@ function formatDurationMs(ms, t) {
  *
  *   1. the subagents of ONE session are ONE item ("<that session>
  *      (N subagents)"); a plain session is an item of its own;
- *   2. a bubble names at most `BLOCKER_SUMMARY_LIMIT` items and says
+ *   2. a list names at most `BLOCKER_SUMMARY_LIMIT` items and says
  *      "… and N more" about the rest — never an endless list;
- *   3. a name that is too long for the bubble is shortened;
+ *   3. the SHORT list shortens a name that is too long;
  *   4. the COMPLETE list goes into the tooltip (`title`).
  *
- * Three surfaces use it: the long-wait line of the bubble, the waiting
- * sentence of the bubble and the list of the shutdown card.
+ * WHERE THE NAMES LIVE. The capsule of the pending restart is 22px high
+ * and ONE line wide: a name in it is a name that gets clipped away. So
+ * the capsule says NUMBERS ONLY ("已等 16 分钟 · 3 项任务在跑") and every
+ * name goes into the tooltip (`title`) — where the COMPLETE list lives.
+ * The shutdown card has room, so it keeps the readable list.
  *
  * THE TWO REAL SHAPES. The Host does not report the blockers in one shape,
  * so the rule has to read every field the Host actually sends:
@@ -960,26 +997,40 @@ function formatLongWaitNote(info, t) {
 }
 
 /**
- * The note of a LONG wait, in both shapes: the bubble shows the SHORT
- * summary, the tooltip the COMPLETE list.
+ * The note of a LONG wait, in both shapes: the CAPSULE shows the numbers
+ * only, the tooltip the COMPLETE list.
+ *
+ * The capsule of the pending restart is 22px high and ONE line wide: a name
+ * in it is a name that gets clipped away. So the capsule says HOW LONG the
+ * restart has been waiting and HOW MANY tasks are running — never WHO they
+ * are — and every name goes into the tooltip.
  *
  * @param {any} info the state payload of the Host
  * @param {(name: string) => string} [t] the translator
- * @returns {{ note: string, full: string, summary: string, hasLongWait: boolean }}
+ * @returns {{ note: string, full: string, pill: string, summary: string, count: number, hasLongWait: boolean }}
  */
 function formatLongWaitNoteParts(info, t) {
   const translate = typeof t === 'function' ? t : (name) => name
   const longWait = info && typeof info === 'object' ? info.longWait : null
   if (!longWait || typeof longWait !== 'object') {
-    return { note: '', full: '', summary: '', hasLongWait: false }
+    return { note: '', full: '', pill: '', summary: '', count: 0, hasLongWait: false }
   }
   const blockedBy = Array.isArray(longWait.blockedBy) ? longWait.blockedBy : []
   const summary = summarizeBlockers(blockedBy, { t: translate })
+  // The precise duration belongs into the tooltip, the COMPACT one into the
+  // capsule: the capsule cannot afford "16 分 37 秒".
   const duration = formatDurationMs(longWait.waitedMs, translate)
+  const compact = formatCompactDurationMs(longWait.waitedMs, translate)
+  const count = blockedBy.length
+  // The tooltip: the whole story, every name, nothing cut.
+  const sentence = fillTemplate(translate('longWaitTooltip'), { duration, blockers: summary.full })
   return {
-    note: fillTemplate(translate('longWaitNote'), { duration, blocker: summary.summary }),
-    full: fillTemplate(translate('longWaitNote'), { duration, blocker: summary.full }),
+    // The CAPSULE: numbers only, no name at all.
+    pill: fillTemplate(translate('longWaitPill'), { duration: compact, n: count }),
+    note: sentence,
+    full: sentence,
     summary: summary.summary,
+    count,
     hasLongWait: true,
   }
 }
@@ -999,6 +1050,7 @@ const SLEEP_EXPORTS = {
   formatRemainingMs,
   formatLongWaitNote,
   formatLongWaitNoteParts,
+  formatCompactDurationMs,
   groupBlockers,
   summarizeBlockers,
   truncateBlockerName,
@@ -1763,32 +1815,34 @@ if (moduleLoader) moduleLoader.load({
       const gateReason = info && typeof info.reason === 'string' ? info.reason : ''
 
       // The long wait: the Host says that the restart passed the hard
-      // deadline while a conversation was still running. The bubble shows one
-      // more line about it — how long it has been waiting and who holds it.
+      // deadline while a conversation was still running. The capsule shows one
+      // more line about it — how long it has been waiting and how many tasks
+      // are running.
       const longWait = formatLongWaitNoteParts(info, t)
       // The blockers of the ordinary list: the SAME rule as the long wait
-      // (grouped by the session that created them, capped, shortened).
+      // (grouped by the session that created them).
       const blockers = summarizeBlockers(busyBlockers, { t })
 
-      // The bubble names the blockers EXACTLY ONCE: the long-wait line names
-      // them when the restart is stuck past the hard deadline (that is where
-      // the user needs to know WHO holds it), the waiting sentence names them
-      // otherwise. Either way the list is short and the tooltip has the whole
-      // of it. A blocker without a name has nothing to show, so the clause is
-      // left out then.
-      const statusNames = (longWait.hasLongWait || blockers.named === 0) ? '' : blockers.summary
-      const status = goalActive.length > 0
-        ? t('goalActive')
-        : goalExhausted.length > 0
-          ? t('goalExhausted')
-          : otherBusy > 0
-            ? `${t('busyPrefix')}${otherBusy}${t('busySuffix')}`
-              + (statusNames === '' ? '' : fill(t('blockerClause'), { blockers: statusNames }))
-            : (gateReason === 'settling' ? t('settling') : t('idle'))
+      // The capsule is ONE clipped line of 22px: it holds a NUMBER and a
+      // duration, never a NAME. Every name goes into the tooltip, where
+      // there is room for all of them.
+      //
+      // A long wait says it ONCE: its own line carries the duration and the
+      // count, so the ordinary "waiting for N tasks" sentence is left out —
+      // it would say the same thing twice and take twice the width.
+      const status = longWait.hasLongWait
+        ? ''
+        : goalActive.length > 0
+          ? t('goalActive')
+          : goalExhausted.length > 0
+            ? t('goalExhausted')
+            : otherBusy > 0
+              ? `${t('busyPrefix')}${otherBusy}${t('busySuffix')}`
+              : (gateReason === 'settling' ? t('settling') : t('idle'))
 
       const tooltipText = otherBusy > 0 ? t('tooltipBusy') : t('tooltip')
-      // The tooltip carries the COMPLETE list of the blockers: the bubble
-      // shows a short summary, the tooltip every name.
+      // The tooltip carries the COMPLETE list of the blockers: the capsule
+      // shows numbers only, the tooltip every name.
       const detail = longWait.hasLongWait
         ? longWait.full
         : (blockers.total === 0 ? '' : fill(t('blockersTitleLine'), { blockers: blockers.full }))
@@ -1862,10 +1916,10 @@ if (moduleLoader) moduleLoader.load({
           h('span', { style: dotStyle(DOT_STYLE, pulsing), 'aria-hidden': 'true' }),
           h('span', { style: TEXT_STYLE }, h('b', null, t('label')), status),
           // One more line for the long wait: how long the restart has been
-          // waiting and who holds it. It is only there when the Host says so.
-          // The line itself carries the SHORT list; its own tooltip carries
-          // the COMPLETE list.
-          longWait.note === ''
+          // waiting and how many tasks are running. It is only there when the
+          // Host says so. The line carries NO name at all — it is one
+          // clipped line — and its own tooltip carries the COMPLETE list.
+          longWait.pill === ''
             ? null
             : h(
               'span',
@@ -1874,7 +1928,7 @@ if (moduleLoader) moduleLoader.load({
                 'data-dsh-autorestart-long-wait': 'true',
                 title: longWait.full,
               },
-              longWait.note,
+              longWait.pill,
             ),
           // One park button per goal-driven blocker that can be parked. It
           // lives inside the pill, so the slot still has a single root.

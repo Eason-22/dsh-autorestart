@@ -710,8 +710,13 @@ test('the bubble shows one more line while the restart waits for a long time', a
   assert.ok(note, 'the long wait must have its own line')
   const text = textOf(note)
   assert.match(text, /已等/, `the line says how long it waits: ${text}`)
-  assert.match(text, /3 分 12 秒/, `the line quotes the duration: ${text}`)
-  assert.match(text, /写代码/, `the line names the blocker: ${text}`)
+  // The capsule is ONE clipped line: it quotes the duration in the compact
+  // form and the COUNT of the tasks — never a name.
+  assert.match(text, /3 分钟/, `the line quotes the duration: ${text}`)
+  assert.match(text, /1 项任务在跑/, `the line counts the tasks: ${text}`)
+  assert.doesNotMatch(text, /写代码/, `the line names no blocker: ${text}`)
+  // The name is in the tooltip of the capsule.
+  assert.match(note.props.title, /写代码/, `the tooltip names the blocker: ${note.props.title}`)
 })
 
 test('without a long wait the bubble shows no extra line', async () => {
@@ -773,7 +778,11 @@ test('the long-wait line exists in both languages', async () => {
   assert.match(zhText, /[一-鿿]/, 'the Chinese line is Chinese')
   assert.match(enText, /[A-Za-z]/, 'the English line is English')
   assert.match(enText, /waiting for/, enText)
-  assert.match(enText, /coding/, enText)
+  assert.match(enText, /1 task\(s\) running/, enText)
+  // The capsule names no blocker: the name is in the tooltip.
+  assert.doesNotMatch(enText, /coding/, enText)
+  const enNote = walk(en).find((node) => node.props && node.props['data-dsh-autorestart-long-wait'] === 'true')
+  assert.match(enNote.props.title, /coding/, `the tooltip names the blocker: ${enNote.props.title}`)
 })
 
 test('the bubble says that it is waiting for the quiet window', async () => {

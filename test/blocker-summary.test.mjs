@@ -506,7 +506,58 @@ function mountClient({ health = {}, status = {}, language = 'zh' } = {}) {
   }
 }
 
-test('the long-wait line of the bubble groups the subagents and stays short', async () => {
+/* ------------------------------------------------------------------ *
+ * The capsule: NUMBERS ONLY. Every name lives in the tooltip.
+ *
+ * The real machine showed why: the capsule is 22px high and ONE line wide,
+ * so every name in it is a name that gets clipped away. It says HOW LONG
+ * and HOW MANY — never WHO.
+ * ------------------------------------------------------------------ */
+
+/** How many characters the copy of the capsule may have. */
+const CAPSULE_COPY_LIMIT = 30
+
+/**
+ * The copy of the capsule: every text leaf that is NOT a button.
+ *
+ * A button is a control (the park button), not copy: the capsule copy is
+ * what the user reads.
+ *
+ * @param {any} node
+ * @param {string[]} [out]
+ * @returns {string[]}
+ */
+function capsuleCopy(node, out = []) {
+  if (!node || typeof node !== 'object') return out
+  if (node.type === 'button') return out
+  for (const child of node.children || []) {
+    if (typeof child === 'string') out.push(child)
+    else capsuleCopy(child, out)
+  }
+  return out
+}
+
+/** The copy of the capsule as one string. */
+function copyOf(pill) {
+  return capsuleCopy(pill).join('')
+}
+
+/** The tooltip of the capsule (the capsule's own `title`). */
+function tooltipOf(pill) {
+  const node = walk(pill).find(
+    (entry) => entry.props && typeof entry.props.title === 'string' && entry.type !== 'button',
+  )
+  return node ? node.props.title : ''
+}
+
+/**
+ * Mount the capsule with a long wait that is held by these blockers.
+ *
+ * @param {any[]} blockedBy
+ * @param {number} [waitedMs]
+ * @returns {Promise<any>}
+ */
+async function mountLongWait(blockedBy, waitedMs = 1_504_000) {
   const mounted = mountClient({
     health: {
       ok: true,
@@ -517,34 +568,123 @@ test('the long-wait line of the bubble groups the subagents and stays short', as
       longWait: {
         since: 1_700_000_000_000,
         reason: 'hard-deadline-waiting-for-conversations',
-        waitedMs: 1_504_000,
-        blockedBy: LONG_WAIT_BLOCKERS,
+        waitedMs,
+        blockedBy,
       },
     },
   })
-
   const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-x' })
-  assert.ok(pill, 'the pill must be rendered')
-  const note = walk(pill).find((node) => node.props && node.props['data-dsh-autorestart-long-wait'] === 'true')
-  assert.ok(note, 'the long wait must have its own line')
-  const text = textOf(note)
+  assert.ok(pill, 'the capsule must be rendered')
+  return pill
+}
 
-  assert.match(text, /已等/, `the line says how long it waits: ${text}`)
-  assert.match(text, /GitHub 连接不稳…（3 个子智能体）/, `the subagents are grouped: ${text}`)
-  assert.doesNotMatch(text, /的子智能体、/, `no subagent is named one by one: ${text}`)
-  assert.doesNotMatch(text, /另一个会话/, `the bubble names at most a couple of items: ${text}`)
-  assert.match(text, /…等 \d+ 项/, `the rest is counted, not listed: ${text}`)
-  assert.ok(text.length < 90, `the line must stay short: ${text.length} characters — ${text}`)
+/** The blocker lists the capsule has to survive. */
+const CAPSULE_SCENARIOS = [
+  {
+    label: 'three plain conversations',
+    blockers: [session('sess-a', '会话一'), session('sess-b', '会话二'), session('sess-c', '会话三')],
+  },
+  {
+    label: 'ten subagents of three parents',
+    blockers: [
+      subagent('child-1', 'sess-a', '写代码'),
+      subagent('child-2', 'sess-a', '写代码'),
+      subagent('child-3', 'sess-a', '写代码'),
+      subagent('child-4', 'sess-b', '调研'),
+      subagent('child-5', 'sess-b', '调研'),
+      subagent('child-6', 'sess-b', '调研'),
+      subagent('child-7', 'sess-c', '发版'),
+      subagent('child-8', 'sess-c', '发版'),
+      subagent('child-9', 'sess-c', '发版'),
+      subagent('child-10', 'sess-c', '发版'),
+    ],
+  },
+  {
+    label: 'a name of fifty characters',
+    blockers: [session('sess-a', '会'.repeat(50))],
+  },
+  {
+    label: 'everything mixed',
+    blockers: [
+      subagent('child-1', 'sess-a', '写代码'),
+      subagent('child-2', 'sess-a', '写代码'),
+      session('sess-b', '会'.repeat(50)),
+      session('sess-c', '会话三'),
+      subagent('child-3', 'sess-d', '发版'),
+    ],
+  },
+]
+
+test('the capsule of a long wait carries numbers only', async () => {
+  const pill = await mountLongWait(LONG_WAIT_BLOCKERS)
+  const copy = copyOf(pill)
+  assert.equal(copy, '待重启 · 已等 25 分钟 · 6 项任务在跑', `the capsule says the numbers: ${copy}`)
+  assert.ok(
+    Array.from(copy).length <= CAPSULE_COPY_LIMIT,
+    `the capsule stays short: ${Array.from(copy).length} characters — ${copy}`,
+  )
 })
 
-test('the tooltip of the bubble carries the COMPLETE list', async () => {
+test('the capsule stays short for every kind of blocker list', async () => {
+  for (const scenario of CAPSULE_SCENARIOS) {
+    const pill = await mountLongWait(scenario.blockers)
+    const copy = copyOf(pill)
+    assert.ok(
+      Array.from(copy).length <= CAPSULE_COPY_LIMIT,
+      `${scenario.label}: the capsule stays short: ${Array.from(copy).length} characters — ${copy}`,
+    )
+  }
+})
+
+test('the capsule names no blocker at all', async () => {
+  for (const scenario of CAPSULE_SCENARIOS) {
+    const pill = await mountLongWait(scenario.blockers)
+    const copy = copyOf(pill)
+    for (const entry of scenario.blockers) {
+      const title = entry.label || entry.name || ''
+      assert.ok(
+        !copy.includes(title),
+        `${scenario.label}: the capsule names no blocker: "${title}" — ${copy}`,
+      )
+    }
+  }
+})
+
+test('the tooltip of the capsule carries every blocker, nothing cut', async () => {
+  for (const scenario of CAPSULE_SCENARIOS) {
+    const pill = await mountLongWait(scenario.blockers)
+    const tooltip = tooltipOf(pill)
+    for (const entry of scenario.blockers) {
+      const title = entry.label || entry.name || ''
+      assert.ok(
+        tooltip.includes(title),
+        `${scenario.label}: the tooltip names it: "${title}" — ${tooltip}`,
+      )
+    }
+    assert.ok(!tooltip.includes('…'), `${scenario.label}: the tooltip is not cut: ${tooltip}`)
+  }
+})
+
+test('the tooltip of the capsule groups the subagents of one session', async () => {
+  const pill = await mountLongWait(LONG_WAIT_BLOCKERS)
+  const tooltip = tooltipOf(pill)
+  assert.match(tooltip, /GitHub 连接不稳定解决方案（3 个子智能体）/, `the group is in the tooltip: ${tooltip}`)
+  assert.match(tooltip, /保险库推送目录配置/, `every group is in the tooltip: ${tooltip}`)
+  assert.match(tooltip, /DSH 电脑控制台/, `every group is in the tooltip: ${tooltip}`)
+  assert.match(tooltip, /另一个会话/, `every group is in the tooltip: ${tooltip}`)
+  assert.doesNotMatch(tooltip, /…等 \d+ 项/, `the tooltip is the whole list: ${tooltip}`)
+})
+
+test('a long wait does not say the waiting sentence twice', async () => {
   const mounted = mountClient({
     health: {
       ok: true,
       pendingRestart: true,
       waiters: ['sess-x'],
-      blockedBy: [],
       allowRestart: false,
+      // The ordinary list AND the long wait are both there: the capsule must
+      // say it ONCE.
+      blockedBy: [session('sess-a', '写代码'), session('sess-b', '调研')],
       longWait: {
         since: 1_700_000_000_000,
         reason: 'hard-deadline-waiting-for-conversations',
@@ -555,16 +695,16 @@ test('the tooltip of the bubble carries the COMPLETE list', async () => {
   })
 
   const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-x' })
-  const note = walk(pill).find((node) => node.props && node.props['data-dsh-autorestart-long-wait'] === 'true')
-  const title = note.props.title
-  assert.match(title, /GitHub 连接不稳定解决方案（3 个子智能体）/, `the group is in the tooltip: ${title}`)
-  assert.match(title, /保险库推送目录配置/, `every group is in the tooltip: ${title}`)
-  assert.match(title, /DSH 电脑控制台/, `every group is in the tooltip: ${title}`)
-  assert.match(title, /另一个会话/, `every group is in the tooltip: ${title}`)
-  assert.doesNotMatch(title, /…等 \d+ 项/, `the tooltip is the whole list: ${title}`)
+  const copy = copyOf(pill)
+  assert.match(copy, /已等/, `the capsule says the long wait: ${copy}`)
+  assert.doesNotMatch(copy, /等待 \d+ 个任务结束/, `the waiting sentence is not said twice: ${copy}`)
+  assert.ok(
+    Array.from(copy).length <= CAPSULE_COPY_LIMIT,
+    `the capsule stays short: ${Array.from(copy).length} characters — ${copy}`,
+  )
 })
 
-test('the waiting sentence of the bubble names the blockers of the ordinary list', async () => {
+test('the waiting sentence of the capsule counts the tasks and names none of them', async () => {
   const mounted = mountClient({
     health: {
       ok: true,
@@ -581,10 +721,16 @@ test('the waiting sentence of the bubble names the blockers of the ordinary list
   })
 
   const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-x' })
-  const text = textOf(pill)
-  assert.match(text, /等待 4 个任务结束/, `the tasks are still counted: ${text}`)
-  assert.match(text, /写代码（2 个子智能体）/, `the subagents are grouped: ${text}`)
-  assert.doesNotMatch(text, /调研、另一个会话/, `the bubble names at most a couple of items: ${text}`)
+  const copy = copyOf(pill)
+  assert.equal(copy, '待重启 · 等待 4 个任务结束', `the capsule counts the tasks: ${copy}`)
+  for (const title of ['写代码', '调研', '另一个会话']) {
+    assert.ok(!copy.includes(title), `the capsule names no blocker: ${title} — ${copy}`)
+  }
+  // The names are in the tooltip, where there is room for them.
+  const tooltip = tooltipOf(pill)
+  assert.match(tooltip, /写代码（2 个子智能体）/, `the tooltip groups the subagents: ${tooltip}`)
+  assert.match(tooltip, /调研/, `the tooltip names every group: ${tooltip}`)
+  assert.match(tooltip, /另一个会话/, `the tooltip names every group: ${tooltip}`)
 })
 
 test('a blocker without a name adds no clause to the waiting sentence', async () => {

@@ -75,13 +75,15 @@
  *
  * This file is a CLASSIC script: the client module loader evaluates a
  * plugin bundle as a same-origin external classic script, so the ESM
- * `export` keyword is NOT available here. The four pure helpers are
+ * `export` keyword is NOT available here. The pure helpers are
  * therefore published in the two places a test can reach them:
  *
  *   1. as NAMED properties of this module's exports — the client module
  *      system materializes `factory(require) -> exports`, so the exports
  *      object carries `pickSleepCaption`, `shouldShowSleepButton`,
- *      `buildChoiceBody` and `formatRemainingMs`;
+ *      `buildChoiceBody`, `formatRemainingMs`, `formatLongWaitNote`,
+ *      `formatLongWaitNoteParts`, `groupBlockers`, `summarizeBlockers`
+ *      and `truncateBlockerName`;
  *   2. on the global namespace `globalThis.__dshAutorestartClient`, which
  *      exists as soon as this file is evaluated (no factory call needed).
  *
@@ -157,6 +159,10 @@ const ZH = {
   panelBlockedSession: '会话「{label}」正在运行',
   panelBlockedSubagent: '{name}正在运行',
   panelBlockedSubagentGeneric: '有一个子智能体正在运行',
+  // The N subagents of ONE session are one line: the session is named once
+  // and the number of its subagents says how many there are.
+  panelBlockedSubagentGroup: '会话「{label}」的 {n} 个子智能体正在运行',
+  panelBlockedSubagentGroupGeneric: '有 {n} 个子智能体正在运行',
   panelBlockedRestartPending: '等这次重启完成后再关机',
   panelGoalActiveLine: '占用会话「{title}」：goal 正在自动续跑（goal-active）',
   panelGoalExhaustedLine: '占用会话「{title}」：goal 轮次额度已用完，无法继续（goal-exhausted）',
@@ -168,8 +174,18 @@ const ZH = {
   // was still running. The bubble says how long it has been waiting and who
   // holds it — the request itself is never dropped.
   longWaitNote: ' · 已等 {duration}：{blocker}一直占着',
-  longWaitBlockerGeneric: '有会话',
-  longWaitBlockerJoin: '、',
+  // The blockers of one list. They are grouped by the session that created
+  // them (N subagents of one session are ONE item), the bubble names only a
+  // couple of them and the tooltip names them ALL. One rule, three
+  // surfaces: the long-wait line, the waiting sentence of the bubble and the
+  // list of the shutdown card.
+  blockerGeneric: '有会话',
+  blockerJoin: '、',
+  blockerClause: '：{blockers}',
+  blockerGroupSubagents: '{label}（{n} 个子智能体）',
+  blockerGroupSubagentsGeneric: '{n} 个子智能体',
+  blockerMore: '…等 {n} 项',
+  blockersTitleLine: '占用会话：{blockers}',
   durationSeconds: '{n} 秒',
   durationMinutes: '{n} 分 {m} 秒',
   durationHours: '{n} 小时 {m} 分',
@@ -310,6 +326,9 @@ const EN = {
   panelBlockedSession: 'Session "{label}" is running',
   panelBlockedSubagent: '{name} is running',
   panelBlockedSubagentGeneric: 'One subagent is running',
+  // The N subagents of ONE session are one line.
+  panelBlockedSubagentGroup: 'The {n} subagents of session "{label}" are running',
+  panelBlockedSubagentGroupGeneric: '{n} subagents are running',
   panelBlockedRestartPending: 'Waiting for the pending restart to finish before shutting down',
   panelGoalActiveLine: 'Blocking session "{title}": the goal keeps driving rounds by itself (goal-active)',
   panelGoalExhaustedLine: 'Blocking session "{title}": the goal ran out of rounds and cannot continue (goal-exhausted)',
@@ -321,8 +340,17 @@ const EN = {
   // was still running. The bubble says how long it has been waiting and who
   // holds it — the request itself is never dropped.
   longWaitNote: ' · waiting for {duration}: {blocker} keeps holding it',
-  longWaitBlockerGeneric: 'another session',
-  longWaitBlockerJoin: ', ',
+  // The blockers of one list: they are grouped by the session that created
+  // them (N subagents of one session are ONE item), the bubble names only a
+  // couple of them and the tooltip names them ALL. One rule, three
+  // surfaces.
+  blockerGeneric: 'another session',
+  blockerJoin: ', ',
+  blockerClause: ': {blockers}',
+  blockerGroupSubagents: '{label} ({n} subagents)',
+  blockerGroupSubagentsGeneric: '{n} subagents',
+  blockerMore: '… and {n} more',
+  blockersTitleLine: 'Blocking sessions: {blockers}',
   durationSeconds: '{n}s',
   durationMinutes: '{n}m {m}s',
   durationHours: '{n}h {m}m',
@@ -588,6 +616,333 @@ function formatDurationMs(ms, t) {
   return fillTemplate(translate('durationHours'), { n: hours, m: minutes % 60 })
 }
 
+/* ------------------------------------------------------------------ *
+ * The blocker lists: ONE rule for every surface that names them.
+ *
+ * The defect the real machine showed: the pending-restart bubble grew a
+ * line that named EVERY blocker — and every AgentTeams member is a
+ * subagent, so the names of one team turned into a string of a dozen
+ * "…的子智能体" phrases that did not fit into a 22px pill any more and
+ * were clipped away.
+ *
+ * The rule, in one place:
+ *
+ *   1. the subagents of ONE session are ONE item ("<that session>
+ *      (N subagents)"); a plain session is an item of its own;
+ *   2. a bubble names at most `BLOCKER_SUMMARY_LIMIT` items and says
+ *      "… and N more" about the rest — never an endless list;
+ *   3. a name that is too long for the bubble is shortened;
+ *   4. the COMPLETE list goes into the tooltip (`title`).
+ *
+ * Three surfaces use it: the long-wait line of the bubble, the waiting
+ * sentence of the bubble and the list of the shutdown card.
+ *
+ * THE TWO REAL SHAPES. The Host does not report the blockers in one shape,
+ * so the rule has to read every field the Host actually sends:
+ *
+ *   A. the gate / the long wait / the state route (`index.js`,
+ *      `describeBlocker` + `busyAgents`):
+ *
+ *        { sessionId, reason, busyReason?, kind, label, name,
+ *          parentTitle, parentSessionId }
+ *
+ *      `label` is the title of the session — for a SUBAGENT it is the title
+ *      of the session that created it, and `name` is the composed phrase
+ *      ("<that session>'s subagent"). `parentSessionId` says which session
+ *      it belongs to.
+ *
+ *   B. the shutdown card (`lib/sleep.js`, `blockerEntry`):
+ *
+ *        { sessionId, kind, label, name, parentTitle, title }
+ *
+ *      The SAME information, but WITHOUT `parentSessionId` — so the
+ *      grouping falls back to the parent's title (`parentTitle`).
+ *
+ * A rule that only knows `parentSessionId` therefore groups the card
+ * wrongly: every member of a team becomes an item of its own, which is
+ * exactly the endless list the rule is there to prevent.
+ * ------------------------------------------------------------------ */
+
+/**
+ * How many blockers a bubble names at once.
+ *
+ * The bubble is a 22px high pill: a long list is clipped away, so the list
+ * is capped and the complete list goes into the tooltip.
+ */
+const BLOCKER_SUMMARY_LIMIT = 2
+
+/**
+ * How many characters one name may have in the bubble.
+ *
+ * The bubble is small, so a long session title is shortened instead of
+ * pushing the rest of the line out of the pill. The "…" is part of the
+ * budget: the bubble never shows MORE than this many characters of one
+ * name.
+ */
+const BLOCKER_NAME_MAX_LENGTH = 12
+
+/** The character a shortened name ends with. */
+const BLOCKER_ELLIPSIS = '…'
+
+/**
+ * A name that is at most `maxLength` characters long.
+ *
+ * The characters are counted, not the code units, so a name of Chinese
+ * characters is cut after the requested number of characters. The ellipsis
+ * counts towards the limit: a name of 12 characters is shown as 11
+ * characters plus "…", never as 13.
+ *
+ * @param {string} name
+ * @param {number} [maxLength]
+ * @returns {string}
+ */
+function truncateBlockerName(name, maxLength) {
+  const text = typeof name === 'string' ? name.trim() : ''
+  if (text === '') return ''
+  const limit = Number.isFinite(maxLength) && maxLength > 0
+    ? Math.floor(maxLength)
+    : BLOCKER_NAME_MAX_LENGTH
+  const characters = Array.from(text)
+  if (characters.length <= limit) return text
+  if (limit === 1) return BLOCKER_ELLIPSIS
+  return characters.slice(0, limit - 1).join('') + BLOCKER_ELLIPSIS
+}
+
+/**
+ * One trimmed string field of a blocker, or '' when the field is missing.
+ *
+ * @param {any} entry
+ * @param {string} key
+ * @returns {string}
+ */
+function blockerField(entry, key) {
+  if (!entry || typeof entry !== 'object') return ''
+  const value = entry[key]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/**
+ * WHAT a blocker is: a session, a subagent or a pending restart.
+ *
+ * The Host says it (`kind`), but the kind is NOT the only evidence: an
+ * entry that names a parent session (`parentSessionId` / `parentTitle`) IS
+ * a subagent, whatever the Host called it. A Host that does not label the
+ * kind must not turn a team of subagents into a list of single items.
+ *
+ * @param {any} entry
+ * @returns {'session'|'subagent'|'restart-pending'}
+ */
+function blockerEntryKind(entry) {
+  if (!entry || typeof entry !== 'object') return 'session'
+  if (entry.kind === 'restart-pending') return 'restart-pending'
+  if (entry.kind === 'subagent') return 'subagent'
+  if (entry.kind === 'session') return 'session'
+  if (blockerField(entry, 'parentSessionId') !== '' || blockerField(entry, 'parentTitle') !== '') {
+    return 'subagent'
+  }
+  return 'session'
+}
+
+/**
+ * The title of the session a subagent belongs to.
+ *
+ * For a subagent the Host's `label` IS the title of the session that
+ * created it (that is what the "…的子智能体" name is built from);
+ * `parentTitle` is the same title under its own name, and `title` is the
+ * old alias of `label`.
+ *
+ * @param {any} entry
+ * @returns {string}
+ */
+function blockerParentTitle(entry) {
+  return blockerField(entry, 'label')
+    || blockerField(entry, 'parentTitle')
+    || blockerField(entry, 'title')
+}
+
+/**
+ * The identity of the session that created a subagent — the key its
+ * subagents are grouped by.
+ *
+ * The parent session id is the exact identity. The parent's title is the
+ * fallback for the surfaces that do not carry the id: the shutdown card
+ * reports `parentTitle` but NO `parentSessionId`, so without this
+ * fallback every member of a team would become an item of its own.
+ *
+ * @param {any} entry
+ * @returns {string|null}
+ */
+function blockerParentKey(entry) {
+  const id = blockerField(entry, 'parentSessionId')
+  if (id !== '') return 'id:' + id
+  const title = blockerField(entry, 'parentTitle')
+  if (title !== '') return 'title:' + title
+  const label = blockerField(entry, 'label')
+  if (label !== '') return 'label:' + label
+  return null
+}
+
+/**
+ * The readable name of one blocker.
+ *
+ * The Host names a session by its title (`label`, also carried as `name`)
+ * and a subagent by the whole phrase ("<that session>'s subagent"). A
+ * surface that carries the title under the old name (`title`) still gets a
+ * name; an entry without any of them has nothing to show.
+ *
+ * @param {any} entry
+ * @returns {string}
+ */
+function blockerEntryName(entry) {
+  if (!entry || typeof entry !== 'object') return ''
+  return blockerField(entry, 'name')
+    || blockerField(entry, 'label')
+    || blockerField(entry, 'title')
+    || blockerField(entry, 'parentTitle')
+}
+
+/**
+ * The blockers of one list, grouped by the session that created them.
+ *
+ * A subagent belongs to the session that spawned it, so N subagents of one
+ * session are ONE item. A plain session is an item of its own: it is a
+ * conversation in its own right, even when its own subagents are busy too.
+ *
+ * The group key is the parent session id when the surface reports it, and
+ * the parent's TITLE when it does not (the shutdown card reports
+ * `parentTitle` but no id).
+ *
+ * @param {any[]} entries the blockers the Host reported
+ * @returns {Array<{ key: string, kind: string, label: string, name: string, count: number, entry: any, sessionIds: string[] }>}
+ */
+function groupBlockers(entries) {
+  const list = Array.isArray(entries) ? entries : []
+  const groups = []
+  const byKey = new Map()
+  for (const entry of list) {
+    if (!entry || typeof entry !== 'object') continue
+    const kind = blockerEntryKind(entry)
+    // A subagent of a KNOWN session joins that session's group. A subagent
+    // whose parent is unknown joins the one generic group of parentless
+    // subagents — they are counted ("N subagents"), not listed one by one.
+    const parent = kind === 'subagent' ? (blockerParentKey(entry) || 'unknown') : null
+    const sessionId = entry.sessionId == null ? '' : String(entry.sessionId)
+    const key = parent !== null ? 'parent:' + parent : 'own:' + kind + ':' + sessionId
+    let group = byKey.get(key)
+    if (!group) {
+      group = {
+        key,
+        kind,
+        parentSessionId: blockerField(entry, 'parentSessionId') || null,
+        // The label of a subagent group is the title of the session that
+        // created it; the label of a session is its own title.
+        label: kind === 'subagent'
+          ? blockerParentTitle(entry)
+          : (blockerField(entry, 'label') || blockerField(entry, 'title')),
+        name: blockerEntryName(entry),
+        count: 0,
+        entry,
+        sessionIds: [],
+      }
+      byKey.set(key, group)
+      groups.push(group)
+    }
+    group.count += 1
+    group.sessionIds.push(sessionId)
+    if (group.label === '') {
+      group.label = kind === 'subagent'
+        ? blockerParentTitle(entry)
+        : (blockerField(entry, 'label') || blockerField(entry, 'title'))
+    }
+    if (group.name === '') group.name = blockerEntryName(entry)
+  }
+  return groups
+}
+
+/**
+ * The name of one group, as it is shown.
+ *
+ * A group of more than one subagent is named after the session that
+ * created them ("<that session> (N subagents)"); a lone subagent keeps its
+ * own name ("<that session>'s subagent").
+ *
+ * @param {any} group one group of `groupBlockers`
+ * @param {(name: string) => string} t the translator
+ * @param {number} maxLength how many characters the name may have
+ * @param {boolean} shorten whether the name may be shortened
+ * @returns {string}
+ */
+function blockerGroupName(group, t, maxLength, shorten) {
+  if (!group) return ''
+  const translate = typeof t === 'function' ? t : (name) => name
+  if (group.kind === 'subagent') {
+    // A group of MORE THAN ONE subagent is named after the session that
+    // created them ("<that session> (N subagents)"); a lone subagent keeps
+    // its own name ("<that session>'s subagent").
+    if (group.count > 1) {
+      const label = shorten ? truncateBlockerName(group.label, maxLength) : group.label
+      return label === ''
+        ? fillTemplate(translate('blockerGroupSubagentsGeneric'), { n: group.count })
+        : fillTemplate(translate('blockerGroupSubagents'), { label, n: group.count })
+    }
+    const own = group.name || group.label
+    if (own !== '') return shorten ? truncateBlockerName(own, maxLength) : own
+    // A lone subagent without any name at all: the generic line still says
+    // something — an empty name never reaches the interface.
+    return fillTemplate(translate('blockerGroupSubagentsGeneric'), { n: group.count })
+  }
+  const name = group.name || group.label
+  return shorten ? truncateBlockerName(name, maxLength) : name
+}
+
+/**
+ * The names of the blockers: a SHORT summary for the bubble and the
+ * COMPLETE list for the tooltip.
+ *
+ * The summary never grows without a bound: at most `limit` items, every
+ * name shortened to `maxNameLength` characters, and a "… and N more" for
+ * the rest. The complete list names every group with its full name — it is
+ * only ever shown in a tooltip, where there is room for it.
+ *
+ * @param {any[]} entries the blockers the Host reported
+ * @param {{ t?: Function, limit?: number, maxNameLength?: number, joiner?: string }} [options]
+ * @returns {{ groups: any[], summary: string, full: string, total: number }}
+ */
+function summarizeBlockers(entries, options) {
+  const opts = options && typeof options === 'object' ? options : {}
+  const translate = typeof opts.t === 'function' ? opts.t : (name) => name
+  const limit = Number.isFinite(opts.limit) && opts.limit > 0
+    ? Math.floor(opts.limit)
+    : BLOCKER_SUMMARY_LIMIT
+  const maxNameLength = Number.isFinite(opts.maxNameLength) && opts.maxNameLength > 0
+    ? Math.floor(opts.maxNameLength)
+    : BLOCKER_NAME_MAX_LENGTH
+  const joiner = typeof opts.joiner === 'string' ? opts.joiner : translate('blockerJoin')
+  const groups = groupBlockers(entries)
+
+  const full = groups
+    .map((group) => blockerGroupName(group, translate, maxNameLength, false))
+    .filter((name) => name !== '')
+    .join(joiner)
+
+  const shown = groups.slice(0, limit)
+  const names = shown
+    .map((group) => blockerGroupName(group, translate, maxNameLength, true))
+    .filter((name) => name !== '')
+  const rest = groups.length - shown.length
+  const more = rest > 0 ? fillTemplate(translate('blockerMore'), { n: rest }) : ''
+
+  return {
+    groups,
+    total: groups.length,
+    // How many of the groups carry a name at all: a list of unnamed blockers
+    // has nothing to show, so a caller can leave its clause out.
+    named: groups.filter((group) => blockerGroupName(group, translate, maxNameLength, false) !== '').length,
+    summary: names.length === 0 ? translate('blockerGeneric') : (names.join(joiner) + more),
+    full: full === '' ? translate('blockerGeneric') : full,
+  }
+}
+
 /**
  * The note of a LONG wait.
  *
@@ -601,23 +956,32 @@ function formatDurationMs(ms, t) {
  * @returns {string}
  */
 function formatLongWaitNote(info, t) {
+  return formatLongWaitNoteParts(info, t).note
+}
+
+/**
+ * The note of a LONG wait, in both shapes: the bubble shows the SHORT
+ * summary, the tooltip the COMPLETE list.
+ *
+ * @param {any} info the state payload of the Host
+ * @param {(name: string) => string} [t] the translator
+ * @returns {{ note: string, full: string, summary: string, hasLongWait: boolean }}
+ */
+function formatLongWaitNoteParts(info, t) {
   const translate = typeof t === 'function' ? t : (name) => name
   const longWait = info && typeof info === 'object' ? info.longWait : null
-  if (!longWait || typeof longWait !== 'object') return ''
-  const blockedBy = Array.isArray(longWait.blockedBy) ? longWait.blockedBy : []
-  const names = []
-  for (const entry of blockedBy) {
-    if (!entry || typeof entry !== 'object') continue
-    const name = typeof entry.name === 'string' && entry.name.trim() !== ''
-      ? entry.name.trim()
-      : (typeof entry.label === 'string' && entry.label.trim() !== '' ? entry.label.trim() : '')
-    if (name !== '') names.push(name)
+  if (!longWait || typeof longWait !== 'object') {
+    return { note: '', full: '', summary: '', hasLongWait: false }
   }
-  const blocker = names.length === 0
-    ? translate('longWaitBlockerGeneric')
-    : names.join(translate('longWaitBlockerJoin'))
+  const blockedBy = Array.isArray(longWait.blockedBy) ? longWait.blockedBy : []
+  const summary = summarizeBlockers(blockedBy, { t: translate })
   const duration = formatDurationMs(longWait.waitedMs, translate)
-  return fillTemplate(translate('longWaitNote'), { duration, blocker })
+  return {
+    note: fillTemplate(translate('longWaitNote'), { duration, blocker: summary.summary }),
+    full: fillTemplate(translate('longWaitNote'), { duration, blocker: summary.full }),
+    summary: summary.summary,
+    hasLongWait: true,
+  }
 }
 
 /**
@@ -634,6 +998,12 @@ const SLEEP_EXPORTS = {
   buildChoiceBody,
   formatRemainingMs,
   formatLongWaitNote,
+  formatLongWaitNoteParts,
+  groupBlockers,
+  summarizeBlockers,
+  truncateBlockerName,
+  // The two dictionaries, so a test can build a translator without a Host.
+  dictionaries: { zh: ZH, en: EN },
 }
 
 if (typeof globalThis !== 'undefined' && globalThis !== null) {
@@ -868,16 +1238,18 @@ if (moduleLoader) moduleLoader.load({
      */
     function blockerLine(entry) {
       const t = translate ?? ((name) => name)
-      const kind = entry && entry.kind === 'subagent'
-        ? 'subagent'
-        : (entry && entry.kind === 'restart-pending' ? 'restart-pending' : 'session')
-      const label = entry && typeof entry.label === 'string' ? entry.label.trim() : ''
+      // The SAME rule as the grouping: an entry that names a parent is a
+      // subagent, whatever the Host called it.
+      const kind = blockerEntryKind(entry)
+      const label = kind === 'subagent'
+        ? blockerParentTitle(entry)
+        : (blockerField(entry, 'label') || blockerField(entry, 'title'))
       if (kind === 'restart-pending') {
         // A pending restart goes first: the shutdown waits for it.
         return t('panelBlockedRestartPending')
       }
       if (kind === 'subagent') {
-        const name = entry && typeof entry.name === 'string' ? entry.name.trim() : ''
+        const name = blockerField(entry, 'name')
         if (name === '' || label === '') return t('panelBlockedSubagentGeneric')
         return fill(t('panelBlockedSubagent'), { name })
       }
@@ -897,6 +1269,27 @@ if (moduleLoader) moduleLoader.load({
      */
     function isRestartPending(entry) {
       return Boolean(entry) && entry.kind === 'restart-pending'
+    }
+
+    /**
+     * The line of one GROUP of blockers.
+     *
+     * The N subagents of ONE session are one line: the session is named once
+     * and the number of its subagents says how many there are. A group of one
+     * keeps the ordinary line (a session, or a lone subagent).
+     *
+     * @param {any} group one group of `groupBlockers`
+     * @returns {string}
+     */
+    function blockerGroupLine(group) {
+      const t = translate ?? ((name) => name)
+      if (!group) return ''
+      if (group.kind === 'subagent' && group.count > 1) {
+        return group.label === ''
+          ? fill(t('panelBlockedSubagentGroupGeneric'), { n: group.count })
+          : fill(t('panelBlockedSubagentGroup'), { label: group.label, n: group.count })
+      }
+      return blockerLine(group.entry)
     }
 
     /** How long the pending restart has been waiting, as a locale string. */
@@ -1358,28 +1751,50 @@ if (moduleLoader) moduleLoader.load({
       const goalActive = others.filter((entry) => String(entry.reason) === 'goal-active')
       const goalExhausted = others.filter((entry) => String(entry.reason) === 'goal-exhausted')
       const otherBusy = others.length - goalActive.length - goalExhausted.length
+      // The tasks that are NOT a goal: the count and the names of the waiting
+      // sentence talk about the same set.
+      const busyBlockers = others.filter(
+        (entry) => String(entry.reason) !== 'goal-active' && String(entry.reason) !== 'goal-exhausted',
+      )
 
       // WHY the gate is closed: the Host reports the reason next to the
       // blockers. With no blocker but the reason "settling" the restart is
       // waiting for the quiet window — not for a conversation.
       const gateReason = info && typeof info.reason === 'string' ? info.reason : ''
 
+      // The long wait: the Host says that the restart passed the hard
+      // deadline while a conversation was still running. The bubble shows one
+      // more line about it — how long it has been waiting and who holds it.
+      const longWait = formatLongWaitNoteParts(info, t)
+      // The blockers of the ordinary list: the SAME rule as the long wait
+      // (grouped by the session that created them, capped, shortened).
+      const blockers = summarizeBlockers(busyBlockers, { t })
+
+      // The bubble names the blockers EXACTLY ONCE: the long-wait line names
+      // them when the restart is stuck past the hard deadline (that is where
+      // the user needs to know WHO holds it), the waiting sentence names them
+      // otherwise. Either way the list is short and the tooltip has the whole
+      // of it. A blocker without a name has nothing to show, so the clause is
+      // left out then.
+      const statusNames = (longWait.hasLongWait || blockers.named === 0) ? '' : blockers.summary
       const status = goalActive.length > 0
         ? t('goalActive')
         : goalExhausted.length > 0
           ? t('goalExhausted')
           : otherBusy > 0
             ? `${t('busyPrefix')}${otherBusy}${t('busySuffix')}`
+              + (statusNames === '' ? '' : fill(t('blockerClause'), { blockers: statusNames }))
             : (gateReason === 'settling' ? t('settling') : t('idle'))
 
-      // The long wait: the Host says that the restart passed the hard
-      // deadline while a conversation was still running. The bubble shows one
-      // more line about it — how long it has been waiting and who holds it.
-      const longWaitText = formatLongWaitNote(info, t)
       const tooltipText = otherBusy > 0 ? t('tooltipBusy') : t('tooltip')
+      // The tooltip carries the COMPLETE list of the blockers: the bubble
+      // shows a short summary, the tooltip every name.
+      const detail = longWait.hasLongWait
+        ? longWait.full
+        : (blockers.total === 0 ? '' : fill(t('blockersTitleLine'), { blockers: blockers.full }))
       const titleText = parkError
         ? fill(t('tooltipWithError'), { message: parkError })
-        : (longWaitText === '' ? tooltipText : `${tooltipText} ${longWaitText}`)
+        : (detail === '' ? tooltipText : `${tooltipText} ${detail}`)
 
       if (pulsing) ensurePulseStyle()
 
@@ -1448,16 +1863,18 @@ if (moduleLoader) moduleLoader.load({
           h('span', { style: TEXT_STYLE }, h('b', null, t('label')), status),
           // One more line for the long wait: how long the restart has been
           // waiting and who holds it. It is only there when the Host says so.
-          longWaitText === ''
+          // The line itself carries the SHORT list; its own tooltip carries
+          // the COMPLETE list.
+          longWait.note === ''
             ? null
             : h(
               'span',
               {
                 style: LONG_WAIT_STYLE,
                 'data-dsh-autorestart-long-wait': 'true',
-                title: longWaitText,
+                title: longWait.full,
               },
-              longWaitText,
+              longWait.note,
             ),
           // One park button per goal-driven blocker that can be parked. It
           // lives inside the pill, so the slot still has a single root.
@@ -1518,11 +1935,12 @@ if (moduleLoader) moduleLoader.load({
 
       // The long wait is worth a word in the tooltip too: the dot is
       // icon-only, so the text is the only place where it can be read.
-      const longWaitText = formatLongWaitNote(info, t)
+      // The tooltip carries the COMPLETE list of the blockers.
+      const longWait = formatLongWaitNoteParts(info, t)
 
       return h('span', {
         style: dotStyle(SIDEBAR_DOT_STYLE, pulsing),
-        title: longWaitText === '' ? t('tooltip') : `${t('tooltip')} ${longWaitText}`,
+        title: longWait.hasLongWait ? `${t('tooltip')} ${longWait.full}` : t('tooltip'),
         role: 'status',
         'aria-live': 'polite',
         'aria-label': t('dotAria'),
@@ -2273,6 +2691,9 @@ if (moduleLoader) moduleLoader.load({
       '.dsh-autorestart-sleep-waiting__body{margin:0 0 6px;}',
       '.dsh-autorestart-sleep-waiting__list{margin:0 0 6px;padding-left:2px;list-style:none;}',
       '.dsh-autorestart-sleep-waiting__list li{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
+      // The line that says how many blockers are NOT shown: it is a note,
+      // not a blocker of its own.
+      '.dsh-autorestart-sleep-waiting__more{opacity:.7;}',
       '.dsh-autorestart-sleep-waiting__none{margin:0 0 6px;opacity:.8;}',
       // The command a rehearsal WOULD have run: it has to stay readable,
       // whatever the shell command looks like.
@@ -3172,6 +3593,11 @@ if (moduleLoader) moduleLoader.load({
         const subagentCount = tasks.filter(
           (entry) => entry && entry.kind === 'subagent',
         ).length
+        // The list of the card: the SAME rule as the bubble (the subagents of
+        // one session are one item, the list is capped), so a team of a dozen
+        // members does not become a dozen lines.
+        const pending = blockers.filter((entry) => isRestartPending(entry))
+        const grouped = summarizeBlockers(tasks, { t })
         return h(
           'div',
           {
@@ -3197,10 +3623,29 @@ if (moduleLoader) moduleLoader.load({
             )
             : h(
               'ul',
-              { className: 'dsh-autorestart-sleep-waiting__list' },
-              blockers.map((entry, index) => h(
+              {
+                className: 'dsh-autorestart-sleep-waiting__list',
+                // The tooltip carries the COMPLETE list: the card itself
+                // shows a short one (the same rule as the bubble).
+                title: grouped.full,
+              },
+              grouped.groups.slice(0, BLOCKER_SUMMARY_LIMIT).map((group, index) => h(
                 'li',
                 { key: 'blocker-' + index },
+                blockerGroupLine(group),
+              )),
+              grouped.groups.length > BLOCKER_SUMMARY_LIMIT
+                ? h(
+                  'li',
+                  { key: 'blocker-more', className: 'dsh-autorestart-sleep-waiting__more' },
+                  fill(t('blockerMore'), { n: grouped.groups.length - BLOCKER_SUMMARY_LIMIT }),
+                )
+                : null,
+              // A pending restart is not a task: it is what the shutdown waits
+              // for, so it is never part of the grouped list.
+              pending.map((entry, index) => h(
+                'li',
+                { key: 'pending-' + index },
                 blockerLine(entry),
               )),
             ),

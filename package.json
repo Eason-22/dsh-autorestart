@@ -31,6 +31,7 @@
     "index.js",
     "client.js",
     "lib/**/*.js",
+    "supervisor/supervisor.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",

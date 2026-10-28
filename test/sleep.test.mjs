@@ -1661,18 +1661,20 @@ test('the section shows two titled groups, the restart one first', async () => {
   const panel = await mounted.settled('settings.section')
   assert.ok(panel, 'the settings section must be rendered')
 
-  // The two groups, in this order: the restart settings come first.
+  // The groups, in this order: the restart settings come first, the shutdown
+  // settings after them, and the supervisor (the self-starting record) last.
   const groups = walk(panel).filter(
     (node) => node.type === 'div' && typeof node.props['data-dsh-autorestart-group'] === 'string',
   )
   assert.deepEqual(
     groups.map((node) => node.props['data-dsh-autorestart-group']),
-    ['restart', 'shutdown'],
+    ['restart', 'shutdown', 'supervisor'],
     'the restart group must come before the shutdown group',
   )
   const titles = groups.map((group) => textOf(group.children[0]))
   assert.equal(titles[0], '重启相关设置', 'the restart group must have a visible title')
   assert.equal(titles[1], '关机相关设置', 'the shutdown group must have a visible title')
+  assert.equal(titles[2], '开机自启', 'the supervisor group must have a visible title')
 
   // The restart group carries three controls: the wait, the two switches.
   const restartControls = walk(groups[0]).filter(

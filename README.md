@@ -390,6 +390,43 @@ the access link of the running instance into `<storage>/dsh-autorestart/access.j
 the file holds a secret), and reports it in `continuum_status` and in the log. The browser half
 follows that link when the one it holds is stale, so the session comes back on its own.
 
+### Start at login: the supervisor of this plugin
+
+A hosted host (`dsh web`) that was started by hand does not come back when it dies — and a restart
+that nobody brings back is a restart the user has to do themselves. The plugin can install a
+**supervisor**: a small standalone process that starts the host, watches it, and starts it again when
+it is gone.
+
+- **It is a separate process.** The plugin lives inside the host, so it can never be the thing that
+  brings the host back. The supervisor is a zero-dependency Node script (`supervisor/supervisor.js`,
+  shipped with the package) that the plugin copies into `<storage>/dsh-autorestart/supervisor/` when
+  it is installed.
+- **What it does:** start the host with the command from `supervisor.json`, wait for it to exit, back
+  off (1 s → 30 s; the delay is only reset after a start that actually worked) and start it again.
+  When the host does not come back at all, the snapshot of the last restart is restored.
+- **How it is registered (no administrator rights):**
+  - **Windows:** a scheduled task `dsh-autorestart-web` (`/SC ONLOGON /RL LIMITED`). If the machine
+    forbids ordinary users from creating scheduled tasks, the plugin falls back to a `.cmd` in the
+    startup folder (same zero rights, same "at login" semantics).
+  - **Linux / WSL:** a systemd **user** unit
+    (`~/.config/systemd/user/dsh-autorestart-web.service`). A machine without a service manager (a
+    container, a WSL without systemd) has no "at login" at all — there the plugin says so and leaves
+    the start command to the user.
+- **It is idempotent:** installing twice leaves exactly ONE record (the task/unit name is fixed, the
+  task is created with `/F`, and the daemon takes an exclusive lock — two supervisors are impossible).
+- **It is reversible:** the previous `restartMode` / `restartCommand` are saved before anything
+  changes and put back by the uninstall. The settings page has one button for it ("Settings →
+  Auto-restart & shut down → Start at login"), and the manual way out is printed in the card and in
+  the log. When a step of the uninstall fails, the pending cleanup is written down instead of being
+  dropped silently.
+- **The first-run card:** a hosted host is asked ONCE whether the supervisor may be installed. The
+  card says what it would change, which rights it needs, and how to remove it again. Choosing "keep
+  the way I start it" changes nothing — the plugin only records that a supervisor of your own is
+  already there (so it never installs a second one).
+
+The desktop app is **not** asked: it brings itself back up on its own (`restartMode: app`), so the
+question would be noise there.
+
 ### The one-time install question
 
 The first time the plugin is used, the composer dock shows ONE non-modal panel that asks whether the

@@ -38,6 +38,7 @@ import {
   parkedRecord,
   pruneSessions,
   readState,
+  recordOnboarding,
   recoverableSessions,
   requestRestart,
   setContextOverflow,
@@ -78,6 +79,18 @@ import {
   resolveAccessUrl,
   writeAccessRecord,
 } from './lib/access.js'
+import {
+  detectSupervisor,
+  installSupervisor,
+  planSupervisorInstall,
+  readSupervisorConfig,
+  requestSupervisorAction,
+  supervisorPaths,
+  supervisorStatus,
+  uninstallSupervisor,
+  writeRollbackRequest,
+} from './lib/supervisor.js'
+import { composeFragment, detectInitSystems } from './lib/supervisor-install.js'
 import { waitForHealthyInstance } from './lib/health.js'
 import {
   buildCustomCommand,
@@ -303,6 +316,14 @@ const PLUGIN_VERSION_FALLBACK = '0.6.2'
  */
 const SLEEP_FEATURE_VERSION = '0.5.0'
 
+/**
+ * The version of the self-starting supervisor ("开机自启守护").
+ *
+ * The one-time question about it is bound to this version: a release never
+ * brings an answered question back.
+ */
+const SUPERVISOR_FEATURE_VERSION = '0.7.0'
+
 /** The cached version of this plugin (read once per process). */
 let pluginVersionCache = null
 
@@ -350,6 +371,8 @@ function featureAnnouncements() {
   return [
     // The graceful shutdown ("收工关机") and its moon button.
     { feature: 'sleep', version: SLEEP_FEATURE_VERSION },
+    // The self-starting supervisor ("开机自启守护").
+    { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION },
   ]
 }
 
@@ -566,6 +589,30 @@ function buildConfigSchema() {
         .description('How many snapshots are kept; older ones are deleted automatically.'),
       rollbackTimeoutMs: schemastery.number().min(1000).default(90000)
         .description('Milliseconds the detached watcher waits for the relaunched host before it restores the snapshot.'),
+      // The self-starting supervisor: a separate process that brings the host
+      // back when it dies. See the "开机自启" section of the settings.
+      supervisorMode: schemastery.union(['auto', 'installed', 'external', 'off']).default('auto')
+        .description('Who starts this host: auto = nobody decided yet, installed = the supervisor of this plugin, external = your own way, off = no automatic start.'),
+      supervisorKind: schemastery.union([
+        schemastery.const(''),
+        schemastery.const('windows-schtasks'),
+        schemastery.const('windows-startup'),
+        schemastery.const('systemd-user'),
+        schemastery.const('systemd-system'),
+      ]).default('')
+        .description('Which form of the self-start record was installed (empty = the default of this platform).'),
+      supervisorRestartDelayMs: schemastery.number().min(0).default(3000)
+        .description('Milliseconds the supervisor waits before it starts the host again after it died.'),
+      supervisorRestartDelayMaxMs: schemastery.number().min(0).default(30000)
+        .description('The upper bound of that delay: the supervisor backs off further with every failed start, but never longer than this.'),
+      supervisorStartTimeoutMs: schemastery.number().min(1000).default(90000)
+        .description('Milliseconds the supervisor waits for the host to answer its health route before it restores the snapshot.'),
+      supervisorKillGraceMs: schemastery.number().min(0).default(15000)
+        .description('Milliseconds the supervisor waits between asking the host to stop and killing it.'),
+      supervisorPort: schemastery.number().min(0).default(0)
+        .description('The port the supervisor waits for to become free before it starts the host (0 = the port of the current instance).'),
+      supervisorAutoInstall: schemastery.boolean().default(false)
+        .description('Whether the one-time question may install the supervisor without asking again.'),
       // graceful shutdown ("收工关机"): wait for every conversation, count down, then
       // switch the REAL host machine off (a WSL host shuts Windows down, not the distro)
       showSleepButton: schemastery.boolean().default(true)
@@ -628,6 +675,15 @@ const DEFAULTS = {
   // it, and how long ONE restore step may take before the watcher gives up.
   restartCommandTimeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
   rollbackCopyTimeoutMs: DEFAULT_ROLLBACK_COPY_TIMEOUT_MS,
+  // The self-starting supervisor.
+  supervisorMode: 'auto',
+  supervisorKind: '',
+  supervisorRestartDelayMs: 3000,
+  supervisorRestartDelayMaxMs: 30000,
+  supervisorStartTimeoutMs: 90000,
+  supervisorKillGraceMs: 15000,
+  supervisorPort: 0,
+  supervisorAutoInstall: false,
   // Graceful shutdown ("收工关机"): the button at the foot of the left sidebar,
   // the countdown before the machine is switched off and the optional custom
   // shutdown command (empty = the host is detected automatically).
@@ -667,6 +723,26 @@ function normalizeConfig(raw) {
   const copyTimeout = Number(config.rollbackCopyTimeoutMs)
   config.rollbackCopyTimeoutMs =
     Number.isFinite(copyTimeout) && copyTimeout >= 1000 ? Math.trunc(copyTimeout) : DEFAULT_ROLLBACK_COPY_TIMEOUT_MS
+  // The supervisor knobs: a wrong value must not break the boot, it falls back
+  // to the documented default.
+  if (!['auto', 'installed', 'external', 'off'].includes(config.supervisorMode)) config.supervisorMode = 'auto'
+  if (!['', 'windows-schtasks', 'windows-startup', 'systemd-user', 'systemd-system'].includes(config.supervisorKind)) {
+    config.supervisorKind = ''
+  }
+  const supervisorDelay = Number(config.supervisorRestartDelayMs)
+  config.supervisorRestartDelayMs = Number.isFinite(supervisorDelay) && supervisorDelay >= 0 ? Math.trunc(supervisorDelay) : 3000
+  const supervisorDelayMax = Number(config.supervisorRestartDelayMaxMs)
+  config.supervisorRestartDelayMaxMs =
+    Number.isFinite(supervisorDelayMax) && supervisorDelayMax >= 0 ? Math.trunc(supervisorDelayMax) : 30000
+  const supervisorStartTimeout = Number(config.supervisorStartTimeoutMs)
+  config.supervisorStartTimeoutMs =
+    Number.isFinite(supervisorStartTimeout) && supervisorStartTimeout >= 1000 ? Math.trunc(supervisorStartTimeout) : 90000
+  const supervisorKillGrace = Number(config.supervisorKillGraceMs)
+  config.supervisorKillGraceMs =
+    Number.isFinite(supervisorKillGrace) && supervisorKillGrace >= 0 ? Math.trunc(supervisorKillGrace) : 15000
+  const supervisorPort = Number(config.supervisorPort)
+  config.supervisorPort = Number.isFinite(supervisorPort) && supervisorPort >= 0 ? Math.trunc(supervisorPort) : 0
+  if (typeof config.supervisorAutoInstall !== 'boolean') config.supervisorAutoInstall = false
   // The countdown of the graceful shutdown is one of the offered choices: a
   // profile that still carries an old value (15, 45, …) is snapped onto the
   // nearest one instead of breaking, and 0 means "no countdown at all".
@@ -743,6 +819,21 @@ function resolveChoicePath(config) {
   const index = healthPath.lastIndexOf('/')
   const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
   return `${prefix}/choice`
+}
+
+/**
+ * Resolve the supervisor-route path: a sibling of the health route, under the
+ * same prefix (`POST /supervisor` installs, uninstalls and reports the
+ * self-starting supervisor).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveSupervisorPath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/supervisor`
 }
 
 /**
@@ -2366,6 +2457,145 @@ const titleOfSummary = (item) => {
   const stateDirOf = () => path.dirname(stateFile)
 
   /**
+   * What the plugin knows about the supervisor.
+   *
+   * @returns {object} the status (mode, kind, installed, running, restartCapable)
+   */
+  const supervisorStatusOf = () => supervisorStatus({
+    stateDir: stateDirOf(),
+    env: process.env,
+    platform: env.platform,
+    mode: config.supervisorMode,
+  })
+
+  /**
+   * The start command the supervisor would use.
+   *
+   * This is the PLAIN command line of this very process: the interpreter, its
+   * own arguments and the script it runs. The full derivation (with the
+   * refusal rules) belongs to the "E" step; this is the honest minimum the
+   * supervisor needs to be able to start the host again.
+   *
+   * @returns {{ execPath: string, execArgv: string[], argv: string[], cwd: string }}
+   */
+  const supervisorStartCommand = () => ({
+    execPath: process.execPath,
+    execArgv: Array.isArray(process.execArgv) ? process.execArgv.map(String) : [],
+    argv: Array.isArray(process.argv) ? process.argv.slice(1).map(String) : [],
+    cwd: process.cwd(),
+  })
+
+  /**
+   * The environment the supervisor hands to the host it starts.
+   *
+   * Only a WHITELIST is inherited (the daemon does that too): the host's own
+   * internal variables must not leak into the next start, or the profile would
+   * drift.
+   *
+   * @returns {Record<string, string>}
+   */
+  const supervisorEnv = () => {
+    const env = {}
+    const source = process.env || {}
+    for (const key of [
+      'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'SystemRoot',
+      'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'ProgramData',
+      'NUMBER_OF_PROCESSORS', 'WSLENV', 'WSL_DISTRO_NAME', 'WSL_INTEROP',
+    ]) {
+      const value = source[key]
+      if (typeof value === 'string' && value !== '') env[key] = value
+    }
+    // The two variables that say WHICH profile this host belongs to.
+    if (typeof source.DSH_HOME === 'string' && source.DSH_HOME !== '') env.DSH_HOME = source.DSH_HOME
+    if (typeof source.DSH_PROFILE === 'string' && source.DSH_PROFILE !== '') env.DSH_PROFILE = source.DSH_PROFILE
+    return env
+  }
+
+  /**
+   * Install the supervisor.
+   *
+   * @param {{ confirmed?: boolean, dryRun?: boolean }} [options]
+   * @returns {object} the outcome (ok, kind, steps, error, plan)
+   */
+  const installSupervisorNow = (options = {}) => {
+    const stateDir = stateDirOf()
+    const profile = resolveProfileDirDetailed()
+    const start = supervisorStartCommand()
+    const result = installSupervisor({
+      stateDir,
+      profileDir: profile.dir,
+      platform: env.platform,
+      confirmed: options.confirmed === true,
+      dryRun: options.dryRun === true,
+      nodePath: process.execPath,
+      execPath: start.execPath,
+      execArgv: start.execArgv,
+      argv: start.argv,
+      cwd: start.cwd,
+      env: supervisorEnv(),
+      profileEnv: {
+        ...(process.env.DSH_HOME ? { DSH_HOME: process.env.DSH_HOME } : {}),
+        ...(process.env.DSH_PROFILE ? { DSH_PROFILE: process.env.DSH_PROFILE } : {}),
+      },
+      port: config.supervisorPort > 0 ? config.supervisorPort : (runtime.webPort || 0),
+      healthUrl: restartHealthUrl() ?? '',
+      ownerUser: typeof process.env.USER === 'string' ? process.env.USER : (typeof process.env.LOGNAME === 'string' ? process.env.LOGNAME : ''),
+      timings: {
+        restartDelayMs: config.supervisorRestartDelayMs,
+        restartDelayMaxMs: config.supervisorRestartDelayMaxMs,
+        startTimeoutMs: config.supervisorStartTimeoutMs,
+        killGraceMs: config.supervisorKillGraceMs,
+      },
+      kind: config.supervisorKind,
+      // The previous way of starting the host: the uninstall puts it back.
+      previous: { restartMode: config.restartMode, restartCommand: config.restartCommand },
+      log: (message) => log.warn(message),
+    })
+    if (result.ok) {
+      log.warn('the supervisor was installed', { kind: result.kind, degraded: result.degraded })
+    } else {
+      log.error('the supervisor was not installed:', result.error)
+    }
+    return result
+  }
+
+  /**
+   * Uninstall the supervisor and give the machine back to the user.
+   *
+   * @returns {Promise<object>} the outcome (ok, steps, error, pending, previous)
+   */
+  const uninstallSupervisorNow = async () => {
+    const result = await uninstallSupervisor({
+      stateDir: stateDirOf(),
+      platform: env.platform,
+      log: (message) => log.warn(message),
+    })
+    if (result.ok) {
+      log.warn('the supervisor was uninstalled', { previous: result.previous })
+    } else {
+      log.error('the supervisor could not be removed completely:', result.error)
+    }
+    return result
+  }
+
+  /**
+   * Record the answer of the one-time question about the supervisor.
+   *
+   * @param {string} choice 'install' | 'external' | 'dismissed'
+   * @returns {object} the recorded answer
+   */
+  const recordSupervisorChoice = (choice) => {
+    const record = recordOnboarding(state, {
+      feature: 'supervisor',
+      version: SUPERVISOR_FEATURE_VERSION,
+      choice,
+      now: Date.now(),
+    })
+    persist()
+    return record
+  }
+
+  /**
    * Write the marker that tells the rollback watcher "the plugin has decided
    * on its own — stand down".
    *
@@ -3025,6 +3255,53 @@ const titleOfSummary = (item) => {
     get accessRecord() {
       const read = readAccessRecord(path.dirname(stateFile))
       return read && read.ok === true ? read.record : null
+    },
+    /**
+     * What the plugin knows about the self-starting supervisor: who starts
+     * this host (the supervisor of this plugin / the user's own way / nobody)
+     * and whether the restart can actually work.
+     */
+    supervisorStatus: supervisorStatusOf,
+    /**
+     * Install the supervisor. `confirmed` must be true: the confirmation card
+     * is what says "yes".
+     */
+    installSupervisor: installSupervisorNow,
+    /**
+     * Remove the supervisor and give the machine back to the user.
+     */
+    uninstallSupervisor: uninstallSupervisorNow,
+    /**
+     * Record the answer of the one-time question about the supervisor.
+     */
+    recordSupervisorChoice: recordSupervisorChoice,
+    /**
+     * The answer of the one-time question about the supervisor (null when it
+     * was never answered).
+     */
+    get onboardingChoice() {
+      const record = state.onboarding
+      if (!record || typeof record !== 'object') return null
+      if (record.feature !== 'supervisor') return null
+      return {
+        feature: record.feature,
+        version: record.version,
+        choice: record.choice,
+        answeredAt: record.answeredAt,
+      }
+    },
+    /**
+     * Whether the one-time question about the supervisor may be asked.
+     *
+     * ONLY for the HOSTED hosts: the desktop app brings itself back up
+     * (`restartMode: app`), so asking a hosted user "shall I install a
+     * supervisor?" would be noise there.
+     */
+    get supervisorOffer() {
+      if (env.isDesktopApp) return false
+      const record = state.onboarding
+      if (record && typeof record === 'object' && record.feature === 'supervisor') return false
+      return true
     },
     env,
     stateFile,
@@ -4237,6 +4514,109 @@ function registerTools(ctx, runtime, config) {
       }
     },
   })
+
+  tool({
+    name: 'continuum_supervisor',
+    description:
+      'Inspect and manage the self-starting supervisor of this plugin (the process that brings the host back when it '
+      + 'dies). action "status" reports who starts this host (the supervisor of this plugin / your own way / nobody) '
+      + 'and whether the restart can work at all; action "plan" reports what an installation WOULD change without '
+      + 'touching anything; action "install" and action "uninstall" need confirmed: true, because they really change '
+      + 'the machine (a scheduled task or a systemd user unit that starts the supervisor at login).',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['status', 'plan', 'install', 'uninstall'],
+          description: 'What to do: "status" (read-only), "plan" (the dry run: what would change), "install" or "uninstall" (the real thing, they need confirmed: true).',
+        },
+        confirmed: {
+          type: 'boolean',
+          description: 'Required for "install" and "uninstall": the user confirmed the card that says what would change.',
+        },
+        choice: {
+          type: 'string',
+          enum: ['install', 'external', 'dismissed'],
+          description: 'The answer of the one-time question about the supervisor (recorded so the question is never asked twice).',
+        },
+      },
+    },
+    output: textOutput(
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['ok', 'action'],
+        properties: {
+          ok: { type: 'boolean' },
+          action: { type: 'string' },
+          kind: { type: 'string' },
+          degraded: { type: 'boolean' },
+          reason: { type: 'string' },
+          error: { type: 'string' },
+          supervisor: { type: 'object' },
+          steps: { type: 'array', items: { type: 'object' } },
+          previous: { type: 'object' },
+          pending: { type: 'object' },
+        },
+      },
+      (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    ),
+    async execute(args = {}) {
+      const action = typeof args.action === 'string' ? args.action.trim() : 'status'
+      const supervisor = runtime.supervisorStatus()
+      if (action === 'status') {
+        return { ok: true, action, supervisor }
+      }
+      if (action === 'plan') {
+        const plan = planSupervisorInstall({
+          platform: runtime.env.platform,
+          nodePath: process.execPath,
+          supervisorPath: supervisorPaths(path.dirname(runtime.stateFile)).script,
+          configPath: supervisorPaths(path.dirname(runtime.stateFile)).config,
+          kind: config.supervisorKind,
+        })
+        return { ok: true, action, kind: plan.kind, reason: plan.reason, steps: plan.steps, supervisor }
+      }
+      if (args.confirmed !== true) {
+        // The card is what says "yes": without it the machine is not touched.
+        return {
+          ok: false,
+          action,
+          error: 'confirmation-required',
+          reason: 'the installation and the uninstallation change the machine, so the user has to confirm the card first',
+          supervisor,
+        }
+      }
+      if (action === 'install') {
+        const choice = typeof args.choice === 'string' ? args.choice : ''
+        if (choice !== '') runtime.recordSupervisorChoice(choice)
+        const result = runtime.installSupervisor({ confirmed: true })
+        return {
+          ok: result.ok === true,
+          action,
+          kind: result.kind,
+          degraded: result.degraded,
+          reason: result.reason,
+          error: result.error ?? undefined,
+          steps: result.steps,
+          supervisor: runtime.supervisorStatus(),
+        }
+      }
+      const result = await runtime.uninstallSupervisor()
+      return {
+        ok: result.ok === true,
+        action,
+        reason: result.ok === true ? 'the supervisor was removed' : undefined,
+        error: result.error ?? undefined,
+        steps: result.steps,
+        previous: result.previous ?? undefined,
+        pending: result.pending ?? undefined,
+        supervisor: runtime.supervisorStatus(),
+      }
+    },
+  })
 }
 
 /**
@@ -5110,6 +5490,152 @@ function buildChoiceRoute(ctx, runtime, config) {
 }
 
 /**
+ * The route of the self-starting supervisor.
+ *
+ * Three actions, and NOTHING happens without the confirmation:
+ *
+ *   - `status` — who starts this host and whether the restart can work;
+ *   - `plan` — what the installation WOULD change (the dry run: it writes
+ *     nothing and runs nothing);
+ *   - `install` / `uninstall` — the real thing, and they need `confirmed: true`
+ *     (the confirmation card is what says "yes").
+ *
+ * @param {object} ctx the plugin context
+ * @param {any} runtime the runtime of this plugin
+ * @param {object} config the normalized config
+ * @returns {object} the route
+ */
+function buildSupervisorRoute(ctx, runtime, config) {
+  const routePath = resolveSupervisorPath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      if (!req || req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then(async (payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const action = typeof body.action === 'string' ? body.action.trim() : ''
+        if (action === 'status') {
+          res.statusCode = 200
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({ ok: true, action, supervisor: runtime.supervisorStatus() }))
+          return
+        }
+        if (action === 'plan' || action === 'dry-run') {
+          // The dry run: the plan is reported, nothing is written or run.
+          const plan = planSupervisorInstall({
+            platform: runtime.env.platform,
+            nodePath: process.execPath,
+            supervisorPath: supervisorPaths(path.dirname(runtime.stateFile)).script,
+            configPath: supervisorPaths(path.dirname(runtime.stateFile)).config,
+            kind: config.supervisorKind,
+          })
+          res.statusCode = 200
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({ ok: true, action, plan, supervisor: runtime.supervisorStatus() }))
+          return
+        }
+        if (action === 'external') {
+          // "I keep my own way": nothing is installed, but the answer is
+          // recorded — so the plugin knows that a supervisor is already there
+          // and never installs a second one.
+          runtime.recordSupervisorChoice('external')
+          try {
+            await runtime.applyConfigChoice({ supervisorMode: 'external' })
+          } catch (error) {
+            runtime.log.warn('the supervisor mode could not be written:', String(error))
+          }
+          res.statusCode = 200
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({ ok: true, action, supervisor: runtime.supervisorStatus() }))
+          return
+        }
+        if (action === 'install' || action === 'uninstall') {
+          if (body.confirmed !== true) {
+            // The confirmation card is what says "yes": without it nothing is
+            // changed on the machine.
+            res.statusCode = 400
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.setHeader('cache-control', 'no-store')
+            res.end(JSON.stringify({
+              ok: false,
+              error: 'confirmation-required',
+              instruction: 'Send { "action": "' + action + '", "confirmed": true } after the user confirmed the card.',
+            }))
+            return
+          }
+          if (action === 'install') {
+            const choice = typeof body.choice === 'string' ? body.choice : ''
+            if (choice !== '') runtime.recordSupervisorChoice(choice)
+            const result = runtime.installSupervisor({ confirmed: true })
+            res.statusCode = result.ok ? 200 : 500
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.setHeader('cache-control', 'no-store')
+            res.end(JSON.stringify({
+              ok: result.ok === true,
+              action,
+              kind: result.kind,
+              degraded: result.degraded,
+              steps: result.steps,
+              error: result.error,
+              reason: result.reason,
+              supervisor: runtime.supervisorStatus(),
+            }))
+            return
+          }
+          const result = await runtime.uninstallSupervisor()
+          res.statusCode = result.ok ? 200 : 500
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: result.ok === true,
+            action,
+            steps: result.steps,
+            error: result.error,
+            pending: result.pending,
+            previous: result.previous,
+            supervisor: runtime.supervisorStatus(),
+          }))
+          return
+        }
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({
+          ok: false,
+          error: 'unknown-action',
+          instruction: 'Send { "action": "status" | "plan" | "install" | "uninstall" }.',
+        }))
+      }).catch((error) => {
+        res.statusCode = 500
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ ok: false, error: describeError(error) }))
+      })
+    },
+  }
+}
+
+/**
  * Is the graceful sleep a dry run?
  *
  * With `DSH_AUTORESTART_SLEEP_DRYRUN=1` the plugin reports the command it
@@ -5652,6 +6178,16 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // answers 401 after a restart. The client needs the new link to
             // get the user back into the interface.
             accessUrl: accessUrlOf(runtime),
+            // The supervisor: who starts this host, and whether the restart
+            // can work at all.
+            supervisor: runtime.supervisorStatus(),
+            // Whether the one-time question about the supervisor may be asked.
+            supervisorOffer: runtime.supervisorOffer,
+            // The answer of the one-time question about the supervisor (null
+            // while it was never answered).
+            onboarding: runtime.onboardingChoice,
+            // The route that installs, uninstalls and reports the supervisor.
+            supervisorUrl: resolveSupervisorPath(config),
           })
         } catch {
           // The banner must never break the health route: fall back to "no restart".
@@ -5731,6 +6267,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
     const choiceRoute = buildChoiceRoute(ctx, runtime, config)
     const cancelRoute = buildCancelRoute(ctx, runtime, config)
     const announcementsRoute = buildAnnouncementsRoute(ctx, runtime, config)
+    const supervisorRoute = buildSupervisorRoute(ctx, runtime, config)
     const sleepRoute = sleep ? buildSleepRoute(ctx, runtime, config, sleep) : null
     try {
       const origin = typeof webServer.getOrigin === 'function' ? String(webServer.getOrigin()) : ''
@@ -5779,6 +6316,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       target.effect(() => webServer.register(announcementsRoute), 'dsh-autorestart: announcements route')
     } catch (error) {
       runtime.log.warn('could not register the announcements route:', String(error))
+    }
+    try {
+      target.effect(() => webServer.register(supervisorRoute), 'dsh-autorestart: supervisor route')
+    } catch (error) {
+      runtime.log.warn('could not register the supervisor route:', String(error))
     }
     if (sleepRoute !== null) {
       try {
@@ -6047,4 +6589,5 @@ export {
   pluginVersion,
   PLUGIN_VERSION_FALLBACK,
   SLEEP_FEATURE_VERSION,
+  SUPERVISOR_FEATURE_VERSION,
 }

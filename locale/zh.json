@@ -20,7 +20,8 @@
     "nav": "自动重启与关机",
     "groups": {
       "restart": "重启相关设置",
-      "shutdown": "关机相关设置"
+      "shutdown": "关机相关设置",
+      "supervisor": "开机自启"
     },
     "seconds": {
       "label": "关机倒数秒数",
@@ -42,7 +43,39 @@
       "label": "备份包含已安装插件",
       "hint": "关闭后只备份 DSH 自身状态，不含 profile 里的插件目录。"
     },
+    "supervisor": {
+      "status": "当前由",
+      "installed": "插件守护",
+      "external": "你自己的方式",
+      "unknown": "未知",
+      "off": "关闭",
+      "capable": "重启能力",
+      "capableYes": "可用：宿主退出后会自动回来",
+      "capableNo": "不可用：宿主退出后不会自动回来",
+      "install": "装上守护",
+      "uninstall": "卸载守护",
+      "hint": "守护是一个独立进程：登录时自动启动，宿主进程掉了自动拉起，启动失败自动回滚上次快照。不需要管理员。",
+      "access": "当前访问链接",
+      "accessHint": "重启后 token 会变，链接也会变。这个链接一直是最新的。",
+      "pending": "卸载没有完成，请手动执行：{commands}",
+      "reason": "说明"
+    },
     "error": "没能保存设置：{message}"
+  },
+  "supervisor": {
+    "title": "让 DSH 自己把自己拉起来？",
+    "body": "现在这个 DSH 托管实例是手动/外部启动的——它挂了不会自己回来。我可以给你装一个自带的守护：登录时自动启动，进程掉了自动拉起，启动失败自动回滚上次快照。守护不会碰你的会话数据，只做「拉起 + 看住 + 回滚」三件事。",
+    "changes": "会改什么：新增 <stateDir>/supervisor/（守护脚本 + 配置 + 日志 + 锁）；Windows 注册一条登录自启记录（计划任务 dsh-autorestart-web），Linux 注册一个 systemd 用户服务。不改：会话数据、模型配置、已装插件。",
+    "rights": "需要什么权限：Windows 不需要管理员（用「登录时运行」；若该机策略禁止普通用户建计划任务，会自动降级到「启动文件夹」，同样不需要）；Linux 需要能写自己的家目录（systemctl --user，普通用户即可）。",
+    "uninstall": "怎么卸：设置页「开机自启 → 卸载」一键；或手动 schtasks /Delete /TN \"dsh-autorestart-web\" /F（Linux：systemctl --user disable --now dsh-autorestart-web.service && rm ~/.config/systemd/user/dsh-autorestart-web.service），两者都要再删掉 <stateDir>/supervisor/ 目录。",
+    "install": "帮我装（推荐）",
+    "installHint": "会写一个守护脚本到 <stateDir>/supervisor/，并在 Windows 注册一条登录自启记录 / Linux 注册一个 systemd 用户服务。不需要管理员。之后宿主进程退出，守护会在几秒内拉起它；起不来会自动回滚到重启前的快照。随时可以在设置里一键卸载。",
+    "keep": "保持我现在的启动方式",
+    "keepHint": "什么都不改。你现在用什么启动就继续用什么。代价：宿主进程退出后不会自动回来——重启功能会退化成「只能在有外部守护时生效」。",
+    "later": "以后再说",
+    "laterHint": "这张卡片不再出现。你可以随时在「设置 → 自动重启与关机 → 开机自启」里手动装。",
+    "error": "操作失败：{message}",
+    "busy": "正在处理…"
   },
   "sleep": {
     "button": {

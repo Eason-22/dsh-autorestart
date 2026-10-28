@@ -73,6 +73,32 @@
         # the installed plugin tree. A restore that does not finish in time is
         # given up and the reason is written into the rollback report.
         rollbackCopyTimeoutMs: 120000
+        # The self-starting supervisor: who starts this host.
+        # auto = nobody decided yet, installed = the supervisor of this plugin,
+        # external = your own way (docker, systemd, your own script),
+        # off = no automatic start at all.
+        supervisorMode: auto
+        # Which form of the self-start record was installed. Empty = the
+        # default of this platform (a scheduled task on Windows, a systemd user
+        # unit on Linux).
+        supervisorKind: ''
+        # How long the supervisor waits before it starts the host again after it
+        # died. The delay DOUBLES with every failed start.
+        supervisorRestartDelayMs: 3000
+        # The upper bound of that delay: the supervisor never waits longer.
+        supervisorRestartDelayMaxMs: 30000
+        # How long the supervisor waits for the host to answer its health route
+        # before it restores the snapshot.
+        supervisorStartTimeoutMs: 90000
+        # How long the supervisor waits between asking the host to stop and
+        # killing it.
+        supervisorKillGraceMs: 15000
+        # The port the supervisor waits for to become free before it starts the
+        # host (0 = the port of the current instance).
+        supervisorPort: 0
+        # Whether the one-time question may install the supervisor without
+        # asking again.
+        supervisorAutoInstall: false
         # 收工关机：Show the graceful-shutdown button at the foot of the left
         # sidebar, next to the Settings row (root scope: it is there even when
         # no conversation is open).

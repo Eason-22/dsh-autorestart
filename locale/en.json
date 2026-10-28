@@ -20,7 +20,8 @@
     "nav": "Auto-restart & shut down",
     "groups": {
       "restart": "Restart settings",
-      "shutdown": "Shutdown settings"
+      "shutdown": "Shutdown settings",
+      "supervisor": "Start at login"
     },
     "seconds": {
       "label": "Shutdown countdown seconds",
@@ -42,7 +43,39 @@
       "label": "Include the installed plugins in the backup",
       "hint": "Off: only the state of DSH itself is backed up — the plugin directory of the profile is left out."
     },
+    "supervisor": {
+      "status": "Started by",
+      "installed": "the supervisor of this plugin",
+      "external": "your own way",
+      "unknown": "nobody knows",
+      "off": "switched off",
+      "capable": "Restart capability",
+      "capableYes": "available: the host comes back on its own",
+      "capableNo": "not available: the host does not come back on its own",
+      "install": "Install the supervisor",
+      "uninstall": "Uninstall the supervisor",
+      "hint": "The supervisor is a process of its own: it starts at login, it starts the host again when its process is gone, and it restores the last snapshot when the host does not come up. No administrator rights needed.",
+      "access": "The current access link",
+      "accessHint": "The token changes with every restart, and so does the link. This one is always the current one.",
+      "pending": "The uninstall did not finish. Please run it by hand: {commands}",
+      "reason": "Why"
+    },
     "error": "Could not save the settings: {message}"
+  },
+  "supervisor": {
+    "title": "Let DSH bring itself back up?",
+    "body": "This hosted DSH instance is started by hand (or by something else) — when it dies it does not come back. I can install a supervisor of my own: it starts at login, it starts the host again when the process is gone, and it restores the last snapshot when the host does not come up. The supervisor never touches your session data; it only starts, watches and rolls back.",
+    "changes": "What it changes: a new <stateDir>/supervisor/ directory (the supervisor script, its configuration, its log and its lock); on Windows a login record (the scheduled task dsh-autorestart-web), on Linux a systemd user service. What it does NOT change: your session data, your model configuration, the installed plugins.",
+    "rights": "Which rights it needs: on Windows NO administrator rights (it runs \"at login\"; if the machine forbids ordinary users from creating scheduled tasks, it falls back to the startup folder, which needs none either); on Linux it needs write access to your own home directory (systemctl --user — an ordinary user is enough).",
+    "uninstall": "How to remove it: one click on \"Start at login → Uninstall\" in the settings; or by hand: schtasks /Delete /TN \"dsh-autorestart-web\" /F (on Linux: systemctl --user disable --now dsh-autorestart-web.service && rm ~/.config/systemd/user/dsh-autorestart-web.service). Both ways also delete the <stateDir>/supervisor/ directory.",
+    "install": "Install it for me (recommended)",
+    "installHint": "It writes a supervisor script into <stateDir>/supervisor/ and registers a login record on Windows / a systemd user service on Linux. No administrator rights needed. After that the host is started again within seconds when its process is gone; when it does not come up, the snapshot of the last restart is restored. You can uninstall it with one click at any time.",
+    "keep": "Keep the way I start it",
+    "keepHint": "Nothing is changed. Whatever starts the host today keeps starting it. The price: the host does not come back by itself when its process is gone — the restart only works while something else (a docker \"restart: always\", your own systemd unit) brings it back.",
+    "later": "Later",
+    "laterHint": "This card does not come back. You can install the supervisor by hand at any time in \"Settings → Auto-restart & shut down → Start at login\".",
+    "error": "That did not work: {message}",
+    "busy": "Working…"
   },
   "sleep": {
     "button": {

@@ -232,6 +232,19 @@ const ZH = {
   backupChoiceRecommended: '推荐',
   backupChoiceDismissAria: '关闭这个一次性提示',
   backupChoiceError: '保存失败：{message}',
+  'supervisor.title': '让 DSH 自己把自己拉起来？',
+  'supervisor.body': '现在这个 DSH 托管实例是手动/外部启动的——它挂了不会自己回来。我可以给你装一个自带的守护：登录时自动启动，进程掉了自动拉起，启动失败自动回滚上次快照。守护不会碰你的会话数据，只做「拉起 + 看住 + 回滚」三件事。',
+  'supervisor.changes': '会改什么：新增 <stateDir>/supervisor/（守护脚本 + 配置 + 日志 + 锁）；Windows 注册一条登录自启记录（计划任务 dsh-autorestart-web），Linux 注册一个 systemd 用户服务。不改：会话数据、模型配置、已装插件。',
+  'supervisor.rights': '需要什么权限：Windows 不需要管理员（用「登录时运行」；若该机策略禁止普通用户建计划任务，会自动降级到「启动文件夹」，同样不需要）；Linux 需要能写自己的家目录（systemctl --user，普通用户即可）。',
+  'supervisor.uninstall': '怎么卸：设置页「开机自启 → 卸载」一键；或手动 schtasks /Delete /TN "dsh-autorestart-web" /F（Linux：systemctl --user disable --now dsh-autorestart-web.service && rm ~/.config/systemd/user/dsh-autorestart-web.service），两者都要再删掉 <stateDir>/supervisor/ 目录。',
+  'supervisor.install': '帮我装（推荐）',
+  'supervisor.installHint': '会写一个守护脚本到 <stateDir>/supervisor/，并在 Windows 注册一条登录自启记录 / Linux 注册一个 systemd 用户服务。不需要管理员。之后宿主进程退出，守护会在几秒内拉起它；起不来会自动回滚到重启前的快照。随时可以在设置里一键卸载。',
+  'supervisor.keep': '保持我现在的启动方式',
+  'supervisor.keepHint': '什么都不改。你现在用什么启动就继续用什么。代价：宿主进程退出后不会自动回来——重启功能会退化成「只能在有外部守护时生效」。',
+  'supervisor.later': '以后再说',
+  'supervisor.laterHint': '这张卡片不再出现。你可以随时在「设置 → 自动重启与关机 → 开机自启」里手动装。',
+  'supervisor.error': '操作失败：{message}',
+  'supervisor.busy': '正在处理…',
   // The graceful-shutdown (sleep) surfaces: the button at the foot of the
   // left sidebar, the floating countdown card, the waiting card and the
   // second install question.
@@ -258,6 +271,22 @@ const ZH = {
   'settings.backup.hint': '每次重启前先快照一次当前配置；万一重启后起不来，能自动回退。',
   'settings.backupPlugins.label': '备份包含已安装插件',
   'settings.backupPlugins.hint': '关闭后只备份 DSH 自身状态，不含 profile 里的插件目录。',
+  'settings.groups.supervisor': '开机自启',
+  'settings.supervisor.status': '当前由',
+  'settings.supervisor.installed': '插件守护',
+  'settings.supervisor.external': '你自己的方式',
+  'settings.supervisor.unknown': '未知',
+  'settings.supervisor.off': '关闭',
+  'settings.supervisor.capable': '重启能力',
+  'settings.supervisor.capableYes': '可用：宿主退出后会自动回来',
+  'settings.supervisor.capableNo': '不可用：宿主退出后不会自动回来',
+  'settings.supervisor.install': '装上守护',
+  'settings.supervisor.uninstall': '卸载守护',
+  'settings.supervisor.hint': '守护是一个独立进程：登录时自动启动，宿主进程掉了自动拉起，启动失败自动回滚上次快照。不需要管理员。',
+  'settings.supervisor.access': '当前访问链接',
+  'settings.supervisor.accessHint': '重启后 token 会变，链接也会变。这个链接一直是最新的。',
+  'settings.supervisor.pending': '卸载没有完成，请手动执行：{commands}',
+  'settings.supervisor.reason': '说明',
   'settings.error': '没能保存设置：{message}',
   'sleep.dryRun.title': '试运行：不会真的关机',
   'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
@@ -425,6 +454,19 @@ const EN = {
   backupChoiceRecommended: 'Recommended',
   backupChoiceDismissAria: 'Close this one-time prompt',
   backupChoiceError: 'Could not save the choice: {message}',
+  'supervisor.title': 'Let DSH bring itself back up?',
+  'supervisor.body': 'This hosted DSH instance is started by hand (or by something else) — when it dies it does not come back. I can install a supervisor of my own: it starts at login, it starts the host again when the process is gone, and it restores the last snapshot when the host does not come up. The supervisor never touches your session data; it only starts, watches and rolls back.',
+  'supervisor.changes': 'What it changes: a new <stateDir>/supervisor/ directory (the supervisor script, its configuration, its log and its lock); on Windows a login record (the scheduled task dsh-autorestart-web), on Linux a systemd user service. What it does NOT change: your session data, your model configuration, the installed plugins.',
+  'supervisor.rights': 'Which rights it needs: on Windows NO administrator rights (it runs "at login"; if the machine forbids ordinary users from creating scheduled tasks, it falls back to the startup folder, which needs none either); on Linux it needs write access to your own home directory (systemctl --user — an ordinary user is enough).',
+  'supervisor.uninstall': 'How to remove it: one click on "Start at login → Uninstall" in the settings; or by hand: schtasks /Delete /TN "dsh-autorestart-web" /F (on Linux: systemctl --user disable --now dsh-autorestart-web.service && rm ~/.config/systemd/user/dsh-autorestart-web.service). Both ways also delete the <stateDir>/supervisor/ directory.',
+  'supervisor.install': 'Install it for me (recommended)',
+  'supervisor.installHint': 'It writes a supervisor script into <stateDir>/supervisor/ and registers a login record on Windows / a systemd user service on Linux. No administrator rights needed. After that the host is started again within seconds when its process is gone; when it does not come up, the snapshot of the last restart is restored. You can uninstall it with one click at any time.',
+  'supervisor.keep': 'Keep the way I start it',
+  'supervisor.keepHint': 'Nothing is changed. Whatever starts the host today keeps starting it. The price: the host does not come back by itself when its process is gone — the restart only works while something else (a docker "restart: always", your own systemd unit) brings it back.',
+  'supervisor.later': 'Later',
+  'supervisor.laterHint': 'This card does not come back. You can install the supervisor by hand at any time in "Settings → Auto-restart & shut down → Start at login".',
+  'supervisor.error': 'That did not work: {message}',
+  'supervisor.busy': 'Working…',
   // The graceful-shutdown (sleep) surfaces: the button at the foot of the
   // left sidebar, the floating countdown card, the waiting card and the
   // second install question.
@@ -451,6 +493,22 @@ const EN = {
   'settings.backup.hint': 'Take a snapshot of the current configuration before every restart, so a host that cannot boot again is rolled back automatically.',
   'settings.backupPlugins.label': 'Include the installed plugins in the backup',
   'settings.backupPlugins.hint': 'Off: only the state of DSH itself is backed up — the plugin directory of the profile is left out.',
+  'settings.groups.supervisor': 'Start at login',
+  'settings.supervisor.status': 'Started by',
+  'settings.supervisor.installed': 'the supervisor of this plugin',
+  'settings.supervisor.external': 'your own way',
+  'settings.supervisor.unknown': 'nobody knows',
+  'settings.supervisor.off': 'switched off',
+  'settings.supervisor.capable': 'Restart capability',
+  'settings.supervisor.capableYes': 'available: the host comes back on its own',
+  'settings.supervisor.capableNo': 'not available: the host does not come back on its own',
+  'settings.supervisor.install': 'Install the supervisor',
+  'settings.supervisor.uninstall': 'Uninstall the supervisor',
+  'settings.supervisor.hint': 'The supervisor is a process of its own: it starts at login, it starts the host again when its process is gone, and it restores the last snapshot when the host does not come up. No administrator rights needed.',
+  'settings.supervisor.access': 'The current access link',
+  'settings.supervisor.accessHint': 'The token changes with every restart, and so does the link. This one is always the current one.',
+  'settings.supervisor.pending': 'The uninstall did not finish. Please run it by hand: {commands}',
+  'settings.supervisor.reason': 'Why',
   'settings.error': 'Could not save the settings: {message}',
   'sleep.dryRun.title': 'Dry run: the machine stays on',
   'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
@@ -1147,6 +1205,25 @@ function resolveAccessRedirect(currentUrl, accessUrl) {
 }
 
 /**
+ * The label of "who starts this host".
+ *
+ * The Host reports the mode; this only turns it into a word the user can
+ * read: the supervisor of this plugin, the user's own way, nobody, or off.
+ *
+ * @param {Function} t the translator
+ * @param {any} status the supervisor status of the Host
+ * @returns {string}
+ */
+function supervisorModeLabel(t, status) {
+  const translate = typeof t === 'function' ? t : (name) => name
+  const mode = status && typeof status === 'object' ? status.mode : ''
+  if (mode === 'installed') return translate('settings.supervisor.installed')
+  if (mode === 'external') return translate('settings.supervisor.external')
+  if (mode === 'off') return translate('settings.supervisor.off')
+  return translate('settings.supervisor.unknown')
+}
+
+/**
  * The named exports of this module.
  *
  * The client module system materializes `factory(require) -> exports`, so
@@ -1167,6 +1244,7 @@ const SLEEP_EXPORTS = {
   summarizeBlockers,
   truncateBlockerName,
   resolveAccessRedirect,
+  supervisorModeLabel,
   // The two dictionaries, so a test can build a translator without a Host.
   dictionaries: { zh: ZH, en: EN },
 }
@@ -1203,6 +1281,14 @@ if (moduleLoader) moduleLoader.load({
     // The browser-side record of the one-time install choice. The prompt is
     // shown only while this key is missing, so it is asked exactly once.
     const BACKUP_CHOICE_KEY = 'dsh-autorestart:backup-choice-v1'
+
+    /**
+     * The route that installs, uninstalls and reports the supervisor.
+     *
+     * The Host sends the authoritative one with the state payload; this is
+     * the fallback for a Host that is older than the supervisor.
+     */
+    const DEFAULT_SUPERVISOR_URL = '/__dsh_autorestart/supervisor'
     const POLL_MS = 2000
     // The brand accent (blue-purple). The pending-restart marker is a brand
     // signal, not a warning: no warning/yellow token is used here.
@@ -2490,7 +2576,9 @@ if (moduleLoader) moduleLoader.load({
       // button (that is how the arrow sketch ever reaches a user who
       // installed the plugin before this question existed).
       const [step, setStep] = useState(
-        backupChoicePending() ? 'backup' : (sleepChoicePending() ? 'sleep' : 'done'),
+        backupChoicePending()
+          ? 'backup'
+          : (sleepChoicePending() ? 'sleep' : (supervisorChoicePending(info) ? 'supervisor' : 'done')),
       )
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState('')
@@ -2540,6 +2628,45 @@ if (moduleLoader) moduleLoader.load({
       }
 
       /**
+       * Hand the THIRD answer to the Host: what should happen with the
+       * self-starting supervisor?
+       *
+       * `choice` is 'install' (the card IS the confirmation: the user just
+       * read what would change), 'external' (keep the way you start it) or
+       * 'dismissed' (later).
+       */
+      const chooseSupervisor = (choice) => {
+        if (busy) return
+        setBusy(true)
+        setError('')
+        void (async () => {
+          try {
+            const response = await fetch(supervisorUrlFor(info), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                action: choice === 'install' ? 'install' : 'external',
+                confirmed: true,
+                choice: choice === 'install' ? 'install' : 'external',
+              }),
+            })
+            const body = await response.json().catch(() => null)
+            if (!response.ok) {
+              const message = body && typeof body === 'object' ? (body.error || String(response.status)) : String(response.status)
+              setError(fill(t('supervisor.error'), { message }))
+              return
+            }
+          } catch (failure) {
+            setError(fill(t('supervisor.error'), { message: describeError(failure) }))
+            return
+          } finally {
+            setBusy(false)
+          }
+          setStep('done')
+        })()
+      }
+
+      /**
        * Hand the SECOND answer to the Host: should the shutdown button stay?
        */
       const chooseSleep = (showSleepButton) => {
@@ -2566,7 +2693,8 @@ if (moduleLoader) moduleLoader.load({
           } finally {
             setBusy(false)
           }
-          setStep('done')
+          // The shutdown button is settled: the supervisor question may follow.
+          setStep(supervisorChoicePending(info) ? 'supervisor' : 'done')
         })()
       }
 
@@ -2602,9 +2730,32 @@ if (moduleLoader) moduleLoader.load({
       const onKeyDown = (event) => {
         if (!event) return
         if (event.key === 'Escape' || event.key === 'Esc') {
-          if (step === 'sleep') dismissSleep()
+          if (step === 'supervisor') dismissSupervisor()
+          else if (step === 'sleep') dismissSleep()
           else dismissBackup()
         }
+      }
+
+      /**
+       * Close the supervisor question without answering: the card does not
+       * come back, and the user can install the supervisor by hand later.
+       */
+      const dismissSupervisor = () => {
+        if (busy) return
+        // "Later" is recorded, so the question is never asked again.
+        void (async () => {
+          try {
+            await fetch(supervisorUrlFor(info), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ action: 'external', confirmed: true, choice: 'dismissed' }),
+            })
+          } catch {
+            // The card is gone either way; the Host asks again next time.
+          }
+        })()
+        void acknowledgeAnnouncement(ANNOUNCED_FEATURE).catch(() => {})
+        setStep('done')
       }
 
       if (step === 'done' || step === 'persisting') return null
@@ -2730,6 +2881,80 @@ if (moduleLoader) moduleLoader.load({
             ),
           ),
           h('p', { className: 'dsh-autorestart-choice__footnote' }, t('backupChoiceFootnote')),
+          error === '' ? null : h('p', { role: 'alert' }, error),
+        )
+      }
+
+      // The THIRD question: shall the supervisor be installed?
+      if (step === 'supervisor') {
+        return h(
+          'div',
+          {
+            className: 'dsh-autorestart-choice',
+            role: 'status',
+            'aria-live': 'polite',
+            tabIndex: 0,
+            onKeyDown,
+            'data-dsh-autorestart-backup-choice': 'true',
+            'data-dsh-autorestart-choice-step': 'supervisor',
+          },
+          h(
+            'div',
+            { className: 'dsh-autorestart-choice__head' },
+            h('h3', null, t('supervisor.title')),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-autorestart-choice__close',
+                'aria-label': t('backupChoiceDismissAria'),
+                title: t('backupChoiceDismissAria'),
+                disabled: busy,
+                onClick: dismissSupervisor,
+              },
+              '×',
+            ),
+          ),
+          h('p', { className: 'dsh-autorestart-choice__subtitle' }, t('supervisor.body')),
+          // The three things the card has to say: what it changes, which rights
+          // it needs, and how to remove it again.
+          h('p', { className: 'dsh-autorestart-choice__footnote' }, t('supervisor.changes')),
+          h('p', { className: 'dsh-autorestart-choice__footnote' }, t('supervisor.rights')),
+          h('p', { className: 'dsh-autorestart-choice__footnote' }, t('supervisor.uninstall')),
+          h(
+            'div',
+            { className: 'dsh-autorestart-choice__options' },
+            optionRow(
+              'install',
+              t('supervisor.install'),
+              t('supervisor.installHint'),
+              t('supervisor.install'),
+              'primary',
+              true,
+              () => chooseSupervisor('install'),
+              'data-supervisor-choice',
+            ),
+            optionRow(
+              'external',
+              t('supervisor.keep'),
+              t('supervisor.keepHint'),
+              t('supervisor.keep'),
+              'secondary',
+              false,
+              () => chooseSupervisor('external'),
+              'data-supervisor-choice',
+            ),
+            optionRow(
+              'later',
+              t('supervisor.later'),
+              t('supervisor.laterHint'),
+              t('supervisor.later'),
+              'secondary',
+              false,
+              dismissSupervisor,
+              'data-supervisor-choice',
+            ),
+          ),
           error === '' ? null : h('p', { role: 'alert' }, error),
         )
       }
@@ -2976,6 +3201,26 @@ if (moduleLoader) moduleLoader.load({
       } catch {
         return false
       }
+    }
+
+    /**
+     * Whether the question about the self-starting supervisor may be shown.
+     *
+     * The HOST decides: only a HOSTED host is asked (the desktop app brings
+     * itself back up, so the question would be noise there), and only while
+     * the question was never answered. The Host reports it as
+     * `supervisorOffer` in the state payload.
+     */
+    function supervisorChoicePending(info) {
+      if (!info || typeof info !== 'object') return false
+      return info.supervisorOffer === true
+    }
+
+    /** The route that installs, uninstalls and reports the supervisor. */
+    function supervisorUrlFor(info) {
+      const sent = info && typeof info.supervisorUrl === 'string' ? info.supervisorUrl.trim() : ''
+      if (sent.startsWith('/')) return sent
+      return DEFAULT_SUPERVISOR_URL
     }
 
     // The styles of the sleep surfaces. They live in ONE <style> element so
@@ -3444,6 +3689,53 @@ if (moduleLoader) moduleLoader.load({
         ? GRACE_DEFAULT_SECONDS
         : Math.round(reportedRestartGraceMs / 1000)
 
+      // THE SUPERVISOR: who starts this host, and can the restart work at all.
+      // The Host reports it in the state payload.
+      const supervisorStatus = info && typeof info === 'object' && info.supervisor && typeof info.supervisor === 'object'
+        ? info.supervisor
+        : null
+      const supervisorInstalled = supervisorStatus !== null && supervisorStatus.installed === true
+      const accessUrl = info && typeof info === 'object' && typeof info.accessUrl === 'string' ? info.accessUrl : ''
+      const supervisorPending = supervisorStatus !== null
+        && supervisorStatus.detail !== null
+        && typeof supervisorStatus.detail === 'object'
+        && Array.isArray(supervisorStatus.detail.pendingCommands)
+        && supervisorStatus.detail.pendingCommands.length > 0
+        ? supervisorStatus.detail.pendingCommands.join('   ;   ')
+        : ''
+
+      /**
+       * Install or uninstall the supervisor.
+       *
+       * The button IS the confirmation: the user pressed it, so the request
+       * carries `confirmed: true`. Without it the Host refuses to touch the
+       * machine.
+       */
+      const driveSupervisor = async (action) => {
+        if (busy) return
+        setBusy(true)
+        setError('')
+        try {
+          const response = await fetch(supervisorUrlFor(info), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action, confirmed: true }),
+          })
+          const body = await response.json().catch(() => null)
+          if (!response.ok) {
+            const message = body && typeof body === 'object'
+              ? (body.error || String(response.status))
+              : String(response.status)
+            setError(fill(t('supervisor.error'), { message }))
+            return
+          }
+        } catch (failure) {
+          setError(fill(t('supervisor.error'), { message: describeError(failure) }))
+        } finally {
+          setBusy(false)
+        }
+      }
+
       /**
        * Write one change into the profile configuration.
        *
@@ -3607,6 +3899,98 @@ if (moduleLoader) moduleLoader.load({
             ),
             h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.seconds.hint')),
           ),
+        ),
+        // The SUPERVISOR group: who starts this host, and whether the restart
+        // can work at all.
+        h(
+          'div',
+          {
+            className: 'dsh-autorestart-settings__group',
+            'data-dsh-autorestart-group': 'supervisor',
+          },
+          h(
+            'div',
+            { className: 'dsh-autorestart-settings__group-title' },
+            t('settings.groups.supervisor'),
+          ),
+          h(
+            'div',
+            { className: 'dsh-autorestart-settings__field' },
+            h(
+              'span',
+              { className: 'dsh-autorestart-settings__label' },
+              t('settings.supervisor.status'),
+            ),
+            h(
+              'span',
+              { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'mode' },
+              supervisorModeLabel(t, supervisorStatus),
+            ),
+            h(
+              'span',
+              { className: 'dsh-autorestart-settings__hint' },
+              t('settings.supervisor.hint'),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'dsh-autorestart-settings__field' },
+            h(
+              'span',
+              { className: 'dsh-autorestart-settings__label' },
+              t('settings.supervisor.capable'),
+            ),
+            h(
+              'span',
+              { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'capable' },
+              supervisorStatus && supervisorStatus.restartCapable === true
+                ? t('settings.supervisor.capableYes')
+                : t('settings.supervisor.capableNo'),
+            ),
+          ),
+          h(
+            'div',
+            { className: 'dsh-autorestart-settings__field' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-autorestart-settings__button',
+                disabled: busy,
+                'data-dsh-autorestart-supervisor': supervisorInstalled ? 'uninstall' : 'install',
+                onClick: () => void driveSupervisor(supervisorInstalled ? 'uninstall' : 'install'),
+              },
+              supervisorInstalled ? t('settings.supervisor.uninstall') : t('settings.supervisor.install'),
+            ),
+            supervisorPending
+              ? h(
+                  'span',
+                  { className: 'dsh-autorestart-settings__hint' },
+                  fill(t('settings.supervisor.pending'), { commands: supervisorPending }),
+                )
+              : null,
+          ),
+          accessUrl
+            ? h(
+                'div',
+                { className: 'dsh-autorestart-settings__field' },
+                h(
+                  'span',
+                  { className: 'dsh-autorestart-settings__label' },
+                  t('settings.supervisor.access'),
+                ),
+                h(
+                  'code',
+                  { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-access': 'url' },
+                  accessUrl,
+                ),
+                h(
+                  'span',
+                  { className: 'dsh-autorestart-settings__hint' },
+                  t('settings.supervisor.accessHint'),
+                ),
+              )
+            : null,
         ),
         error === ''
           ? null

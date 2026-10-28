@@ -26,6 +26,7 @@ import {
   pluginVersion,
   PLUGIN_VERSION_FALLBACK,
   SLEEP_FEATURE_VERSION,
+  SUPERVISOR_FEATURE_VERSION,
 } from '../index.js'
 
 const ANNOUNCEMENTS_PATH = '/__dsh_autorestart/announcements'
@@ -210,6 +211,23 @@ async function callChoice(routes, body) {
   return { status: res.statusCode, body: JSON.parse(res.body) }
 }
 
+/**
+ * The pending announcements of ONE feature.
+ *
+ * The plugin announces more than one feature (the graceful shutdown, the
+ * self-starting supervisor), so a test about the announcement of the shutdown
+ * must look at the shutdown only — otherwise every new feature would rewrite
+ * every announcement test.
+ *
+ * @param {any} body the body of the announcements route
+ * @param {string} feature the id of the feature
+ * @returns {any[]}
+ */
+function pendingFor(body, feature) {
+  const pending = body && Array.isArray(body.pending) ? body.pending : []
+  return pending.filter((entry) => entry && entry.feature === feature)
+}
+
 test('the announcement of an upgrade is reported by the Host', async () => {
   const { ctx, routes } = createContext()
   apply(ctx, { stateFile: tempStateFile('pending'), recoveryDelayMs: 0, enabled: true })
@@ -217,7 +235,7 @@ test('the announcement of an upgrade is reported by the Host', async () => {
   const answer = await callAnnouncements(routes, 'GET')
   assert.equal(answer.status, 200)
   assert.equal(answer.body.ok, true)
-  assert.deepEqual(answer.body.pending, [{ feature: 'sleep', version: SLEEP_FEATURE_VERSION }])
+  assert.deepEqual(pendingFor(answer.body, 'sleep'), [{ feature: 'sleep', version: SLEEP_FEATURE_VERSION }])
 })
 
 test('the version of the announcement is the FEATURE version, not the package version', () => {
@@ -229,7 +247,10 @@ test('the version of the announcement is the FEATURE version, not the package ve
   )
   assert.deepEqual(
     featureAnnouncements(),
-    [{ feature: 'sleep', version: SLEEP_FEATURE_VERSION }],
+    [
+      { feature: 'sleep', version: SLEEP_FEATURE_VERSION },
+      { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION },
+    ],
     'the announcement must carry the FEATURE version',
   )
   assert.notEqual(
@@ -255,7 +276,7 @@ test('the announcement is recorded once and never comes back', async () => {
   assert.deepEqual(recorded.body.seen, ['sleep'])
 
   const after = await callAnnouncements(routes, 'GET')
-  assert.deepEqual(after.body.pending, [], 'a recorded announcement must not come back')
+  assert.deepEqual(pendingFor(after.body, 'sleep'), [], 'a recorded announcement must not come back')
 
   // The record lives in the state file, so it survives a restart of the Host.
   const state = JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -273,7 +294,7 @@ test('a user who has seen the announcement of 0.5.0 does not see it again', asyn
   const answer = await callAnnouncements(routes, 'GET')
   assert.equal(answer.status, 200)
   assert.deepEqual(
-    answer.body.pending,
+    pendingFor(answer.body, 'sleep'),
     [],
     'the announcement of 0.5.0 must not come back — it follows the feature, not the release',
   )
@@ -286,7 +307,7 @@ test('a release does not bring the announcement back', async () => {
   assert.equal(module.pluginVersion(), '9.9.9', 'the clone must really run the new package version')
   assert.deepEqual(
     module.featureAnnouncements(),
-    [{ feature: 'sleep', version: '0.5.0' }],
+    [{ feature: 'sleep', version: '0.5.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }],
     'the announcement must not follow the version of the package',
   )
 
@@ -295,7 +316,7 @@ test('a release does not bring the announcement back', async () => {
   module.apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
 
   const answer = await callAnnouncements(routes, 'GET')
-  assert.deepEqual(answer.body.pending, [], 'a release must not bring the announcement back')
+  assert.deepEqual(pendingFor(answer.body, 'sleep'), [], 'a release must not bring the announcement back')
 })
 
 test('a user who answered the card on 0.6.0 does not see it again', async () => {
@@ -311,7 +332,7 @@ test('a user who answered the card on 0.6.0 does not see it again', async () => 
   const answer = await callAnnouncements(routes, 'GET')
   assert.equal(answer.status, 200)
   assert.deepEqual(
-    answer.body.pending,
+    pendingFor(answer.body, 'sleep'),
     [],
     'a record that is not older than the feature version counts as seen',
   )
@@ -327,7 +348,7 @@ test('a user who has seen an OLDER announcement sees the new one', async () => {
 
   const answer = await callAnnouncements(routes, 'GET')
   assert.deepEqual(
-    answer.body.pending,
+    pendingFor(answer.body, 'sleep'),
     [{ feature: 'sleep', version: SLEEP_FEATURE_VERSION }],
     'an older record must not hide a newer feature version',
   )
@@ -344,7 +365,7 @@ test('a record that is not a version counts as seen', async () => {
 
   const answer = await callAnnouncements(routes, 'GET')
   assert.deepEqual(
-    answer.body.pending,
+    pendingFor(answer.body, 'sleep'),
     [],
     'an unreadable record must not make the announcement come back',
   )
@@ -356,7 +377,7 @@ test('a new FEATURE version brings the announcement back on purpose', async () =
   const { module } = await clonePlugin('feature', { featureVersion: '0.6.0' })
   assert.deepEqual(
     module.featureAnnouncements(),
-    [{ feature: 'sleep', version: '0.6.0' }],
+    [{ feature: 'sleep', version: '0.6.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }],
     'the clone must really run the new feature version',
   )
 
@@ -366,7 +387,7 @@ test('a new FEATURE version brings the announcement back on purpose', async () =
 
   const answer = await callAnnouncements(routes, 'GET')
   assert.deepEqual(
-    answer.body.pending,
+    pendingFor(answer.body, 'sleep'),
     [{ feature: 'sleep', version: '0.6.0' }],
     'a new feature version must be announced again',
   )
@@ -378,7 +399,7 @@ test('a FEATURE version above the record brings the announcement back', async ()
   const { module } = await clonePlugin('feature-070', { featureVersion: '0.7.0' })
   assert.deepEqual(
     module.featureAnnouncements(),
-    [{ feature: 'sleep', version: '0.7.0' }],
+    [{ feature: 'sleep', version: '0.7.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }],
     'the clone must really run the new feature version',
   )
 
@@ -388,7 +409,7 @@ test('a FEATURE version above the record brings the announcement back', async ()
 
   const answer = await callAnnouncements(routes, 'GET')
   assert.deepEqual(
-    answer.body.pending,
+    pendingFor(answer.body, 'sleep'),
     [{ feature: 'sleep', version: '0.7.0' }],
     'a feature version above the record must be announced again',
   )
@@ -399,13 +420,13 @@ test('the answer of the install question marks the announcement as seen', async 
   apply(ctx, { stateFile: tempStateFile('install'), recoveryDelayMs: 0, enabled: true })
 
   const before = await callAnnouncements(routes, 'GET')
-  assert.equal(before.body.pending.length, 1, 'the announcement must be pending before the question')
+  assert.equal(pendingFor(before.body, 'sleep').length, 1, 'the announcement must be pending before the question')
 
   const answer = await callChoice(routes, { includePlugins: true })
   assert.equal(answer.status, 200)
 
   const after = await callAnnouncements(routes, 'GET')
-  assert.deepEqual(after.body.pending, [], 'a fresh installation must not get an announcement')
+  assert.deepEqual(pendingFor(after.body, 'sleep'), [], 'a fresh installation must not get an announcement')
 })
 
 test('the settings page does NOT mark the announcement as seen', async () => {
@@ -419,7 +440,7 @@ test('the settings page does NOT mark the announcement as seen', async () => {
   assert.equal(answer.status, 200)
 
   const after = await callAnnouncements(routes, 'GET')
-  assert.equal(after.body.pending.length, 1, 'the announcement must still be pending')
+  assert.equal(pendingFor(after.body, 'sleep').length, 1, 'the announcement must still be pending')
 })
 
 test('a broken record never hides the announcement', async () => {
@@ -446,7 +467,7 @@ test('a broken record never hides the announcement', async () => {
   apply(ctx, { stateFile: file, recoveryDelayMs: 0, enabled: true })
 
   const answer = await callAnnouncements(routes, 'GET')
-  assert.equal(answer.body.pending.length, 1, 'an unreadable record must not swallow the announcement')
+  assert.equal(pendingFor(answer.body, 'sleep').length, 1, 'an unreadable record must not swallow the announcement')
 })
 
 test('a malformed announcement request is refused and nothing is recorded', async () => {
@@ -462,7 +483,7 @@ test('a malformed announcement request is refused and nothing is recorded', asyn
   assert.equal(unknown.body.ok, false)
 
   const after = await callAnnouncements(routes, 'GET')
-  assert.equal(after.body.pending.length, 1, 'a refused request must not record anything')
+  assert.equal(pendingFor(after.body, 'sleep').length, 1, 'a refused request must not record anything')
 })
 
 /* ------------------------------------------------------------------ *
@@ -601,7 +622,7 @@ const INSTALL_ANSWERED = {
 function mountAnnouncementPanel({
   storage,
   fetches,
-  pending = [{ feature: 'sleep', version: '0.5.0' }],
+  pending = [{ feature: 'sleep', version: '0.5.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }],
   sleepStatus = { ok: true, phase: 'idle', countdownSeconds: 30, showSleepButton: true },
 }) {
   const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')

@@ -149,7 +149,9 @@ test('the announcement of an upgrade is reported by the Host', async () => {
 test('the version of the announcement is the version of the package', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
   assert.equal(pluginVersion(), pkg.version, 'the announcement must carry the version of the package')
-  assert.equal(pkg.version, '0.5.0', 'this release is 0.5.0')
+  // The release number lives in package.json only: pinning a literal here made every
+  // version bump fail this test, which taught nobody anything about the announcement.
+  assert.match(pkg.version, /^\d+\.\d+\.\d+$/, 'the package version must be a semver triple')
   assert.deepEqual(featureAnnouncements(), [{ feature: 'sleep', version: pkg.version }])
 })
 

@@ -133,7 +133,7 @@ function snapGraceChoice(value) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.5.0'
+const PLUGIN_VERSION_FALLBACK = '0.6.0'
 
 /** The cached version of this plugin (read once per process). */
 let pluginVersionCache = null
@@ -2133,7 +2133,7 @@ const titleOfSummary = (item) => {
    * The feature announcements the user has not seen yet.
    *
    * A feature is pending when the recorded version is not the current one: a
-   * user who has seen the announcement of version 0.5.0 never sees it again,
+   * user who has seen the announcement of version 0.6.0 never sees it again,
    * and a user who upgrades to a newer version sees the announcement of that
    * version. A feature without a record is always pending — a missing record
    * must never swallow an announcement.

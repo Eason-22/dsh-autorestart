@@ -417,7 +417,7 @@ with its plugins is ~150 MB). The button looked dead. It is not — and now it s
 | Stage | What the interface shows | Where the data comes from |
 |---|---|---|
 | `waiting` | "Waiting for every conversation to be idle…" (+ how many are busy) | the idle gate's blockers |
-| `snapshotting` | The centred card: "Backing up before DSH restart" + a real progress bar, "12.3 MB / 40 MB" and a percentage; the settings page and the tooltip keep the long line, in the same words ("Backing up before DSH restart (about 12s, 78 MB done)…"). The card is held for at least 800 ms and followed by a 1.2 s receipt ("Pre-restart backup done (92 KB)"), so even a 92 KB copy — a hosted profile, about 5 ms — is still seen; the size picks its own unit (KB or MB) | the REAL copy loop: files and bytes written, measured total |
+| `snapshotting` | The centred card: "Backing up before DSH restart" + a real progress bar, "12.3 MB / 40 MB" and a percentage; the settings page and the tooltip keep the long line, in the same words ("Backing up before DSH restart (about 12s, 78 MB done)…"). The card has NO minimum shown time: it lives exactly as long as the Host reports the stage (a 92 KB copy is gone in about 5 ms, a slow one stays as long as it runs); the size picks its own unit (KB or MB) so a small backup never reads "0 MB" | the REAL copy loop: files and bytes written, measured total |
 | `restarting` | "Restarting; the work continues by itself in a moment…" | the host is on its way out |
 | `back` | "Back — carrying on where we left off" | the new host, once it boots |
 

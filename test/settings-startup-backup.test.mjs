@@ -148,6 +148,9 @@ function mountSettings({ info = {}, language = 'zh' } = {}) {
   const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   let definition = null
   const fetches = []
+  // The stylesheet the client injects (the settings panel lives in it), kept so
+  // a test can read the rules it writes.
+  const styles = []
   const sandbox = {
     window: {
       __ModuleLoader__: {
@@ -163,7 +166,14 @@ function mountSettings({ info = {}, language = 'zh' } = {}) {
     document: {
       getElementById: () => null,
       createElement: (tag) => ({ tag, id: '', textContent: '', parentNode: null, setAttribute: () => {}, appendChild: () => {} }),
-      head: { appendChild: (node) => node, removeChild: () => {} },
+      head: {
+        appendChild: (node) => {
+          if (node && node.tag === 'style') styles.push({ id: node.id, text: node.textContent })
+          node.parentNode = sandbox.document.head
+          return node
+        },
+        removeChild: () => {},
+      },
       querySelector: () => null,
     },
     fetch: (url, init) => {
@@ -233,6 +243,7 @@ function mountSettings({ info = {}, language = 'zh' } = {}) {
   return {
     dictionaries,
     fetches,
+    styles,
     settled: async (id, props) => {
       const Component = componentOf(id)
       harness.render(Component, props || {})
@@ -462,10 +473,160 @@ test('the settings page shows the count, the local time, the size and the path',
   }
   assert.equal(value('count'), '当前 1 份', 'the count')
   assert.equal(value('keep'), '最多保留 2 份，超出自动删最旧的那份。', 'the keep limit')
-  assert.equal(value('time'), '2026-10-29 08:25:20+08:00', 'the local time')
-  assert.equal(value('size'), '117.7 MB', 'the size in MB')
-  assert.equal(value('plugins'), '含已装插件', 'whether the plugins are in it')
+  assert.equal(value('time'), '2026-10-29 08:25', 'the local time, to the minute and without the offset')
+  assert.equal(value('size'), '117.7 MB', 'the size, with the tenth that says something')
+  assert.equal(value('plugins'), '（含已装插件）', 'whether the plugins are in it')
   assert.equal(value('path'), 'C:\\Users\\fg\\.dsh\\storages\\dsh-autorestart\\backups', 'where they live')
+})
+
+/* ------------------------------------------------------------------ *
+ * THE BACKUP LIST, one GROUP per backup (user report, 2026-10-29).
+ *
+ * The old list was ONE run-on line — "2026-10-29 22:08:46+08:00 156.0 MB
+ * 含已装插件" — which read as a string of numbers: no offset is needed (the
+ * time IS the local clock), the time and the size ran into each other, and
+ * the size had no name. Each backup is now two labelled rows, and two
+ * backups are two groups with air between them.
+ * ------------------------------------------------------------------ */
+
+/** Two backups as the manifest reports them, rendered by the panel. */
+function twoBackups() {
+  return {
+    dir: 'C:\\Users\\fg\\.dsh\\storages\\dsh-autorestart\\backups',
+    max: 2,
+    count: 2,
+    items: [
+      {
+        name: '2026-10-29T14-08-46-000Z',
+        dir: 'C:\\Users\\fg\\.dsh\\storages\\dsh-autorestart\\backups\\2026-10-29T14-08-46-000Z',
+        at: 1793244526000,
+        atLocal: '2026-10-29T22:08:46+08:00',
+        bytes: 163577856,
+        files: 42,
+        includePlugins: true,
+      },
+      {
+        name: '2026-10-28T01-12-30-000Z',
+        dir: 'C:\\Users\\fg\\.dsh\\storages\\dsh-autorestart\\backups\\2026-10-28T01-12-30-000Z',
+        at: 1793159550000,
+        atLocal: '2026-10-28T09:12:30+08:00',
+        bytes: 94208,
+        files: 3,
+        includePlugins: false,
+      },
+    ],
+  }
+}
+
+/** The rendered text of every node that carries one backup key, in order. */
+function backupValues(panel, key) {
+  return marked(panel, 'data-dsh-autorestart-backup')
+    .filter((node) => node.props['data-dsh-autorestart-backup'] === key)
+    .map((node) => textOf(node))
+}
+
+test('a backup names its time and its size, and never prints a timezone offset', async () => {
+  const mounted = mountSettings({
+    info: {
+      instance: { isDesktopApp: true, platform: 'win32' },
+      supervisor: { mode: 'app', installed: false, startup: { mode: 'desktop' } },
+      backups: twoBackups(),
+    },
+  })
+  const panel = await mounted.settled('dsh-autorestart')
+  const text = textOf(panel)
+
+  // ① The two rows say WHAT they are.
+  assert.ok(text.includes('备份时间'), `the time row must be labelled: ${text}`)
+  assert.ok(text.includes('备份大小'), `the size row must be labelled: ${text}`)
+
+  // ② No offset anywhere — it is the local clock of the machine that took it.
+  assert.equal(/[+-]\d{2}:\d{2}/.test(text), false, `no timezone offset may be printed: ${text}`)
+  assert.equal(text.includes('+08'), false, 'no +08 either')
+
+  // To the minute: the seconds never say anything.
+  assert.deepEqual(
+    backupValues(panel, 'time'),
+    ['2026-10-29 22:08', '2026-10-28 09:12'],
+    'the local time, to the minute, without the offset',
+  )
+  assert.equal(/22:08:\d{2}/.test(text), false, 'no seconds')
+})
+
+test('the size is written with the unit that fits it, and no pointless .0', async () => {
+  const mounted = mountSettings({
+    info: {
+      instance: { isDesktopApp: true, platform: 'win32' },
+      supervisor: { mode: 'app', installed: false, startup: { mode: 'desktop' } },
+      backups: twoBackups(),
+    },
+  })
+  const panel = await mounted.settled('dsh-autorestart')
+  const text = textOf(panel)
+
+  // ③ 156 MB, never 156.0 MB. ④ 92 KB stays in KB.
+  assert.deepEqual(backupValues(panel, 'size'), ['156 MB', '92 KB'], 'the unit follows the byte count')
+  assert.equal(text.includes('156.0'), false, `no pointless tenth: ${text}`)
+  assert.equal(text.includes('0.1 MB'), false, '92 KB must not be shown as a fraction of a MB')
+
+  // The plugin scope travels with the size (it explains the size), in brackets.
+  assert.deepEqual(
+    backupValues(panel, 'plugins'),
+    ['（含已装插件）', '（不含已装插件）'],
+    'whether the plugins are in it, right after the size',
+  )
+})
+
+test('two backups are two spaced groups, each with a labelled time row and size row', async () => {
+  const mounted = mountSettings({
+    info: {
+      instance: { isDesktopApp: true, platform: 'win32' },
+      supervisor: { mode: 'app', installed: false, startup: { mode: 'desktop' } },
+      backups: twoBackups(),
+    },
+  })
+  const panel = await mounted.settled('dsh-autorestart')
+
+  // ⑤ ONE group per backup, with the two rows inside it.
+  const groups = marked(panel, 'data-dsh-autorestart-backup').filter(
+    (node) => node.props['data-dsh-autorestart-backup'] === 'item',
+  )
+  assert.equal(groups.length, 2, 'two backups are two groups')
+  for (const [index, group] of groups.entries()) {
+    assert.equal(
+      String(group.props.className).includes('dsh-autorestart-settings__backup'),
+      true,
+      `the group of backup ${index + 1} has its own class`,
+    )
+    const rows = walk(group).filter((node) => node.props
+      && String(node.props.className).includes('dsh-autorestart-settings__backup-row'))
+    assert.equal(rows.length, 2, `backup ${index + 1} is two rows (time, size)`)
+  }
+
+  // ...and the stylesheet keeps two groups apart (>= 8px, as asked).
+  const style = mounted.styles.find((entry) => entry.id === 'dsh-autorestart-sleep')
+  assert.ok(style, 'the settings stylesheet must be injected')
+  const spacing = /\.dsh-autorestart-settings__backup \+ \.dsh-autorestart-settings__backup\{margin-top:(\d+)px;\}/.exec(style.text)
+  assert.ok(spacing, `two groups must be spaced on purpose: ${style.text.slice(0, 400)}`)
+  assert.ok(Number(spacing[1]) >= 8, `the gap between two backups must be at least 8px: ${spacing[0]}`)
+})
+
+test('the backup list speaks English too', async () => {
+  const mounted = mountSettings({
+    language: 'en',
+    info: {
+      instance: { isDesktopApp: true, platform: 'win32' },
+      supervisor: { mode: 'app', installed: false, startup: { mode: 'desktop' } },
+      backups: twoBackups(),
+    },
+  })
+  const panel = await mounted.settled('dsh-autorestart')
+  const text = textOf(panel)
+  assert.ok(text.includes('Backup time'), `the English time label: ${text}`)
+  assert.ok(text.includes('Backup size'), `the English size label: ${text}`)
+  assert.deepEqual(backupValues(panel, 'plugins'), ['(plugins included)', '(plugins excluded)'])
+  assert.deepEqual(backupValues(panel, 'size'), ['156 MB', '92 KB'])
+  assert.equal(/[+-]\d{2}:\d{2}/.test(text), false, 'no offset in English either')
 })
 
 test('without a backup the page says so', async () => {

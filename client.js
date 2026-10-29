@@ -375,8 +375,10 @@
     'settings.backup.copyPath': '复制路径',
     'settings.backup.copied': '路径已复制',
     'settings.backup.copyFailed': '复制失败，请手动选中上面的路径',
-    'settings.backup.withPlugins': '含已装插件',
-    'settings.backup.withoutPlugins': '只有配置',
+    'settings.backup.time': '备份时间',
+    'settings.backup.size': '备份大小',
+    'settings.backup.withPlugins': '（含已装插件）',
+    'settings.backup.withoutPlugins': '（不含已装插件）',
     'settings.groups.report': '报告问题',
     'settings.groups.rescue': '出事了怎么办',
     'settings.rescue.hint': 'DSH 打不开的时候，用下面这两个脚本救自己（都不用 DSH 跑起来）。',
@@ -494,9 +496,6 @@
     // profile must never be rounded down to "0 MB".
     'restart.overlay.size': '{done} / {total}',
     'restart.overlay.sizeDone': '{done}',
-    // THE RECEIPT: the copy is over, and the card says so for 1.2 s — the user
-    // reported "I never saw the backup" although it really happened.
-    'restart.overlay.snapshotDone': '重启前备份完成（{size}）',
     'restart.overlay.restarting': '正在重启…',
     'restart.overlay.back': '已回来',
   }
@@ -725,8 +724,10 @@
     'settings.backup.copyPath': 'Copy the path',
     'settings.backup.copied': 'The path is on the clipboard',
     'settings.backup.copyFailed': 'The copy failed — please select the path above by hand',
-    'settings.backup.withPlugins': 'includes the installed plugins',
-    'settings.backup.withoutPlugins': 'configuration only',
+    'settings.backup.time': 'Backup time',
+    'settings.backup.size': 'Backup size',
+    'settings.backup.withPlugins': '(plugins included)',
+    'settings.backup.withoutPlugins': '(plugins excluded)',
     'settings.groups.report': 'Report a problem',
     'settings.groups.rescue': 'If DSH will not start',
     'settings.rescue.hint': 'When DSH does not come up, these two scripts rescue it for you (neither of them needs DSH running).',
@@ -835,7 +836,6 @@
     'restart.overlay.snapshotting': 'Backing up before DSH restart',
     'restart.overlay.size': '{done} / {total}',
     'restart.overlay.sizeDone': '{done}',
-    'restart.overlay.snapshotDone': 'Pre-restart backup done ({size})',
     'restart.overlay.restarting': 'Restarting…',
     'restart.overlay.back': 'Back again',
   }
@@ -2064,7 +2064,11 @@
   }
 
   /**
-   * The size of one backup, in MB (the manifest carries the byte count).
+   * The size of one backup, with the unit that fits it (the manifest carries
+   * the byte count).
+   *
+   * 92 KB stays 92 KB and 156 MB stays 156 MB: the tenth is kept only when it
+   * says something ("117.7 MB"), never as a pointless "156.0 MB".
    *
    * @param {number|null|undefined} bytes
    * @returns {string}
@@ -2072,21 +2076,41 @@
   function formatBackupSize(bytes) {
     const value = Number(bytes)
     if (!Number.isFinite(value) || value < 0) return ''
-    return (value / (1024 * 1024)).toFixed(1) + ' MB'
+    const units = [
+      { size: 1024 * 1024 * 1024, suffix: 'GB' },
+      { size: 1024 * 1024, suffix: 'MB' },
+      { size: 1024, suffix: 'KB' },
+    ]
+    for (const unit of units) {
+      if (value < unit.size) continue
+      const scaled = Math.round((value / unit.size) * 10) / 10
+      // 156.0 → 156, 117.7 → 117.7: the tenth only when it says something.
+      return (Number.isInteger(scaled) ? String(scaled) : scaled.toFixed(1)) + ' ' + unit.suffix
+    }
+    return Math.round(value) + ' B'
   }
 
   /**
-   * The local time of one backup.
+   * The local time of one backup, to the minute.
    *
    * The directory name is UTC on purpose, so the panel shows the LOCAL time
    * the manifest carries: a fresh snapshot can never look like an old one.
+   *
+   * The OFFSET is dropped on purpose (user report, 2026-10-29): the string is
+   * already the local time of the machine that took the copy, so "+08:00" is
+   * noise to whoever reads it — and the seconds never say anything either.
    *
    * @param {string|null|undefined} atLocal
    * @returns {string}
    */
   function formatBackupTime(atLocal) {
-    if (typeof atLocal !== 'string' || atLocal === '') return ''
-    return atLocal.replace('T', ' ')
+    if (typeof atLocal !== 'string' || atLocal.trim() === '') return ''
+    const text = atLocal.trim().replace('T', ' ')
+    // "2026-10-29 22:08:46+08:00" → "2026-10-29 22:08" (date and minute only).
+    const matched = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.exec(text)
+    if (matched) return matched[0]
+    // Anything else: at least never show an offset.
+    return text.replace(/ ?([+-]\d{2}:?\d{2}|Z)$/, '')
   }
 
   /**
@@ -2199,156 +2223,6 @@
   }
 
   /**
-   * HOW LONG THE CARD IS OWED TO THE USER (milliseconds).
-   *
-   * THE REPORT (user, 2026-10-29): the backup of a hosted profile is 92 KB and
-   * takes ~5 ms, so the card was on screen for a blink — "I never saw the
-   * backup", although it really happened. These two numbers are a DISPLAY rule
-   * only: they never delay the copy and they never delay the restart.
-   */
-  const SNAPSHOT_MIN_VISIBLE_MS = 800
-  const SNAPSHOT_DONE_MS = 1200
-
-  /**
-   * The empty display clock of the card.
-   *
-   * @returns {{ stage: string, startedAt: number, bytes: number|null, total: number|null, percent: number|null, doneAt: number, receiptGiven: boolean }}
-   */
-  function emptyOverlayClock() {
-    return { stage: '', startedAt: 0, bytes: null, total: null, percent: null, doneAt: 0, receiptGiven: false }
-  }
-
-  /**
-   * WHAT THE CARD SHOWS NOW — a pure function of the Host report and the page's
-   * own clock.
-   *
-   * THE RULE, in order:
-   *   1. the copy runs (phase snapshotting): the card counts up with the real
-   *      bytes; the clock remembers when it started and how big it got;
-   *   2. the copy is over and the host is going down (phase restarting):
-   *      a. this page SAW the copy → its card stays for at least
-   *         SNAPSHOT_MIN_VISIBLE_MS, then the receipt;
-   *      b. this page did NOT see it (a 92 KB profile is copied in ~5 ms while
-   *         the page polls every 2 s) → the receipt straight away, using the
-   *         size the Host carried over: the user must learn that a backup
-   *         happened;
-   *   3. the receipt itself lasts SNAPSHOT_DONE_MS, then the ordinary card of
-   *      the stage takes over;
-   *   4. anything else (a cancelled copy, phase waiting, no restart at all):
-   *      nothing is owed — a "done" receipt for a cancelled backup would be a
-   *      lie.
-   *
-   * @param {object} state the clock (see emptyOverlayClock)
-   * @param {{ phase?: string, pending?: boolean, progress?: object|null, snapshotBytes?: number|null }} report
-   * @param {number} now
-   * @returns {{ state: object, card: { kind: string, bytes: number|null, total?: number|null, percent?: number|null }|null }}
-   */
-  function advanceOverlayClock(state, report, now) {
-    const clock = state && typeof state === 'object' && typeof state.stage === 'string'
-      ? state
-      : emptyOverlayClock()
-    const phase = report && typeof report.phase === 'string' ? report.phase : ''
-    const pending = Boolean(report && report.pending === true)
-    const progress = report && report.progress && typeof report.progress === 'object' ? report.progress : null
-    const number = (value) => {
-      if (value === null || value === undefined || value === '') return null
-      const parsed = Number(value)
-      return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : null
-    }
-    const bytes = progress === null ? null : number(progress.bytes)
-    const total = progress === null ? null : number(progress.total)
-    const percent = progress !== null && Number.isFinite(Number(progress.percent))
-      ? Math.max(0, Math.min(100, Math.round(Number(progress.percent))))
-      : null
-    const reportedSize = report === null || report === undefined ? null : number(report.snapshotBytes)
-
-    // (0) Nothing is running: the clock is empty again, so the NEXT restart owes
-    // its own receipt.
-    if (!pending) return { state: emptyOverlayClock(), card: null }
-    if (phase === 'waiting') return { state: emptyOverlayClock(), card: null }
-
-    // (1) The copy runs.
-    if (phase === 'snapshotting') {
-      const fresh = clock.stage !== 'snapshot'
-      const nextBytes = bytes === null ? clock.bytes : Math.max(clock.bytes === null ? 0 : clock.bytes, bytes)
-      const nextTotal = total === null ? clock.total : total
-      const nextPercent = percent === null ? clock.percent : percent
-      const unchanged = !fresh
-        && clock.bytes === nextBytes
-        && clock.total === nextTotal
-        && clock.percent === nextPercent
-        && clock.receiptGiven === false
-      const next = unchanged
-        ? clock
-        : {
-          stage: 'snapshot',
-          startedAt: fresh ? now : clock.startedAt,
-          bytes: nextBytes,
-          total: nextTotal,
-          percent: nextPercent,
-          doneAt: 0,
-          receiptGiven: false,
-        }
-      return { state: next, card: { kind: 'snapshot', bytes: next.bytes, total: next.total, percent: next.percent } }
-    }
-
-    // Anything that is not "the host is going down" means the restart is over or
-    // was called off: nothing is owed (the back card has its own rule).
-    if (phase !== 'restarting') return { state: emptyOverlayClock(), card: null }
-
-    // (2a) The copy ended just now — hold its card for the minimum, then the
-    // receipt.
-    if (clock.stage === 'snapshot') {
-      const heldUntil = clock.startedAt + SNAPSHOT_MIN_VISIBLE_MS
-      if (now < heldUntil) {
-        return {
-          state: clock,
-          card: { kind: 'snapshot', bytes: clock.bytes, total: clock.total, percent: clock.percent },
-        }
-      }
-      const done = { ...clock, stage: 'done', doneAt: now, receiptGiven: true }
-      return { state: done, card: { kind: 'done', bytes: clock.bytes } }
-    }
-
-    // (3) The receipt is on screen.
-    if (clock.stage === 'done') {
-      if (now < clock.doneAt + SNAPSHOT_DONE_MS) {
-        return { state: clock, card: { kind: 'done', bytes: clock.bytes } }
-      }
-      return { state: { ...emptyOverlayClock(), receiptGiven: true }, card: null }
-    }
-
-    // (2b) The copy happened, but this page never saw it: say it anyway.
-    if (clock.receiptGiven !== true && reportedSize !== null && reportedSize > 0) {
-      const started = {
-        stage: 'done',
-        startedAt: now,
-        bytes: reportedSize,
-        total: null,
-        percent: null,
-        doneAt: now,
-        receiptGiven: true,
-      }
-      return { state: started, card: { kind: 'done', bytes: reportedSize } }
-    }
-
-    return { state: clock, card: null }
-  }
-
-  /**
-   * When the card must be redrawn even if no poll arrives (ms), or null.
-   *
-   * @param {object} state the clock
-   * @returns {number|null}
-   */
-  function overlayClockDeadline(state) {
-    if (!state || typeof state !== 'object') return null
-    if (state.stage === 'snapshot') return state.startedAt + SNAPSHOT_MIN_VISIBLE_MS
-    if (state.stage === 'done') return state.doneAt + SNAPSHOT_DONE_MS
-    return null
-  }
-
-  /**
    * The named exports of this module.
    *
    * The client module system materializes `factory(require) -> exports`, so
@@ -2403,14 +2277,9 @@
     isRestartOverlayPhase,
     restartPillStageText,
     restartOverlayTitle,
-    // The size with the unit that fits it, and the display clock that keeps the
-    // card on screen long enough to be read.
+    // The size with the unit that fits it ("92 KB", "156 MB"): a hosted profile
+    // is small enough that megabytes would round it to "0 MB".
     formatOverlaySize,
-    emptyOverlayClock,
-    advanceOverlayClock,
-    overlayClockDeadline,
-    SNAPSHOT_MIN_VISIBLE_MS,
-    SNAPSHOT_DONE_MS,
     // The TRANSLATOR: the Host's one when it answers, the built-in dictionary
     // when it does not (a key name is never shown).
     makeTranslate,
@@ -3913,27 +3782,22 @@
        * THE CENTRED OVERLAY OF A RESTART — the stage, on the interface itself.
        *
        * WHY (first report): the stage lived in the composer row, one clipped line
-       * inside a 22px toolbar, where the sentence was cut off by an ellipsis.
+       * inside a 22px toolbar, where the sentence was cut off by an ellipsis. The
+       * detail therefore moved onto the middle of the conversation.
        *
-       * WHY IT HAS A CLOCK (second report, 2026-10-29): the card was never seen at
-       * all. The backup of a hosted profile is 92 KB and takes ~5 ms, while the
-       * page polls every 2 s — the card existed for less than one frame of the
-       * user's attention. The backup really happened; nobody could tell.
+       * WHAT IS DRAWN, AND WHEN — the card follows the Host EXACTLY, with no time
+       * floor of its own (the owner's decision, 2026-10-29: "浮层不用保底时间,
+       * 短就算了,不用硬加长"): a 92 KB backup is copied in ~5 ms and the card is
+       * gone just as fast; a slow backup keeps it on screen for as long as it
+       * takes. Nothing here invents a duration.
+       *   snapshotting  "DSH 重启前备份中" + the real bar + "12.3 MB / 40 MB" + %
+       *   restarting    "正在重启…" (the host is on its way out)
+       *   back          "已回来", for 1.5s, and only for a restart THIS page saw
+       *   waiting/idle  NOTHING: the gate merely waits, nothing is in progress
        *
-       * SO the card is drawn from a DISPLAY CLOCK (advanceOverlayClock):
-       *   snapshotting  the card counts up with the real bytes, and once it has
-       *                 been on screen it stays for at least
-       *                 SNAPSHOT_MIN_VISIBLE_MS;
-       *   after the copy a receipt says "重启前备份完成（92 KB）" for
-       *                 SNAPSHOT_DONE_MS — on a page that never saw the copy too,
-       *                 because the Host carries the measured size across the
-       *                 stage change;
-       *   restarting    "正在重启…" until the host is really gone;
-       *   back          "已回来", for 1.5s, and only for a restart THIS page saw;
-       *   waiting/idle  NOTHING: the gate merely waits, nothing is in progress.
-       *
-       * The clock is a DISPLAY rule only: it never delays the copy and it never
-       * delays the restart.
+       * A running stage counts only while the restart is really PENDING
+       * (pendingRestart): the stage a previous restart left in the state file is
+       * not an action, and a card for it would be a lie.
        *
        * IT LIVES ON THIS PAGE ONLY (no localStorage, no global marker), it never
        * covers the input (pointer-events: none), and it never cuts a word.
@@ -3941,20 +3805,19 @@
       function RestartOverlay() {
         const info = useSharedInfo(true)
         const t = makeTranslate(translate)
-        // The display clock: how long each card is owed to the user.
-        const [clock, setClock] = useState(emptyOverlayClock)
         // The stage said goodbye: the card folds away once, and only once.
         const [backGone, setBackGone] = useState(false)
         // DID THIS PAGE WATCH A RESTART IN PROGRESS? A page opened afterwards
         // reads a LEFTOVER stage from the state file and must draw nothing.
         const [sawRunning, setSawRunning] = useState(false)
-        // Wakes the card up when a hold expires: the minimum shown time and the
-        // receipt are timers, not poll events.
-        const [, setTick] = useState(0)
 
         const stage = info && info.restartPhase && typeof info.restartPhase === 'object' ? info.restartPhase : null
         const phase = stage && typeof stage.phase === 'string' ? stage.phase : ''
+        // A RESTART THAT IS REALLY PENDING: the request says "something is going
+        // on right now", the state file alone does not.
         const pending = Boolean(info && info.pendingRestart === true)
+        // THE ONLY TWO STAGES THAT ARE "SOMETHING IS REALLY HAPPENING": the
+        // snapshot is being written, or the host is on its way out.
         const running = pending && (phase === 'snapshotting' || phase === 'restarting')
 
         useEffect(() => {
@@ -3971,64 +3834,31 @@
           return () => clearTimeout(timer)
         }, [phase])
 
-        const now = Date.now()
-        const report = {
-          phase,
-          pending,
-          progress: stage && stage.progress && typeof stage.progress === 'object' ? stage.progress : null,
-          snapshotBytes: stage && Number.isFinite(Number(stage.snapshotBytes)) ? Number(stage.snapshotBytes) : null,
-        }
-        const view = advanceOverlayClock(clock, report, now)
-        // Persist the clock the moment it moves, so the minimum shown time and
-        // the receipt survive the next poll.
-        useEffect(() => {
-          if (view.state !== clock) setClock(view.state)
-        }, [view.state])
+        // THE CARD IS ONLY DRAWN WHILE SOMETHING IS REALLY IN PROGRESS.
+        const visible = running || (phase === 'back' && sawRunning && !backGone)
+        if (!visible) return null
 
-        // …and wake up when a hold is over, so the card leaves on time even when
-        // no poll happens in between.
-        const deadline = overlayClockDeadline(view.state)
-        useEffect(() => {
-          if (deadline === null) return undefined
-          const delay = Math.max(0, deadline - Date.now()) + 20
-          const timer = setTimeout(() => setTick((value) => value + 1), delay)
-          return () => clearTimeout(timer)
-        }, [deadline])
+        const progress = stage.progress && typeof stage.progress === 'object' ? stage.progress : null
+        const bytes = progress !== null && Number.isFinite(Number(progress.bytes)) ? Number(progress.bytes) : null
+        const total = progress !== null && Number.isFinite(Number(progress.total)) ? Number(progress.total) : null
+        const percent = progress !== null && Number.isFinite(Number(progress.percent))
+          ? Math.max(0, Math.min(100, Math.round(Number(progress.percent))))
+          : null
 
-        const card = view.card
-        // The receipt is only drawn when there is a size to quote: without a
-        // measurement the card says nothing instead of "0 MB".
-        const holdTitle = card === null
-          ? ''
-          : (card.kind === 'done'
-            ? (formatOverlaySize(card.bytes) === ''
-              ? ''
-              : fill(t('restart.overlay.snapshotDone'), { size: formatOverlaySize(card.bytes) }))
-            : t('restart.overlay.snapshotting'))
-
-        const ordinaryRestarting = holdTitle === '' && phase === 'restarting' && pending
-        const ordinaryBack = holdTitle === '' && phase === 'back' && sawRunning && !backGone
-        if (holdTitle === '' && !ordinaryRestarting && !ordinaryBack) return null
-
-        const cardKind = holdTitle === ''
-          ? (ordinaryBack ? 'back' : 'restarting')
-          : (card !== null && card.kind === 'done' ? 'done' : 'snapshot')
-        let title = holdTitle
-        if (cardKind === 'restarting') title = t('restart.overlay.restarting')
-        if (cardKind === 'back') title = restartOverlayTitle(stage, t)
+        const title = restartOverlayTitle(stage, t)
 
         let bar = null
         let detail = null
-        if (cardKind === 'snapshot' && card !== null) {
+        if (phase === 'snapshotting') {
           // The numbers are the ones the copy loop really measured; when there is
           // no measurement yet, the card shows no number at all (an invented
-          // progress bar is worse than none).
-          const done = card.bytes === null ? '' : formatOverlaySize(card.bytes)
-          const all = card.total === null ? '' : formatOverlaySize(card.total)
+          // progress bar is worse than none). The unit fits the size, so a 92 KB
+          // profile is "92 KB" and never "0 MB".
+          const done = bytes === null ? '' : formatOverlaySize(bytes)
+          const all = total === null ? '' : formatOverlaySize(total)
           const sizeText = done === ''
             ? ''
             : (all === '' ? fill(t('restart.overlay.sizeDone'), { done }) : fill(t('restart.overlay.size'), { done, total: all }))
-          const percent = card.percent === null ? null : card.percent
           bar = h(
             'div',
             {
@@ -4063,12 +3893,7 @@
             role: 'status',
             'aria-live': 'polite',
             'data-dsh-autorestart-restart-overlay': 'true',
-            // THE HOST PHASE (what the restart is doing) …
             'data-dsh-autorestart-restart-overlay-phase': phase,
-            // … and WHAT IS ON THE CARD: holding the snapshot card while the
-            // host is already restarting is a normal state now, and so is the
-            // receipt of a copy this page never saw.
-            'data-dsh-autorestart-restart-overlay-card': cardKind,
           },
           h(
             'p',
@@ -5050,6 +4875,37 @@
         '  font-size:13px;',
         '}',
         '.dsh-autorestart-settings__hint{font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary);}',
+        // THE BACKUP LIST (user report, 2026-10-29: the old one-liner
+        // "2026-10-29 22:08:46+08:00 156.0 MB 含已装插件" was unreadable).
+        // One GROUP per backup, a labelled row for the time and one for the
+        // size, and enough air between two groups that two copies never read
+        // as one block.
+        '.dsh-autorestart-settings__backup{',
+        '  display:flex;',
+        '  flex-direction:column;',
+        '  gap:3px;',
+        '  padding-top:8px;',
+        '  border-top:1px solid var(--dsw-alias-border-l1);',
+        '}',
+        '.dsh-autorestart-settings__backup + .dsh-autorestart-settings__backup{margin-top:12px;}',
+        '.dsh-autorestart-settings__backup-row{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;}',
+        '.dsh-autorestart-settings__backup-label{',
+        '  flex:none;',
+        '  font-size:12.5px;',
+        '  line-height:18px;',
+        '  color:var(--dsw-alias-label-secondary);',
+        '}',
+        '.dsh-autorestart-settings__backup-value{',
+        '  font-size:13px;',
+        '  line-height:18px;',
+        '  color:var(--dsw-alias-label-primary);',
+        '  font-variant-numeric:tabular-nums;',
+        '}',
+        '.dsh-autorestart-settings__backup-note{',
+        '  font-size:12px;',
+        '  line-height:18px;',
+        '  color:var(--dsw-alias-label-secondary);',
+        '}',
         // The folded "technical details": the command itself stays out of the
         // way until somebody asks for it.
         '.dsh-autorestart-settings__details{',
@@ -6098,25 +5954,50 @@
                 : null,
               backupItems.map((item, index) => h(
                 'div',
-                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-backup': 'item' },
+                {
+                  className: 'dsh-autorestart-settings__backup',
+                  'data-dsh-autorestart-backup': 'item',
+                  key: 'backup-' + index,
+                },
+                // WHEN it was taken. No timezone offset: what is shown is
+                // already the local clock of the machine that took the copy.
                 h(
-                  'span',
-                  { 'data-dsh-autorestart-backup': 'time' },
-                  formatBackupTime(item && item.atLocal),
+                  'div',
+                  { className: 'dsh-autorestart-settings__backup-row' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__backup-label' },
+                    t('settings.backup.time'),
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__backup-value', 'data-dsh-autorestart-backup': 'time' },
+                    formatBackupTime(item && item.atLocal),
+                  ),
                 ),
+                // HOW BIG it is — and whether the plugins are in it, because
+                // that is WHY it is that big: the note belongs to the size.
                 h(
-                  'span',
-                  { 'data-dsh-autorestart-backup': 'size' },
-                  formatBackupSize(item && item.bytes),
+                  'div',
+                  { className: 'dsh-autorestart-settings__backup-row' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__backup-label' },
+                    t('settings.backup.size'),
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__backup-value', 'data-dsh-autorestart-backup': 'size' },
+                    formatBackupSize(item && item.bytes),
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__backup-note', 'data-dsh-autorestart-backup': 'plugins' },
+                    item && item.includePlugins === true
+                      ? t('settings.backup.withPlugins')
+                      : t('settings.backup.withoutPlugins'),
+                  ),
                 ),
-                h(
-                  'span',
-                  { 'data-dsh-autorestart-backup': 'plugins' },
-                  item && item.includePlugins === true
-                    ? t('settings.backup.withPlugins')
-                    : t('settings.backup.withoutPlugins'),
-                ),
-                index === 0 ? null : null,
               )),
               backupsInfo.dir === ''
                 ? null

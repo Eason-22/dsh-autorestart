@@ -822,184 +822,41 @@ test('the card names WHAT is being backed up, in BOTH languages', async () => {
 })
 
 /* ------------------------------------------------------------------ *
- * 12. THE CARD HAS A CLOCK (user report: "I never saw the backup").
+ * 12. NO TIME FLOOR: the card lives exactly as long as the Host says.
  *
- * A hosted profile is 92 KB and is copied in ~5 ms, while the page polls every
- * 2 s. The backup really happened; the card was simply never seen. The rule is
- * a DISPLAY rule (the copy itself is untouched), and it is proved here with a
- * fake clock first and with real timers afterwards.
+ * The owner's decision (2026-10-29): "浮层不用保底时间, 短就算了, 不用硬加长,
+ * 之前是太长看的奇怪而已". So a 92 KB backup that takes 5 ms shows for 5 ms and
+ * the next stage takes over at once — nothing here holds the card artificially.
  * ------------------------------------------------------------------ */
 
-/** The Host report the clock reads (what the state route answers with). */
-function report(phase, { pending = true, bytes = null, total = null, percent = null, snapshotBytes = null } = {}) {
-  return {
-    phase,
-    pending,
-    progress: bytes === null && total === null && percent === null
-      ? null
-      : { bytes, total, percent },
-    snapshotBytes,
-  }
-}
-
-test('the clock keeps a 5 ms backup on screen for the minimum, then shows the receipt', () => {
-  const api = globalThis.__dshAutorestartClient
-  const min = api.SNAPSHOT_MIN_VISIBLE_MS
-  const doneMs = api.SNAPSHOT_DONE_MS
-  assert.equal(min, 800, 'the minimum shown time is 800 ms')
-  assert.equal(doneMs, 1200, 'the receipt stays 1.2 s')
-
-  // t=0: the copy starts (a 92 KB profile: it is dumped in about 5 ms).
-  let state = api.emptyOverlayClock()
-  let view = api.advanceOverlayClock(state, report('snapshotting', { bytes: 92 * 1024, total: 92 * 1024, percent: 100 }), 0)
-  assert.equal(view.card.kind, 'snapshot', 'the card counts the copy')
-  assert.equal(view.card.bytes, 92 * 1024)
-  state = view.state
-
-  // t=5 ms: the copy is over and the host is going down. A page that polls
-  // every 2 s would show NOTHING here — the clock does not let go.
-  view = api.advanceOverlayClock(state, report('restarting', { snapshotBytes: 92 * 1024 }), 5)
-  assert.equal(view.card.kind, 'snapshot', 'the card is still the copy at 5 ms')
-  state = view.state
-  assert.equal(state.stage, 'snapshot')
-
-  view = api.advanceOverlayClock(state, report('restarting', { snapshotBytes: 92 * 1024 }), min - 1)
-  assert.equal(view.card.kind, 'snapshot', 'still the copy just before 800 ms')
-  state = view.state
-
-  // t=800 ms: the minimum is over — the receipt takes over.
-  view = api.advanceOverlayClock(state, report('restarting', { snapshotBytes: 92 * 1024 }), min)
-  assert.equal(view.card.kind, 'done', 'the receipt appears at 800 ms')
-  assert.equal(view.card.bytes, 92 * 1024, 'with the real size of the copy')
-  state = view.state
-
-  view = api.advanceOverlayClock(state, report('restarting', { snapshotBytes: 92 * 1024 }), min + doneMs - 1)
-  assert.equal(view.card.kind, 'done', 'the receipt is still there just before 1.2 s')
-  state = view.state
-
-  // t=800+1200: the receipt is over; the ordinary card of the stage takes over.
-  view = api.advanceOverlayClock(state, report('restarting', { snapshotBytes: 92 * 1024 }), min + doneMs)
-  assert.equal(view.card, null, 'after the receipt the ordinary restart card is the component\'s business')
-  assert.equal(api.overlayClockDeadline(view.state), null, 'and no timer is left behind')
-})
-
-test('a copy this page NEVER saw still gets its receipt (the WSL case)', () => {
-  const api = globalThis.__dshAutorestartClient
-  // First observation: the host is already restating, but it carries the size.
-  const first = api.advanceOverlayClock(api.emptyOverlayClock(), report('restarting', { snapshotBytes: 92 * 1024 }), 1000)
-  assert.equal(first.card.kind, 'done', 'the receipt appears even though no progress was ever seen')
-  assert.equal(first.card.bytes, 92 * 1024)
-  assert.equal(
-    globalThis.__dshAutorestartClient.formatOverlaySize(first.card.bytes),
-    '92 KB',
-    'and it says 92 KB, never 0 MB',
-  )
-  // It lasts 1.2 s, and it is given ONCE per restart.
-  const later = api.advanceOverlayClock(first.state, report('restarting', { snapshotBytes: 92 * 1024 }), 1000 + 1199)
-  assert.equal(later.card.kind, 'done')
-  const over = api.advanceOverlayClock(later.state, report('restarting', { snapshotBytes: 92 * 1024 }), 1000 + 1200)
-  assert.equal(over.card, null, 'the receipt is over')
-  const again = api.advanceOverlayClock(over.state, report('restarting', { snapshotBytes: 92 * 1024 }), 1000 + 5000)
-  assert.equal(again.card, null, 'the receipt is not shown a second time for the same restart')
-})
-
-test('a 156 MB backup is quoted as 156 MB, a 92 KB one as 92 KB', () => {
-  const api = globalThis.__dshAutorestartClient
-  const big = api.advanceOverlayClock(api.emptyOverlayClock(), report('restarting', { snapshotBytes: 156 * 1024 * 1024 }), 0)
-  assert.equal(api.formatOverlaySize(big.card.bytes), '156 MB')
-  const small = api.advanceOverlayClock(api.emptyOverlayClock(), report('restarting', { snapshotBytes: 92 * 1024 }), 0)
-  assert.equal(api.formatOverlaySize(small.card.bytes), '92 KB')
-})
-
-test('a cancelled copy gets NO receipt (it did not finish)', () => {
-  const api = globalThis.__dshAutorestartClient
-  let view = api.advanceOverlayClock(api.emptyOverlayClock(), report('snapshotting', { bytes: 4096, total: 92 * 1024, percent: 4 }), 0)
-  assert.equal(view.card.kind, 'snapshot')
-  // The user calls it off: the stage is gone and nothing is pending.
-  view = api.advanceOverlayClock(view.state, report('', { pending: false }), 10)
-  assert.equal(view.card, null, 'no card for a cancelled copy')
-  assert.equal(view.state.stage, '', 'and the clock is empty again')
-})
-
-test('while the gate merely waits nothing is owed', () => {
-  const api = globalThis.__dshAutorestartClient
-  const view = api.advanceOverlayClock(api.emptyOverlayClock(), report('waiting', { snapshotBytes: 92 * 1024 }), 0)
-  assert.equal(view.card, null)
-})
-
-test('the card is held in the real component too: 5 ms copy, then the receipt, then 正在重启', async () => {
-  // The same walk, driven through the component with real timers.
+test('a copy that takes 5 ms is gone at once — no minimum shown time', async () => {
   const mounted = mountClient({
     health: statePayload({ phase: 'snapshotting', progress: { bytes: 92 * 1024, total: 92 * 1024, percent: 100 } }),
   })
   let card = await mounted.settled('autorestart-restart-overlay')
-  assert.equal(card.props['data-dsh-autorestart-restart-overlay-card'], 'snapshot', 'the copy is on screen')
-  assert.match(textOf(card), /92 KB/, `with the real size: ${textOf(card)}`)
+  assert.equal(card.props['data-dsh-autorestart-restart-overlay-phase'], 'snapshotting', 'the copy is on screen')
+  assert.match(textOf(card), /92 KB/, `with the real size and unit: ${textOf(card)}`)
 
-  // The copy ends and the host goes down, well inside the minimum.
-  mounted.setHealth(statePayload({ phase: 'restarting', progress: null, snapshotBytes: 92 * 1024 }))
+  // The copy is over: the very next poll shows the NEXT stage, not a held card.
+  mounted.setHealth(statePayload({ phase: 'restarting', snapshotBytes: 92 * 1024 }))
   card = await mounted.poll('autorestart-restart-overlay')
-  assert.equal(card.props['data-dsh-autorestart-restart-overlay-card'], 'snapshot', 'the card is still held')
-
-  // …until the minimum is over: then the receipt.
-  await new Promise((resolve) => setTimeout(resolve, 850))
-  card = mounted.render('autorestart-restart-overlay')
-  assert.equal(card.props['data-dsh-autorestart-restart-overlay-card'], 'done', 'the receipt appears')
-  assert.match(textOf(card), /重启前备份完成（92 KB）/, `the receipt quotes the real size: ${textOf(card)}`)
-
-  // …and 1.2 s later the ordinary restart card is back.
-  await new Promise((resolve) => setTimeout(resolve, 1300))
-  card = mounted.render('autorestart-restart-overlay')
-  assert.equal(card.props['data-dsh-autorestart-restart-overlay-card'], 'restarting')
-  assert.match(textOf(card), /正在重启/, `and it hands over to the restart card: ${textOf(card)}`)
+  assert.equal(
+    card.props['data-dsh-autorestart-restart-overlay-phase'],
+    'restarting',
+    'the restart card takes over immediately — there is no 800 ms floor',
+  )
+  assert.match(textOf(card), /正在重启/, `and it is the restart card: ${textOf(card)}`)
+  // No receipt either: the card never claims "backup done" by itself.
+  assert.doesNotMatch(textOf(card), /备份完成/, `no forced receipt: ${textOf(card)}`)
 })
 
-test('the hold never delays the copy itself', async (t) => {
-  // The clock lives in the browser: the Host must not know about it at all, and
-  // a real 92 KB backup must stay a few milliseconds.
-  const api = globalThis.__dshAutorestartClient
-  assert.equal(typeof api.SNAPSHOT_MIN_VISIBLE_MS, 'number')
-
-  const { createBackup } = await import('../lib/backup.js')
-  const os = await import('node:os')
-  const path = await import('node:path')
-  const fsmod = await import('node:fs')
-
-  const root = fsmod.mkdtempSync(path.join(os.tmpdir(), 'dsh-autorestart-hold-'))
-  t.after(() => {
-    try {
-      fsmod.rmSync(root, { recursive: true, force: true })
-    } catch {
-      // Windows may still hold a handle; the temp dir is not the assertion.
-    }
-  })
-  const profile = path.join(root, 'profile')
-  const modules = path.join(profile, 'node_modules')
-  fsmod.mkdirSync(modules, { recursive: true })
-  fsmod.writeFileSync(path.join(profile, 'cordis.patch.yml'), 'plugins: []\n', 'utf8')
-  // ~92 KB of plugin files: exactly the profile from the report.
-  for (let index = 0; index < 23; index += 1) {
-    fsmod.writeFileSync(path.join(modules, 'plugin-' + index + '.js'), 'x'.repeat(4096), 'utf8')
-  }
-
-  const started = Date.now()
-  const result = await createBackup({
-    profileDir: profile,
-    backupsDir: path.join(root, 'backups'),
-    includePlugins: true,
-    now: 1_700_000_000_000,
-  })
-  const elapsed = Date.now() - started
-  assert.equal(result.ok, true)
-  assert.ok(result.bytes > 90 * 1024, `the copy really wrote ~92 KB: ${result.bytes}`)
-  assert.ok(
-    elapsed < api.SNAPSHOT_MIN_VISIBLE_MS,
-    `the copy of 92 KB finished in ${elapsed} ms — the 800 ms hold is display only`,
-  )
-
-  // And the Host does not even know the constant: the hold is client-side.
-  const indexSource = fsmod.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
-  const backupSource = fsmod.readFileSync(new URL('../lib/backup.js', import.meta.url), 'utf8')
+test('no time floor exists in the source any more', () => {
+  const clientSource = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  assert.equal(clientSource.includes('SNAPSHOT_MIN_VISIBLE_MS'), false, 'no minimum shown time')
+  assert.equal(clientSource.includes('SNAPSHOT_DONE_MS'), false, 'no forced receipt duration')
+  assert.equal(clientSource.includes('advanceOverlayClock'), false, 'no display clock')
+  assert.equal(clientSource.includes('overlayClockDeadline'), false, 'no wake-up timer for a hold')
+  // …and the Host never had one (it must not slow the restart down either).
+  const indexSource = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
   assert.equal(indexSource.includes('SNAPSHOT_MIN_VISIBLE_MS'), false, 'no hold in the host')
-  assert.equal(backupSource.includes('SNAPSHOT_MIN_VISIBLE_MS'), false, 'no hold in the copy loop')
 })

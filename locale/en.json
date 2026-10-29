@@ -201,8 +201,10 @@
       "copyPath": "Copy the path",
       "copied": "The path is on the clipboard",
       "copyFailed": "The copy failed — please select the path above by hand",
-      "withPlugins": "includes the installed plugins",
-      "withoutPlugins": "configuration only"
+      "time": "Backup time",
+      "size": "Backup size",
+      "withPlugins": "(plugins included)",
+      "withoutPlugins": "(plugins excluded)"
     },
     "backupPlugins": {
       "label": "Include the installed plugins in the backup",
@@ -336,7 +338,6 @@
       "snapshotting": "Backing up before DSH restart",
       "size": "{done} / {total}",
       "sizeDone": "{done}",
-      "snapshotDone": "Pre-restart backup done ({size})",
       "restarting": "Restarting…",
       "back": "Back again"
     }

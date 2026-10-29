@@ -201,8 +201,10 @@
       "copyPath": "复制路径",
       "copied": "路径已复制",
       "copyFailed": "复制失败，请手动选中上面的路径",
-      "withPlugins": "含已装插件",
-      "withoutPlugins": "只有配置"
+      "time": "备份时间",
+      "size": "备份大小",
+      "withPlugins": "（含已装插件）",
+      "withoutPlugins": "（不含已装插件）"
     },
     "backupPlugins": {
       "label": "备份包含已安装插件",
@@ -336,7 +338,6 @@
       "snapshotting": "DSH 重启前备份中",
       "size": "{done} / {total}",
       "sizeDone": "{done}",
-      "snapshotDone": "重启前备份完成（{size}）",
       "restarting": "正在重启…",
       "back": "已回来"
     }

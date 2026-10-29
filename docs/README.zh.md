@@ -328,7 +328,7 @@ agent/status(running) ──► 写 checkpoint（<DSH_HOME>\storages\dsh-autores
 
 ## 安装
 
-当前版本：**0.7.0**。
+当前版本：**0.8.0**。
 
 ```powershell
 # 在 dsh 里（或对 Agent 说）：把工作区里的这个包安装为 profile bundle

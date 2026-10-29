@@ -1459,6 +1459,24 @@
   }
 
   /**
+   * The label of "how this host was started" (the startup matrix).
+   *
+   * @param {Function} t the translator
+   * @param {any} startup the startup classification of the Host
+   * @returns {string}
+   */
+  function startupModeLabel(t, startup) {
+    const translate = typeof t === 'function' ? t : (name) => name
+    const mode = startup && typeof startup === 'object' ? startup.mode : ''
+    if (mode === 'bare') return translate('settings.supervisor.startup.bare')
+    if (mode === 'external') return translate('settings.supervisor.startup.external')
+    if (mode === 'container') return translate('settings.supervisor.startup.container')
+    if (mode === 'desktop') return translate('settings.supervisor.startup.desktop')
+    if (mode === 'self-supervised') return translate('settings.supervisor.startup.selfSupervised')
+    return translate('settings.supervisor.startup.unknown')
+  }
+
+  /**
    * May the panel offer to install the supervisor of this plugin?
    *
    * The browser side serves the desktop app AND the hosted web host, so it may
@@ -1467,7 +1485,9 @@
    *   - the desktop app brings itself back up (there is nothing to install);
    *   - a host that somebody ELSE supervises must not get a SECOND supervisor:
    *     both would start the host and they would fight over the port;
-   *   - the automatic restart may be switched off.
+   *   - the automatic restart may be switched off;
+   *   - a host whose starter could not be established gets NOTHING: the
+   *     plugin would rather say "I cannot tell" than start a second host.
    *
    * When the Host says nothing, the answer is "no": an unknown host is no
    * reason to touch the machine. The UNINSTALL button always stays available
@@ -1483,6 +1503,10 @@
     if (status.installed === true) return true
     const isDesktop = host && typeof host === 'object' && host.isDesktopApp === true
     if (isDesktop) return false
+    // The startup matrix has the final word: only a bare host (nobody manages
+    // it) may get a supervisor of this plugin.
+    const startup = status.startup && typeof status.startup === 'object' ? status.startup : null
+    if (startup !== null && startup.canInstallSupervisor !== true) return false
     const mode = typeof status.mode === 'string' ? status.mode : ''
     if (mode === 'external' || mode === 'off') return false
     // The Host says the desktop app manages itself: a supervisor there would
@@ -1517,6 +1541,7 @@
     countSubagentTasks,
     resolveAccessRedirect,
     supervisorModeLabel,
+    startupModeLabel,
     canOfferSupervisorInstall,
     // The two dictionaries, so a test can build a translator without a Host.
     dictionaries: { zh: ZH, en: EN },
@@ -3985,6 +4010,13 @@
         const supervisorStatus = info && typeof info === 'object' && info.supervisor && typeof info.supervisor === 'object'
           ? info.supervisor
           : null
+        // HOW this host was started (the startup matrix): the mode, the
+        // evidence the verdict rests on, and what the plugin may do about it.
+        const supervisorStartup = supervisorStatus !== null
+          && supervisorStatus.startup !== null
+          && typeof supervisorStatus.startup === 'object'
+          ? supervisorStatus.startup
+          : null
         const supervisorInstalled = supervisorStatus !== null && supervisorStatus.installed === true
         // WHICH END IS THIS? The same browser side serves the desktop app and
         // the hosted web host, so it may not assume one of them. The Host says
@@ -4296,6 +4328,27 @@
                   : t('settings.supervisor.capableNo'),
               ),
             ),
+            supervisorStartup !== null
+              ? h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__field' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__label' },
+                    t('settings.supervisor.startup'),
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'startup' },
+                    startupModeLabel(t, supervisorStartup),
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__hint' },
+                    supervisorStartup.evidence + (supervisorStartup.suggestion !== '' ? ' — ' + supervisorStartup.suggestion : ''),
+                  ),
+                )
+              : null,
             supervisorInstalled || supervisorCanInstall
               ? h(
                   'div',

@@ -91,6 +91,7 @@ import {
   writeRollbackRequest,
 } from './lib/supervisor.js'
 import { composeFragment, detectInitSystems } from './lib/supervisor-install.js'
+import { classifyStartup } from './lib/startup-mode.js'
 import { countBlockerTasks } from './lib/blockers.js'
 import {
   buildDryRunPlan,
@@ -119,6 +120,7 @@ import {
   DEFAULT_ROLLBACK_TIMEOUT_MS,
   detectEnvironment,
   launchDetachedWatcher,
+  readProcessChain,
   runCommandNow,
   scheduleDetachedRestart,
   writeTextFileAtomic,
@@ -2554,6 +2556,29 @@ const titleOfSummary = (item) => {
   }
 
   /**
+   * HOW THIS HOST WAS STARTED (the startup matrix).
+   *
+   * The answer decides what the plugin may do: only a `bare` host (nobody
+   * manages it) may get the supervisor of this plugin or a self-replay
+   * command. Everything else — an external supervisor, a container, the
+   * desktop app, or a host whose starter cannot be established — must not
+   * lead to a second host.
+   *
+   * @returns {object} the classification (mode, kind, evidence, …)
+   */
+  const startupModeOf = () => classifyStartup({
+    platform: env.platform,
+    env: process.env,
+    ppid: process.ppid,
+    isDesktopApp: env.isDesktopApp === true,
+    supervised: detectSupervisor({ env: process.env, stateDir: stateDirOf() }).supervised,
+    container: detectContainer({ env: process.env }).container,
+    argv: process.argv,
+    execPath: process.execPath,
+    readChain: readProcessChain,
+  })
+
+  /**
    * What the plugin knows about the supervisor.
    *
    * The parent chain of this very process is part of the answer: a host that
@@ -2572,6 +2597,8 @@ const titleOfSummary = (item) => {
     // The desktop app brings ITSELF back up (`restartMode: app`): it is not
     // "nobody knows", and the restart is available.
     isDesktopApp: env.isDesktopApp === true,
+    // HOW this host was started (the startup matrix), with its evidence.
+    startup: startupModeOf(),
   })
 
   /**
@@ -2636,6 +2663,9 @@ const titleOfSummary = (item) => {
       // The desktop app manages itself: a login record would start a SECOND
       // client at every login, so the installation is refused there.
       isDesktopApp: env.isDesktopApp === true,
+      // The startup matrix: only a `bare` host (nobody manages it) may get
+      // the supervisor of this plugin.
+      startup: startupModeOf(),
       nodePath: process.execPath,
       execPath: start.execPath,
       execArgv: start.execArgv,
@@ -2744,6 +2774,9 @@ const titleOfSummary = (item) => {
       supervised: detected.supervised === true,
       externalSupervisor: external,
       container: container.container,
+      // THE STARTUP MATRIX: it decides whether a self-replay is possible at
+      // all (and whether the command must be detached from its session).
+      startup: startupModeOf(),
       hasInit: env.platform === 'win32' ? true : init.systemdUser,
       fixedPort,
       currentRestartMode: config.restartMode,
@@ -3574,6 +3607,11 @@ const titleOfSummary = (item) => {
      * and whether the restart can actually work.
      */
     supervisorStatus: supervisorStatusOf,
+    /**
+     * HOW this host was started (the startup matrix): the mode, the evidence
+     * and what the plugin may do about it.
+     */
+    startupMode: startupModeOf,
     /**
      * Install the supervisor. `confirmed` must be true: the confirmation card
      * is what says "yes".
@@ -5083,6 +5121,8 @@ function registerTools(ctx, runtime, config) {
           // The desktop app manages itself: the plan is refused there, and no
           // step is generated that could be run by accident.
           isDesktopApp: runtime.env.isDesktopApp === true,
+          // The startup matrix: only a `bare` host may get a supervisor.
+          startup: runtime.startupMode(),
           nodePath: process.execPath,
           execPath: process.execPath,
           supervisorPath: supervisorPaths(path.dirname(runtime.stateFile)).script,
@@ -6079,6 +6119,8 @@ function buildSupervisorRoute(ctx, runtime, config) {
             platform: runtime.env.platform,
             // The desktop app manages itself: there is no plan there.
             isDesktopApp: runtime.env.isDesktopApp === true,
+            // The startup matrix: only a `bare` host may get a supervisor.
+            startup: runtime.startupMode(),
             nodePath: process.execPath,
             execPath: process.execPath,
             supervisorPath: supervisorPaths(path.dirname(runtime.stateFile)).script,

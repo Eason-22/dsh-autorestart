@@ -97,6 +97,28 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 
 守护的启动命令**必须指向一个真正的 Node**：进程本身就是 node 时用它，否则去安装目录里找 `resources/runtime/primary-runtime/dependencies/node/bin/node.exe`，再退到 PATH 里的 `node`。**绝不拿应用 exe 冒充 node**；一个都找不到就拒绝安装并说清原因。
 
+### 这个宿主是怎么被拉起来的（启动方式矩阵）
+
+Web 端的启动方式有十几种，插件必须**每一种都适配对**。分类器是一个**纯函数**（`lib/startup-mode.js`）：输入是父进程链 / 环境标记 / 容器标记 / 平台，输出是 `{mode, kind, evidence, selfReplay, canInstallSupervisor, suggestion}`。
+
+| 启动方式 | `mode` | 插件怎么做 |
+|---|---|---|
+| 裸终端 `dsh web`（前台） | `bare` | **可以**装自家守护；不装则给出推导命令 + 确认 |
+| `nohup … &` / `setsid` 后台 | `bare` | 同上，但重拉命令**脱离shell**（`setsid nohup …`），不随启动它的 shell 退出而死 |
+| shell 守护脚本（`supervise-*.sh`） | `external` | 只优雅退出（`selfReplay: refused`）——脚本会把它拉回来 |
+| systemd（user / system 单元） | `external` | 只优雅退出（依据：`INVOCATION_ID` 或父进程链） |
+| pm2 / forever | `external` | 只优雅退出 |
+| docker / compose / k8s | `container` | **不承诺开机自启**：给 compose `restart: always` 片段；容器里不装 systemd |
+| Windows 计划任务 / NSSM 服务 | `external` | 只优雅退出 |
+| WSL 里由 Windows 侧拉起 | `unknown` | **什么都不写**：父进程在 WSL 内看不见——建议选「裸终端装自家守护」或自己配命令 |
+| `npx` / `pnpm dlx` 包装 | `bare`（可用）或 `unknown` | `argv[1]` 是解析后的脚本路径就能用；否则拒绝，绝不猜 |
+| 别的 DSH 插件拉起 | `external` | 只优雅退出——**绝不双开** |
+| tmux / screen / SSH 会话 | `bare` | 走「命令重放」分支，且命令**脱离会话**（优雅退出会断开会话） |
+
+**比表格更重要的两条规矩**：只有 `bare` 的宿主才允许写自重放命令、才允许装自家守护；`unknown` 一律 `selfReplay: 'unknown'` 并且**什么都不装**——插件宁可说"我认不出"，也不在第一个宿主旁边再开一个。
+
+设置页会把判定和**依据**一起显示出来（「当前由 … — ancestor:1234: systemd」），让人看得懂插件为什么这么说。
+
 ### 「保持我现在的启动方式」之后：推导重启命令（E）与干跑确认（B）
 
 用户选择保持现状时，插件仍然可以写下一条"能把它拉起来"的命令——但**只能靠推导，绝不猜**。猜错的命令比没有命令更糟：它看起来像重启成功了，实际留下一个起不来的宿主。

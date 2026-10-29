@@ -444,6 +444,34 @@ when it is node, otherwise the runtime that ships with the installation
 PATH. The application executable is never used as a stand-in for node, and when no interpreter is
 found the installation is refused with the reason.
 
+### How this host was started (the startup matrix)
+
+A hosted web host can be started in a dozen ways, and the plugin has to behave correctly in every
+one of them. The classification is a **pure function** (`lib/startup-mode.js`): it takes the parent
+chain, the environment markers, the container markers and the platform, and answers
+`{ mode, kind, evidence, selfReplay, canInstallSupervisor, suggestion }`.
+
+| How it was started | `mode` | What the plugin does |
+|---|---|---|
+| a plain terminal (`dsh web`) | `bare` | the supervisor of this plugin MAY be installed; otherwise the derived command (after your confirmation) |
+| `nohup … &` / `setsid` | `bare` | the same — but the restart command is **detached** (`setsid nohup …`), so it does not die with the shell that started it |
+| a supervisor script (`supervise-*.sh`) | `external` | graceful exit only (`selfReplay: refused`) — the script brings the host back |
+| a systemd unit | `external` | graceful exit only (evidence: `INVOCATION_ID` or the parent chain) |
+| pm2 / forever | `external` | graceful exit only |
+| docker / compose / kubernetes | `container` | no "at login" at all: the compose fragment (`restart: always`) is the answer, and no supervisor is installed inside a container |
+| a Windows scheduled task / an NSSM service | `external` | graceful exit only |
+| WSL, started by a Windows process | `unknown` | nothing is written: the parent is invisible in WSL — pick the plain terminal (install your own supervisor) or configure the command yourself |
+| `npx` / `pnpm dlx` | `bare` (usable) or `unknown` | usable when the resolved script path is in `argv[1]`; otherwise nothing is guessed |
+| another DSH plugin spawned it | `external` | graceful exit only — never a second host |
+| tmux / screen / an SSH session | `bare` | the command is replayed, but **detached from the session** (a graceful exit would break the session) |
+
+**The two rules that matter more than the table:** only a `bare` host may get a self-replay command
+or the supervisor of this plugin, and an `unknown` host gets `selfReplay: 'unknown'` and nothing
+else — the plugin would rather say "I cannot tell" than start a second host next to the first.
+
+The settings page shows the verdict **with its evidence** ("Started by … — ancestor:1234: systemd"),
+so it is visible WHY the plugin says what it says.
+
 ### "Keep the way I start it": the derived restart command (E) and the dry run (B)
 
 When the user keeps their own way of starting the host, the plugin can still write down a command

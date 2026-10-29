@@ -595,6 +595,20 @@ test('the browser side does not offer a supervisor where a second one would figh
   // A supervisor of this plugin IS installed: removing it must stay possible.
   assert.equal(can({ mode: 'installed', installed: true }, { isDesktopApp: true }), true)
 
+  // THE STARTUP MATRIX has the final word: a host whose starter could not be
+  // established gets NOTHING (the plugin would rather say "I cannot tell"
+  // than start a second host).
+  assert.equal(
+    can({ mode: 'unknown', installed: false, startup: { mode: 'unknown', canInstallSupervisor: false } }, { isDesktopApp: false }),
+    false,
+  )
+
+  // A bare host (nobody manages it) may get the supervisor.
+  assert.equal(
+    can({ mode: 'unknown', installed: false, startup: { mode: 'bare', canInstallSupervisor: true } }, { isDesktopApp: false }),
+    true,
+  )
+
   // The Host says nothing: the answer is "no" (never a silent "yes").
   assert.equal(can(null, null), false)
 })

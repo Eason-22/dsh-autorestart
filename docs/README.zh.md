@@ -71,12 +71,12 @@
 
 ### DSH 起不来了
 
-插件目录的 `scripts/` 里有两个能双击的脚本，分工不一样：
+插件目录的 `scripts/` 里有两个脚本，分工不一样（**Windows 用 `.cmd`，Linux/WSL 用 `.sh`**）：
 
-- **`scripts/restore-profile.cmd` —— 回到上一次好状态**：把最新的一份带 manifest 的快照放回 profile；坏掉的那份**挪走而不是删掉**，留成 `profile.broken-<时间戳>`。它**不会替你重启 DSH**，重新打开 DSH 是你自己的事。
-- **`scripts/emergency-disable.cmd` —— 只把这个插件摘掉**：其余一切原样不动（只从 bundles 里拿掉这一个名字，并留一份文件备份）。
+- **`restore-profile.cmd` / `restore-profile.sh` —— 回到上一次好状态**：把最新的一份带 manifest 的快照放回 profile；坏掉的那份**挪走而不是删掉**，留成 `profile.broken-<时间戳>`。它**不会替你重启 DSH**，重新打开 DSH 是你自己的事。
+- **`emergency-disable.cmd` / `emergency-disable.sh` —— 只把这个插件摘掉**：其余一切原样不动（只从 bundles 里拿掉这一个名字，并留一份文件备份）。
 
-**怎么选**：「想整个回到上一个好状态」用前一个；「只怀疑这个插件」用后一个。边界（目标 profile 必须已存在、必须有带 manifest 的快照、不会自动重启、`broken-` 目录会留着）写在 [`scripts/README.md`](../scripts/README.md) 里。
+**怎么选**：「想整个回到上一个好状态」用前一个；「只怀疑这个插件」用后一个。边界（目标 profile 必须已存在、必须有带 manifest 的快照、不会自动重启、`broken-` 目录会留着）写在 [`scripts/README.md`](../scripts/README.md) 里。每个平台到底有什么、没有什么，看 [平台能力矩阵](platform-matrix.md)。
 
 ### 实测状态表（哪些真机验过，哪些只有单元测试）
 
@@ -339,13 +339,22 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 ## 起不来怎么办（装了插件之后 DSH 打不开）
 
-**先分清是哪种情况**：整个环境坏了（改了配置、装了别的插件、升级崩了）→ 先双击 `scripts\restore-profile.cmd` 回到上一次好状态；**只有这个插件可疑** → 直接走下面三步，把这个插件摘掉就够了。（两个脚本各自的边界见 [`scripts/README.md`](../scripts/README.md)。）
+**先分清是哪种情况**：整个环境坏了（改了配置、装了别的插件、升级崩了）→ 先回到上一次好状态；**只有这个插件可疑** → 直接走下面三步，把这个插件摘掉就够了。（两个脚本各自的边界见 [`scripts/README.md`](../scripts/README.md)。）
+
+**用你自己平台的脚本** —— Linux 机器上没有 `.cmd`，Windows 机器上也没有 `.sh`：
+
+| 你的机器 | 回到上一次好状态 | 摘掉本插件 |
+|---|---|---|
+| **Windows**（桌面客户端、Windows 上的 `dsh web`） | 双击 `scripts\restore-profile.cmd` | 双击 `scripts\emergency-disable.cmd` |
+| **Linux / WSL / macOS**（托管端） | `sh scripts/restore-profile.sh` | `sh scripts/emergency-disable.sh` |
+
+每个平台到底有什么、没有什么，看 [平台能力矩阵](platform-matrix.md)；设置页的「出事了怎么办」只显示**你这台机器上真有的**那两个路径。
 
 **不用等 DSH 跑起来**就能把这个插件摘掉 —— 插件目录里带了一个一键开关：
 
-1. **双击 `scripts\emergency-disable.cmd`** —— 弹出的黑窗口里会写清楚做了什么，按任意键关掉；
+1. **Windows**：双击 `scripts\emergency-disable.cmd`；**Linux/WSL**：`sh scripts/emergency-disable.sh` —— 它会写清楚做了什么；
 2. **重启 DSH**（关掉再打开）——这次没有这个插件，DSH 就起得来；
-3. 以后想再试它：在同一个目录里按住 Shift 右键 →「在终端中打开」，运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\emergency-toggle.ps1 -Action enable`，然后再重启 DSH。
+3. 以后想再试它：Windows 用 `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\emergency-toggle.ps1 -Action enable`，Linux/WSL 用 `sh scripts/emergency-disable.sh --action enable`，然后再重启 DSH。
 
 它只动**一个文件**里**一个数组**：profile 的 `package.json` 里的 `dsh.profile.bundles`（就是「插件启用列表」那几行）。写之前先备份成 `package.json.bak-emergency-<时间戳>`，写完重新解析一遍 JSON 校验；校验不过就用备份回滚，并如实报错。**重复运行没有副作用**：本来就没启用时只会告诉你「已经禁用」，不会失败。
 

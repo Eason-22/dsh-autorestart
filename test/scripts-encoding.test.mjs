@@ -122,6 +122,24 @@ test('EVERY node script of scripts/ stays pure ASCII', () => {
   }
 });
 
+test('EVERY POSIX script stays pure ASCII, starts with #!/bin/sh and is executable', () => {
+  // A .sh file is run by /bin/sh, not by a program that would forgive a
+  // missing shebang or a lost executable bit. The Chinese wording lives in
+  // rescue-strings.zh.json, like everywhere else.
+  const files = scriptsWithExtension('.sh');
+  assert.ok(files.length > 0, 'no .sh found in scripts/');
+  for (const name of files) {
+    const bytes = bytesOf(name);
+    for (const byte of bytes) {
+      assert.ok(byte < 128, name + ' must stay pure ASCII (byte ' + byte + ')');
+    }
+    assert.notEqual(bytes[0], 0xef, name + ' must not start with a UTF-8 BOM');
+    const text = bytes.toString('ascii');
+    assert.ok(text.startsWith('#!/bin/sh\n'), name + ' must start with #!/bin/sh');
+    assert.match(text, /\nset -eu\n/, name + ' must turn the unset variables into errors');
+  }
+});
+
 test('EVERY batch file calls powershell.exe, never pwsh', () => {
   const files = scriptsWithExtension('.cmd');
   assert.ok(files.length > 0, 'no .cmd found in scripts/');

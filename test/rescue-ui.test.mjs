@@ -28,6 +28,7 @@ import {
   desktopShortcutPath,
   isAsciiText,
   rescueInfo,
+  rescueScriptNames,
   rescueScriptPaths,
   RESCUE_SCRIPT_NAMES,
 } from '../lib/rescue-paths.js';
@@ -102,9 +103,10 @@ test('a path that the Host did not send is not shown', () => {
 
 test('the plugin directory is the source of the script paths', () => {
   const pluginDir = path.join('C:', 'profiles', 'desktop', 'node_modules', 'dsh-autorestart')
-  const paths = rescueScriptPaths(pluginDir)
-  assert.equal(paths.restoreProfile, path.join(pluginDir, 'scripts', RESCUE_SCRIPT_NAMES.restoreProfile))
-  assert.equal(paths.emergencyDisable, path.join(pluginDir, 'scripts', RESCUE_SCRIPT_NAMES.emergencyDisable))
+  const paths = rescueScriptPaths(pluginDir, 'win32')
+  const names = rescueScriptNames('win32')
+  assert.equal(paths.restoreProfile, path.join(pluginDir, 'scripts', names.restoreProfile))
+  assert.equal(paths.emergencyDisable, path.join(pluginDir, 'scripts', names.emergencyDisable))
   // The scripts live NEXT to the plugin, not in a guessed layout.
   assert.ok(paths.restoreProfile.includes(path.join('scripts', 'restore-profile.cmd')))
 })
@@ -325,4 +327,64 @@ test('the tier is named in the language of the user', () => {
   assert.match(zh('settings.rescue.tierSystemdRun'), /systemd/)
   assert.match(zh('settings.rescue.tierDetachedProcess'), /后台进程/)
   assert.match(en('settings.rescue.tierNone'), /no way/)
+})
+
+// ---------------------------------------------------------------------------
+// The rescue kit of THIS platform: a path to a file that is not there is worse
+// than no path at all.
+// ---------------------------------------------------------------------------
+
+test('Windows gets the .cmd scripts, POSIX gets the .sh ones', () => {
+  const windows = rescueInfo({ pluginDir: 'C:\\plugin', platform: 'win32', env: {}, exists: () => false })
+  assert.match(windows.restoreProfile, /restore-profile\.cmd$/)
+  assert.match(windows.emergencyDisable, /emergency-disable\.cmd$/)
+
+  for (const platform of ['linux', 'darwin', 'freebsd']) {
+    const posix = rescueInfo({ pluginDir: '/plugin', platform, env: {}, exists: () => false })
+    assert.match(posix.restoreProfile, /restore-profile\.sh$/)
+    assert.match(posix.emergencyDisable, /emergency-disable\.sh$/)
+    assert.doesNotMatch(posix.restoreProfile, /\.cmd$/)
+  }
+})
+
+test('the desktop shortcut is only offered where it can work', () => {
+  const windows = rescueInfo({
+    pluginDir: 'C:\\plugin',
+    platform: 'win32',
+    env: { USERPROFILE: 'C:\\Users\\Tester' },
+    exists: (target) => target === 'C:\\Users\\Tester\\Desktop',
+  })
+  assert.equal(windows.desktopDir, 'C:\\Users\\Tester\\Desktop')
+  assert.match(windows.shortcutPath, /\.cmd$/)
+
+  // On POSIX there is no .cmd shortcut to offer: no path, no button.
+  const posix = rescueInfo({
+    pluginDir: '/plugin',
+    platform: 'linux',
+    env: { HOME: '/home/tester' },
+    exists: (target) => target === '/home/tester/Desktop',
+  })
+  assert.equal(posix.desktopDir, '')
+  assert.equal(posix.shortcutPath, '')
+})
+
+test('the settings page shows the scripts of this platform and nothing else', () => {
+  const api = loadClient()
+  const windows = api.rescuePathsFor({
+    rescue: {
+      restoreProfile: 'C:\\plugin\\scripts\\restore-profile.cmd',
+      emergencyDisable: 'C:\\plugin\\scripts\\emergency-disable.cmd',
+    },
+  })
+  assert.equal(windows.length, 2)
+  assert.ok(windows.every((entry) => entry.path.endsWith('.cmd')))
+
+  const posix = api.rescuePathsFor({
+    rescue: {
+      restoreProfile: '/plugin/scripts/restore-profile.sh',
+      emergencyDisable: '/plugin/scripts/emergency-disable.sh',
+    },
+  })
+  assert.equal(posix.length, 2)
+  assert.ok(posix.every((entry) => entry.path.endsWith('.sh')))
 })

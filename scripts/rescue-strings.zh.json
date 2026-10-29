@@ -134,7 +134,8 @@
       "driveRoot": ["盘符", "根目录"],
       "systemDir": ["系统目录", "不允许"],
       "missingDir": ["不存在"],
-      "notValidated": ["没通过校验", "校验"]
+      "notValidated": ["没通过校验", "校验"],
+      "dryRun": ["试运行"]
     }
   },
 

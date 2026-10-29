@@ -106,22 +106,34 @@ writes that sentence and the matching command into the settings page.
 ### If DSH does not come up
 
 **First work out which situation you are in**: if the whole environment is broken (a changed
-configuration, another plugin, a bad upgrade) → double-click `scripts/restore-profile.cmd` to go back
-to the last good state; if **only this plugin** is suspect → take this plugin out instead, which is
-what `scripts/emergency-disable.cmd` is for.
+configuration, another plugin, a bad upgrade) → go back to the last good state; if **only this
+plugin** is suspect → take this plugin out instead.
 
-Two double-clickable scripts in `scripts/`, and they do different jobs:
+**And use the scripts of YOUR platform** — a Linux machine has no `.cmd` file, and a Windows
+machine has no `.sh`:
 
-- **`scripts/restore-profile.cmd` — back to the last good state.** It puts the newest snapshot that
-  carries a manifest back over the profile, and leaves the broken one behind as
-  `profile.broken-<timestamp>` (moved aside, not deleted). It does not restart DSH for you.
-- **`scripts/emergency-disable.cmd` — take this plugin out and change nothing else.** It removes
-  only `dsh-autorestart` from the profile's bundle list and keeps a backup of the file.
+| Your machine | back to the last good state | take this plugin out |
+|---|---|---|
+| **Windows** (the desktop app, `dsh web` on Windows) | double-click `scripts/restore-profile.cmd` | double-click `scripts/emergency-disable.cmd` |
+| **Linux / WSL / macOS** (`dsh web`) | `sh scripts/restore-profile.sh` | `sh scripts/emergency-disable.sh` |
 
-**Which one:** "back to the last good state" → `restore-profile.cmd`; "I only suspect this plugin" →
-`emergency-disable.cmd`. The boundaries (the profile directory has to exist, a snapshot with a
+Two scripts per platform, and they do different jobs:
+
+- **`restore-profile.cmd` / `restore-profile.sh` — back to the last good state.** It puts the
+  newest snapshot that carries a manifest back over the profile, and leaves the broken one behind
+  as `profile.broken-<timestamp>` (moved aside, not deleted). It does not restart DSH for you.
+- **`emergency-disable.cmd` / `emergency-disable.sh` — take this plugin out and change nothing
+  else.** It removes only `dsh-autorestart` from the profile's bundle list and keeps a backup of
+  the file.
+
+**Which one:** "back to the last good state" → `restore-profile`; "I only suspect this plugin" →
+`emergency-disable`. The boundaries (the profile directory has to exist, a snapshot with a
 manifest is required, DSH is never restarted for you, the `broken-` folder stays) are written down
 in [`scripts/README.md`](scripts/README.md).
+
+**What each platform can do** (and what it cannot) is spelled out in
+[`docs/platform-matrix.md`](docs/platform-matrix.md) — the settings page shows the paths of the
+scripts that really exist on the machine you are on.
 
 ### What has really been tested
 

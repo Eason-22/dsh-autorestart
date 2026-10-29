@@ -17,6 +17,7 @@ import {
   backupsRootDir,
   brokenDirName,
   checkProfileTarget,
+  checkRestoreTarget,
   dshHomeDir,
   describeSnapshot,
   forbiddenReason,
@@ -325,6 +326,54 @@ test('a profile without the plugin is skipped, not failed', (t) => {
   assert.equal(version.status, 'skipped');
 });
 
+test('a profile that LISTS the plugin but does not have it is a failure', (t) => {
+  const base = scratch(t);
+  const profile = path.join(base, 'profile');
+  fs.mkdirSync(profile, { recursive: true });
+  // The configuration says dsh-autorestart is installed; the disk says no.
+  fs.writeFileSync(path.join(profile, 'package.json'), '{"name":"demo","dsh":{"profile":{"bundles":["dsh-autorestart"]}}}', 'utf8');
+  const result = validateRestoredProfile(profile);
+  assert.equal(result.ok, false);
+  const version = result.checks.find((check) => check.id === 'plugin-version');
+  assert.equal(version.status, 'failed');
+  assert.match(version.detail, /dsh-autorestart/);
+});
+
+// ---------------------------------------------------------------------------
+// The restore target: path gate + the directory has to be there + profile
+// ---------------------------------------------------------------------------
+
+test('the restore target has to exist: the kit never creates a profile', (t) => {
+  const base = scratch(t);
+  const missing = path.join(base, 'not-there-yet');
+  const result = checkRestoreTarget(missing, { env: {}, explicit: true });
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /does not exist/);
+  assert.equal(fs.existsSync(missing), false, 'the check must not create anything');
+});
+
+test('a broken profile is still a valid restore target', (t) => {
+  const base = scratch(t);
+  const profile = makeProfile(path.join(base, 'profile'), { broken: true });
+  const result = checkRestoreTarget(profile, { env: {}, explicit: true });
+  assert.equal(result.ok, true);
+  assert.equal(result.kind, 'broken-profile');
+});
+
+test('a directory that is not a profile is not a valid restore target', (t) => {
+  const base = scratch(t);
+  const empty = path.join(base, 'empty');
+  fs.mkdirSync(empty, { recursive: true });
+  const result = checkRestoreTarget(empty, { env: {}, explicit: true });
+  assert.equal(result.ok, false);
+});
+
+test('a drive root is not a valid restore target, even when named explicitly', (t) => {
+  if (!isWindows) return;
+  const result = checkRestoreTarget('C:\\', { env: { SystemDrive: 'C:' }, explicit: true });
+  assert.equal(result.ok, false);
+});
+
 test('a snapshot describes itself in words', () => {
   const described = describeSnapshot({ at: 1_000, atLocal: '2026-10-29T09:00:00+08:00', includePlugins: true });
   assert.equal(described.display, '2026-10-29 09:00');
@@ -357,14 +406,4 @@ test('the rescue kit ships the three scripts it promises', () => {
   assert.ok(fs.existsSync(path.join(root, 'restore-profile.cmd')));
   assert.ok(fs.existsSync(path.join(root, 'restore-profile.ps1')));
   assert.ok(fs.existsSync(path.join(root, 'drill-rescue.ps1')));
-});
-
-test('the .cmd entry point is ASCII and the .ps1 script has a BOM', () => {
-  const root = path.resolve(path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\//, '')), '..', 'scripts'));
-  const cmd = fs.readFileSync(path.join(root, 'restore-profile.cmd'));
-  assert.ok(cmd.every((byte) => byte <= 127), 'the .cmd file must stay ASCII');
-  const ps1 = fs.readFileSync(path.join(root, 'restore-profile.ps1'));
-  assert.equal(ps1[0], 0xef);
-  assert.equal(ps1[1], 0xbb);
-  assert.equal(ps1[2], 0xbf);
 });

@@ -382,7 +382,15 @@ if (-not $explicitProfile) {
 }
 Say ('目标 profile：' + $targetProfile)
 
-# --- 闸门 2：这个目录还像不像 DSH profile ---
+# --- 闸门 2：目标 profile 目录必须已经存在 ---
+# 还原是「把快照放回一个已经存在的 profile」，不是「凭空造一个 profile」。
+# 脚本不会为了还原去新建 profiles 目录 —— 那只会把一个打错字的目标
+# 变成一个空壳 profile。
+if (-not (Test-Path -LiteralPath $targetProfile -PathType Container)) {
+  Fail ('目标 profile 目录不存在：' + $targetProfile + '（还原需要那个目录已经在那儿；脚本不会为了还原去新建一个 profile 目录）')
+}
+
+# --- 闸门 3：这个目录还像不像 DSH profile ---
 $fingerprint = Get-ProfileFingerprint $targetProfile
 if ($fingerprint.Kind -eq 'not-a-profile') {
   Fail ($fingerprint.Reason + '（目标：' + $targetProfile + '）。拒绝动手 —— 免得把不是 profile 的目录弄坏。')
@@ -409,7 +417,7 @@ if (($Snapshot -as [string]) -ne '') {
 }
 $manifest = $selected.Manifest
 
-# --- 闸门 3：快照里装的是不是真的 profile ---
+# --- 闸门 4：快照里装的是不是真的 profile ---
 $snapshotProfile = Test-SnapshotProfile $snapshotDir
 if (-not $snapshotProfile.Ok) { Fail ($snapshotProfile.Reason + '（快照：' + $snapshotDir + '）') }
 
@@ -489,9 +497,14 @@ if ($null -ne $bundles -and $bundles.Count -gt 0) {
   $checks.Add([pscustomobject]@{ Label = 'dsh.profile.bundles 有内容'; Status = 'failed'; Detail = '没有 dsh.profile.bundles，或者它是空的' })
 }
 
+# 插件版本：只有 profile 自己声明了要装它，才必须读到。
+# 声明了、node_modules 里却没有 —— 那是"配置说装了、实际没装"的真坏，必须失败。
+$declaresPlugin = ($null -ne $bundles -and ($bundles -contains $PackageName))
 $pluginPkgPath = Join-Path $targetProfile ('node_modules\' + $PackageName + '\package.json')
-if (-not (Test-Path -LiteralPath $pluginPkgPath -PathType Leaf)) {
-  $checks.Add([pscustomobject]@{ Label = $PackageName + ' 的版本号读得到'; Status = 'skipped'; Detail = '这个 profile 里没有装 ' + $PackageName + '（没什么可读）' })
+if (-not $declaresPlugin) {
+  $checks.Add([pscustomobject]@{ Label = $PackageName + ' 的版本号读得到'; Status = 'skipped'; Detail = '这个 profile 没有声明要装 ' + $PackageName + '（没什么可读）' })
+} elseif (-not (Test-Path -LiteralPath $pluginPkgPath -PathType Leaf)) {
+  $checks.Add([pscustomobject]@{ Label = $PackageName + ' 的版本号读得到'; Status = 'failed'; Detail = ('profile 里写着要装 ' + $PackageName + '，但 node_modules\' + $PackageName + ' 不在 —— 配置说一套、磁盘是另一套') })
 } else {
   $version = ''
   try {

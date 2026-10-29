@@ -254,6 +254,20 @@ happens for them. There is no "cancel everybody" in the panel — that stays an 
 
 ## Configuration
 
+Two blocks of the settings page are worth a word, because they show facts instead of guesses:
+
+- **What is backed up right now** (right under the two backup switches): the HOST reads
+  `<DSH_HOME>/storages/dsh-autorestart/backups/`, so the number of copies, the **local time** of each
+  one, its size (MB), whether the installed plugins are in it and where it lives are all real. Only
+  the directory metadata is read — the contents are never walked (one copy can be 150 MB). With no
+  backup at all it says: "No backup yet; one is written before every restart."
+- **How this host was started** (hosted web only): one plain line ("How I remember you were started:
+  by your own script (the restart is its job — I stay out of it)") plus two small actions (detect
+  again / undo); the command itself is folded away under **"Technical details"** and stays closed
+  until somebody opens it. The **desktop client does not render that block at all** — it brings
+  itself back up and must never write a `restartCommand`. When the Host cannot say which kind of
+  host this is, the whole block stays away.
+
 Every key has a default, written in the `insert` row of `cordis.patch.yml`. To override a key, add
 an `- id: dsh-autorestart` row with the same key to the `cordis.patch.yml` of the profile at
 `~/.dsh/profiles/<profile>/cordis.patch.yml` (it replaces the whole config, it is not merged). The

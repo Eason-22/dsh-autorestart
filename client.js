@@ -320,6 +320,27 @@
     'settings.supervisor.reason.container-no-init': '这台机器没有开机自启机制（容器），所以不承诺自动拉起。',
     'settings.supervisor.reason.port-not-fixable': '端口每次都变，浏览器会被踢出去；得先把端口固定下来。',
     'settings.supervisor.reason.supervised': '插件自己的守护在管这个进程，重启直接交给它。',
+    'settings.supervisor.status.external': '我记下的启动方式：由你的脚本拉起（重启交给它，我不插手）',
+    'settings.supervisor.status.bareWritten': '我记下的启动方式：按你确认过的那条命令重启',
+    'settings.supervisor.status.bareUnknown': '我还不知道怎么把你拉起来',
+    'settings.supervisor.status.unknown': '我看不出你是怎么启动的（我不猜，也不会自己乱拉）',
+    'settings.supervisor.status.selfSupervised': '我记下的启动方式：插件自己的守护在管（重启交给它）',
+    'settings.supervisor.status.container': '这里没有"登录时自启"这回事：由编排器负责',
+    'settings.supervisor.redetect': '重新检测',
+    'settings.supervisor.deriveHelp': '帮我看看怎么重启',
+    'settings.supervisor.technical': '技术细节',
+    'settings.supervisor.technicalHint': '以下是插件实际会执行的命令',
+    'settings.supervisor.previous': '撤销后会还原成',
+    'settings.backup.list': '现在备份了什么',
+    'settings.backup.count': '当前 {n} 份',
+    'settings.backup.keep': '最多保留 {n} 份，超出自动删最旧的那份。',
+    'settings.backup.empty': '还没有备份；每次重启前会自动生成一份。',
+    'settings.backup.path': '存放路径',
+    'settings.backup.copyPath': '复制路径',
+    'settings.backup.copied': '路径已复制',
+    'settings.backup.copyFailed': '复制失败，请手动选中上面的路径',
+    'settings.backup.withPlugins': '含已装插件',
+    'settings.backup.withoutPlugins': '只有配置',
     'settings.groups.report': '报告问题',
     'settings.report.label': '遇到问题了？',
     'settings.report.github': '复制诊断信息并去 GitHub 提问题',
@@ -571,6 +592,27 @@
     'settings.supervisor.reason.container-no-init': 'This machine has no "at login" (a container), so no automatic start is promised.',
     'settings.supervisor.reason.port-not-fixable': 'The port changes every time, so the browser would be logged out; the port has to be fixed first.',
     'settings.supervisor.reason.supervised': 'The supervisor of this plugin is in charge: the restart is handed to it.',
+    'settings.supervisor.status.external': 'How I remember you were started: by your own script (the restart is its job — I stay out of it)',
+    'settings.supervisor.status.bareWritten': 'How I remember you were started: restarted with the command you confirmed',
+    'settings.supervisor.status.bareUnknown': "I don't know yet how to start you again",
+    'settings.supervisor.status.unknown': "I cannot tell how you were started (I don't guess, and I won't start you on my own)",
+    'settings.supervisor.status.selfSupervised': 'How I remember you were started: my own supervisor is in charge (the restart is its job)',
+    'settings.supervisor.status.container': "There is no 'at login' here: the orchestrator is in charge",
+    'settings.supervisor.redetect': 'Detect again',
+    'settings.supervisor.deriveHelp': 'Help me find out how to restart',
+    'settings.supervisor.technical': 'Technical details',
+    'settings.supervisor.technicalHint': 'What the plugin would actually run',
+    'settings.supervisor.previous': 'What the undo restores',
+    'settings.backup.list': 'What is backed up right now',
+    'settings.backup.count': '{n} copies right now',
+    'settings.backup.keep': 'At most {n} copies are kept; the oldest one is deleted when there are more.',
+    'settings.backup.empty': 'No backup yet; one is written before every restart.',
+    'settings.backup.path': 'Where they live',
+    'settings.backup.copyPath': 'Copy the path',
+    'settings.backup.copied': 'The path is on the clipboard',
+    'settings.backup.copyFailed': 'The copy failed — please select the path above by hand',
+    'settings.backup.withPlugins': 'includes the installed plugins',
+    'settings.backup.withoutPlugins': 'configuration only',
     'settings.groups.report': 'Report a problem',
     'settings.report.label': 'Something wrong?',
     'settings.report.github': 'Copy the diagnostics and open a GitHub issue',
@@ -1619,6 +1661,83 @@
   }
 
   /**
+   * Whether the "how was this host started" block may be shown at all.
+   *
+   * The desktop client brings ITSELF back up: it has no restart command to
+   * derive and it must never write one, so the whole block stays away there.
+   * When the Host does not say which kind of host this is, the block stays
+   * away too — "not shown" is better than "shown and misleading".
+   *
+   * @param {object|null|undefined} info the Host's state payload
+   * @returns {boolean}
+   */
+  function shouldShowStartupBlock(info) {
+    if (!info || typeof info !== 'object') return false
+    const instance = info.instance && typeof info.instance === 'object' ? info.instance : null
+    const supervisor = info.supervisor && typeof info.supervisor === 'object' ? info.supervisor : null
+    const mode = supervisor && typeof supervisor.mode === 'string' ? supervisor.mode : ''
+    // The desktop app: it manages itself.
+    if (instance && instance.isDesktopApp === true) return false
+    if (mode === 'app') return false
+    // A hosted host the Host confirms.
+    if (instance && instance.isDesktopApp === false) return true
+    if (mode === 'installed' || mode === 'external' || mode === 'auto' || mode === 'off') return true
+    // Unknown: nothing is shown.
+    return false
+  }
+
+  /**
+   * The one line that tells the user what this plugin remembers about the
+   * way their host is started — in plain words.
+   *
+   * @param {Function} t the translator
+   * @param {object|null|undefined} info the Host's state payload
+   * @returns {{ key: string, canDerive: boolean }}
+   */
+  function startupStatusLine(t, info) {
+    const supervisor = info && typeof info.supervisor === 'object' && info.supervisor !== null ? info.supervisor : {}
+    const startup = supervisor.startup && typeof supervisor.startup === 'object' ? supervisor.startup : {}
+    const restart = info && typeof info.restart === 'object' && info.restart !== null ? info.restart : {}
+    const mode = typeof startup.mode === 'string' ? startup.mode : ''
+    const written = restart.written === true
+    if (mode === 'external') return { key: 'settings.supervisor.status.external', canDerive: false }
+    if (mode === 'self-supervised') return { key: 'settings.supervisor.status.selfSupervised', canDerive: false }
+    if (mode === 'container') return { key: 'settings.supervisor.status.container', canDerive: false }
+    if (mode === 'bare') {
+      return written
+        ? { key: 'settings.supervisor.status.bareWritten', canDerive: false }
+        : { key: 'settings.supervisor.status.bareUnknown', canDerive: true }
+    }
+    return { key: 'settings.supervisor.status.unknown', canDerive: false }
+  }
+
+  /**
+   * The size of one backup, in MB (the manifest carries the byte count).
+   *
+   * @param {number|null|undefined} bytes
+   * @returns {string}
+   */
+  function formatBackupSize(bytes) {
+    const value = Number(bytes)
+    if (!Number.isFinite(value) || value < 0) return ''
+    return (value / (1024 * 1024)).toFixed(1) + ' MB'
+  }
+
+  /**
+   * The local time of one backup.
+   *
+   * The directory name is UTC on purpose, so the panel shows the LOCAL time
+   * the manifest carries: a fresh snapshot can never look like an old one.
+   *
+   * @param {string|null|undefined} atLocal
+   * @returns {string}
+   */
+  function formatBackupTime(atLocal) {
+    if (typeof atLocal !== 'string' || atLocal === '') return ''
+    return atLocal.replace('T', ' ')
+  }
+
+  /**
    * The named exports of this module.
    *
    * The client module system materializes `factory(require) -> exports`, so
@@ -1650,6 +1769,12 @@
     buildIssueUrl,
     buildMailtoUrl,
     copyReportText,
+    // The startup block: whether it may be shown, the one line that says what
+    // the plugin remembers, and the formatters of the backup list.
+    shouldShowStartupBlock,
+    startupStatusLine,
+    formatBackupSize,
+    formatBackupTime,
     // The two dictionaries, so a test can build a translator without a Host.
     dictionaries: { zh: ZH, en: EN },
   }
@@ -3913,6 +4038,20 @@
         '  font-size:13px;',
         '}',
         '.dsh-autorestart-settings__hint{font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary);}',
+        // The folded "technical details": the command itself stays out of the
+        // way until somebody asks for it.
+        '.dsh-autorestart-settings__details{',
+        '  margin-top:2px;',
+        '}',
+        '.dsh-autorestart-settings__summary{',
+        '  font-size:12px;',
+        '  line-height:18px;',
+        '  color:var(--dsw-alias-label-secondary);',
+        '  cursor:pointer;',
+        '}',
+        '.dsh-autorestart-settings__details[open] .dsh-autorestart-settings__summary{',
+        '  margin-bottom:4px;',
+        '}',
         // The two backup switches.
         '.dsh-autorestart-settings__switch{',
         '  width:16px;',
@@ -4087,6 +4226,12 @@
         // "REPORT A PROBLEM": the text to copy by hand, shown when the
         // clipboard refuses (an insecure context, no permission).
         const [reportFallback, setReportFallback] = useState('')
+        // The note under the backup path: copied, or "copy it by hand".
+        const [pathNote, setPathNote] = useState('')
+        // Whether the "technical details" fold is open. It is NOT persisted:
+        // a fresh page starts closed, so nobody leaves technical text open by
+        // accident.
+        const [detailsOpen, setDetailsOpen] = useState(false)
         const t = props && typeof props.t === 'function'
           ? props.t
           : (translate ?? ((name) => name))
@@ -4155,6 +4300,22 @@
             ? 'settings.supervisor.noInstallExternal'
             : 'settings.supervisor.noInstallUnknown')
         const accessUrl = info && typeof info === 'object' && typeof info.accessUrl === 'string' ? info.accessUrl : ''
+        // THE STARTUP BLOCK: the desktop client brings itself back up, so it has
+        // no command to derive and must never write one. An unknown host stays
+        // hidden as well — "not shown" beats "shown and misleading".
+        const showStartupBlock = shouldShowStartupBlock(info)
+        const startupStatus = startupStatusLine(t, info)
+        // WHAT IS WRITTEN RIGHT NOW: the restart command and what an undo would
+        // restore. The Host reads it — the browser cannot see the profile.
+        const restartInfo = info && typeof info === 'object' && info.restart && typeof info.restart === 'object'
+          ? info.restart
+          : { mode: '', command: '', written: false, canRevert: false, previous: null }
+        // THE BACKUPS ON DISK: the count, the local time, the size, whether the
+        // plugins are in it and where it lives. The Host reads the directory.
+        const backupsInfo = info && typeof info === 'object' && info.backups && typeof info.backups === 'object'
+          ? info.backups
+          : { dir: '', max: 0, count: 0, items: [] }
+        const backupItems = Array.isArray(backupsInfo.items) ? backupsInfo.items : []
         const supervisorPending = supervisorStatus !== null
           && supervisorStatus.detail !== null
           && typeof supervisorStatus.detail === 'object'
@@ -4313,6 +4474,17 @@
           if (copied.fallback) setReportFallback(copied.text)
         }
 
+        /**
+         * Copy the path of the backup directory.
+         *
+         * The path is on screen anyway (selectable), so a refused clipboard
+         * only costs a hint, not the path.
+         */
+        const copyBackupPath = async () => {
+          const copied = await copyReportText(backupsInfo.dir)
+          setPathNote(copied.fallback ? t('settings.backup.copyFailed') : t('settings.backup.copied'))
+        }
+
         return h(
           'div',
           { className: 'dsh-autorestart-settings' },
@@ -4400,6 +4572,92 @@
                 },
               ),
               h('span', { className: 'dsh-autorestart-settings__hint' }, t('settings.backupPlugins.hint')),
+            ),
+            // WHAT IS BACKED UP RIGHT NOW. The Host reads the directory (the
+            // browser cannot see the disk), so the numbers are real: the count,
+            // the local time of every copy, its size and whether the plugins
+            // are in it.
+            h(
+              'div',
+              { className: 'dsh-autorestart-settings__field', 'data-dsh-autorestart-backup': 'list' },
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__label' },
+                t('settings.backup.list'),
+              ),
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-backup': 'count' },
+                fill(t('settings.backup.count'), { n: backupItems.length }),
+              ),
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-backup': 'keep' },
+                fill(t('settings.backup.keep'), { n: backupsInfo.max }),
+              ),
+              backupItems.length === 0
+                ? h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-backup': 'empty' },
+                    t('settings.backup.empty'),
+                  )
+                : null,
+              backupItems.map((item, index) => h(
+                'div',
+                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-backup': 'item' },
+                h(
+                  'span',
+                  { 'data-dsh-autorestart-backup': 'time' },
+                  formatBackupTime(item && item.atLocal),
+                ),
+                h(
+                  'span',
+                  { 'data-dsh-autorestart-backup': 'size' },
+                  formatBackupSize(item && item.bytes),
+                ),
+                h(
+                  'span',
+                  { 'data-dsh-autorestart-backup': 'plugins' },
+                  item && item.includePlugins === true
+                    ? t('settings.backup.withPlugins')
+                    : t('settings.backup.withoutPlugins'),
+                ),
+                index === 0 ? null : null,
+              )),
+              backupsInfo.dir === ''
+                ? null
+                : h(
+                    'div',
+                    { className: 'dsh-autorestart-settings__field' },
+                    h(
+                      'span',
+                      { className: 'dsh-autorestart-settings__label' },
+                      t('settings.backup.path'),
+                    ),
+                    h(
+                      'code',
+                      { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-backup': 'path' },
+                      backupsInfo.dir,
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-autorestart-settings__button',
+                        disabled: busy,
+                        'data-dsh-autorestart-backup': 'copy-path',
+                        onClick: () => void copyBackupPath(),
+                      },
+                      t('settings.backup.copyPath'),
+                    ),
+                    pathNote === ''
+                      ? null
+                      : h(
+                          'span',
+                          { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-backup': 'copy-note' },
+                          pathNote,
+                        ),
+                  ),
             ),
           ),
           h(
@@ -4589,73 +4847,154 @@
                   ),
                 )
               : null,
-            // E + B: the derived restart command. The dry run shows it; only
-            // the "use this command" button writes it into the configuration.
-            h(
-              'div',
-              { className: 'dsh-autorestart-settings__field' },
-              h(
-                'span',
-                { className: 'dsh-autorestart-settings__label' },
-                t('settings.supervisor.command'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-autorestart-settings__button',
-                  disabled: busy,
-                  'data-dsh-autorestart-supervisor': 'derive',
-                  onClick: () => void driveDryRun('dry-run'),
-                },
-                t('settings.supervisor.derive'),
-              ),
-              dryRun
-                ? h(
-                    'div',
-                    { className: 'dsh-autorestart-settings__dry-run', 'data-dsh-autorestart-dry-run': 'true' },
-                    h(
-                      'span',
-                      { className: 'dsh-autorestart-settings__hint' },
-                      t('settings.supervisor.plan'),
-                    ),
-                    h(
-                      'code',
-                      { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-dry-run': 'command' },
-                      dryRun.command || t('settings.supervisor.noCommand'),
-                    ),
-                    h(
-                      'span',
-                      { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-dry-run': 'reason' },
-                      t('settings.supervisor.reason.' + (dryRun.reason || 'ok')),
-                    ),
-                    dryRun.ok
-                      ? h(
-                          'button',
-                          {
-                            type: 'button',
-                            className: 'dsh-autorestart-settings__button',
-                            disabled: busy,
-                            'data-dsh-autorestart-supervisor': 'apply',
-                            onClick: () => void driveDryRun('apply'),
-                          },
-                          t('settings.supervisor.apply'),
-                        )
-                      : null,
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'dsh-autorestart-settings__button',
-                        disabled: busy,
-                        'data-dsh-autorestart-supervisor': 'revert',
-                        onClick: () => void driveDryRun('revert'),
-                      },
-                      t('settings.supervisor.revert'),
-                    ),
-                  )
-                : null,
-            ),
+            // E + B, in plain words: ONE line that says what this plugin
+            // remembers about the way the host was started, two small actions
+            // next to it, and the command itself folded away ("technical
+            // details"). The desktop client brings ITSELF back up, so the
+            // whole block stays away there — and so does an unknown host.
+            showStartupBlock
+              ? h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__field' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'startup-status' },
+                    t(startupStatus.key),
+                  ),
+                  startupStatus.canDerive
+                    ? h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-autorestart-settings__button',
+                          disabled: busy,
+                          'data-dsh-autorestart-supervisor': 'derive',
+                          onClick: () => void driveDryRun('dry-run'),
+                        },
+                        t('settings.supervisor.deriveHelp'),
+                      )
+                    : null,
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-autorestart-settings__button',
+                      disabled: busy,
+                      'data-dsh-autorestart-supervisor': 'redetect',
+                      onClick: () => void driveDryRun('dry-run'),
+                    },
+                    t('settings.supervisor.redetect'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-autorestart-settings__button',
+                      // Nothing to undo: the button says so instead of lying.
+                      disabled: busy || !restartInfo.canRevert,
+                      'data-dsh-autorestart-supervisor': 'revert',
+                      onClick: () => void driveDryRun('revert'),
+                    },
+                    t('settings.supervisor.revert'),
+                  ),
+                )
+              : null,
+            showStartupBlock
+              ? h(
+                  'details',
+                  {
+                    className: 'dsh-autorestart-settings__details',
+                    'data-dsh-autorestart-supervisor': 'details',
+                    onToggle: (event) => {
+                      setDetailsOpen(Boolean(event && event.target ? event.target.open : false))
+                    },
+                  },
+                  h(
+                    'summary',
+                    { className: 'dsh-autorestart-settings__summary' },
+                    t('settings.supervisor.technical'),
+                  ),
+                  // The content is only IN the page while the fold is open: a
+                  // closed fold shows the title only.
+                  detailsOpen
+                    ? h(
+                        'div',
+                        { className: 'dsh-autorestart-settings__dry-run' },
+                        h(
+                          'span',
+                          { className: 'dsh-autorestart-settings__hint' },
+                          t('settings.supervisor.technicalHint'),
+                        ),
+                        dryRun
+                          ? h(
+                              'div',
+                              { className: 'dsh-autorestart-settings__dry-run', 'data-dsh-autorestart-dry-run': 'true' },
+                              h(
+                                'span',
+                                { className: 'dsh-autorestart-settings__hint' },
+                                t('settings.supervisor.plan'),
+                              ),
+                              h(
+                                'code',
+                                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-dry-run': 'command' },
+                                dryRun.command || t('settings.supervisor.noCommand'),
+                              ),
+                              h(
+                                'span',
+                                { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-dry-run': 'reason' },
+                                t('settings.supervisor.reason.' + (dryRun.reason || 'ok')),
+                              ),
+                              dryRun.ok
+                                ? h(
+                                    'button',
+                                    {
+                                      type: 'button',
+                                      className: 'dsh-autorestart-settings__button',
+                                      disabled: busy,
+                                      'data-dsh-autorestart-supervisor': 'apply',
+                                      onClick: () => void driveDryRun('apply'),
+                                    },
+                                    t('settings.supervisor.apply'),
+                                  )
+                                : null,
+                            )
+                          : null,
+                        restartInfo.written
+                          ? h(
+                              'div',
+                              { className: 'dsh-autorestart-settings__dry-run' },
+                              h(
+                                'span',
+                                { className: 'dsh-autorestart-settings__hint' },
+                                t('settings.supervisor.command'),
+                              ),
+                              h(
+                                'code',
+                                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'written' },
+                                restartInfo.command,
+                              ),
+                            )
+                          : null,
+                        restartInfo.previous && restartInfo.previous.restartCommand
+                          ? h(
+                              'div',
+                              { className: 'dsh-autorestart-settings__dry-run' },
+                              h(
+                                'span',
+                                { className: 'dsh-autorestart-settings__hint' },
+                                t('settings.supervisor.previous'),
+                              ),
+                              h(
+                                'code',
+                                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'previous' },
+                                restartInfo.previous.restartCommand,
+                              ),
+                            )
+                          : null,
+                      )
+                    : null,
+                )
+              : null,
           ),
           // "REPORT A PROBLEM": copy the diagnostics and open a pre-filled
           // issue page. The email is the way out when there is no GitHub

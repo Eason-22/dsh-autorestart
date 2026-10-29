@@ -309,6 +309,11 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 ## 配置
 
+设置页里关于「备份」和「启动方式」的两块，先说清楚它们看的是什么：
+
+- **现在备份了什么**（在两个备份勾选的下面）：宿主真的去读 `<DSH_HOME>/storages/dsh-autorestart/backups/`，所以份数、每份的**本地时间**、大小（MB）、有没有含已装插件、以及存放路径都是真的。只有目录元信息被读，备份里的内容**不遍历**（一份就可能 150 MB）。没有备份时写的是「还没有备份；每次重启前会自动生成一份」。
+- **启动方式**（Web 托管端才有）：默认只给**一行大白话**（例如「我记下的启动方式：由你的脚本拉起（重启交给它，我不插手）」）加两个小动作（重新检测 / 撤销）；命令原文收在**「技术细节」**折叠里，默认收起，展开才出现。**桌面客户端这一整块不渲染** —— 它自己拉起自己，也不该写 `restartCommand`。宿主说不清是哪一端时，宁可整块不显示。
+
 所有键都有默认值，写在 `cordis.patch.yml` 的 insert 行里；要覆盖就在 profile 的
 `~/.dsh/profiles/<profile>/cordis.patch.yml` 里加同名 `- id: dsh-autorestart` 行（**整段替换 config**）。
 插件同时导出真实的 `Config` schema（schemastery），所以 Plugin Manager / 配置编辑器里能看到键名、类型与默认值

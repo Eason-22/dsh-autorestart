@@ -84,7 +84,30 @@
       "reason.external-supervisor": "已经有别的守护在管这个进程：装第二个会抢端口。改为「优雅退出，让它拉起我」。",
       "reason.container-no-init": "这台机器没有开机自启机制（容器），所以不承诺自动拉起。",
       "reason.port-not-fixable": "端口每次都变，浏览器会被踢出去；得先把端口固定下来。",
-      "reason.supervised": "插件自己的守护在管这个进程，重启直接交给它。"
+      "reason.supervised": "插件自己的守护在管这个进程，重启直接交给它。",
+      "status.external": "我记下的启动方式：由你的脚本拉起（重启交给它，我不插手）",
+      "status.bareWritten": "我记下的启动方式：按你确认过的那条命令重启",
+      "status.bareUnknown": "我还不知道怎么把你拉起来",
+      "status.unknown": "我看不出你是怎么启动的（我不猜，也不会自己乱拉）",
+      "status.selfSupervised": "我记下的启动方式：插件自己的守护在管（重启交给它）",
+      "status.container": "这里没有“登录时自启”这回事：由编排器负责",
+      "redetect": "重新检测",
+      "deriveHelp": "帮我看看怎么重启",
+      "technical": "技术细节",
+      "technicalHint": "以下是插件实际会执行的命令",
+      "previous": "撤销后会还原成"
+    },
+    "backup": {
+      "list": "现在备份了什么",
+      "count": "当前 {n} 份",
+      "keep": "最多保留 {n} 份，超出自动删最旧的那份。",
+      "empty": "还没有备份；每次重启前会自动生成一份。",
+      "path": "存放路径",
+      "copyPath": "复制路径",
+      "copied": "路径已复制",
+      "copyFailed": "复制失败，请手动选中上面的路径",
+      "withPlugins": "含已装插件",
+      "withoutPlugins": "只有配置"
     },
     "report": {
       "label": "遇到问题了？",

@@ -67,6 +67,7 @@ import {
   claimRollbackLock,
   clearRollbackReport,
   createBackup,
+  listBackups,
   readRollbackReport,
   releaseRollbackLock,
   restoreBackup,
@@ -1286,6 +1287,20 @@ function resolveProfileDir() {
 }
 
 /**
+ * THE BACKUPS DIRECTORY.
+ *
+ * It is built in exactly ONE place: the snapshot writes here, and the
+ * settings page reads here. Two places would mean two answers to "where do
+ * the backups live".
+ *
+ * @param {string} dir the state directory
+ * @returns {string}
+ */
+function backupsDirFor(dir) {
+  return backupsRoot(typeof dir === 'string' ? dir : '')
+}
+
+/**
  * The pre-restart snapshot: copy the profile into `<stateDir>/backups/<stamp>/`
  * and clear the rollback report an older boot may have left behind.
  *
@@ -1349,7 +1364,7 @@ export function takePreRestartSnapshot({
   try {
     backup = createBackupFn({
       profileDir,
-      backupsDir: backupsRoot(stateDir),
+      backupsDir: backupsDirFor(stateDir),
       includePlugins: config.backupIncludePlugins !== false,
       maxBackups: config.maxBackups,
     })
@@ -2615,6 +2630,35 @@ const titleOfSummary = (item) => {
   }
 
   /**
+   * WHAT IS ON DISK RIGHT NOW: the backups of this host.
+   *
+   * The settings page shows it ("what is backed up right now"), so the facts
+   * have to come from the disk and not from the browser: the browser may not
+   * even see the disk. Only the DIRECTORY is read — the manifest of every
+   * copy — because one copy can be 150 MB and its contents are never walked.
+   *
+   * @returns {{ dir: string, max: number, count: number, items: Array<object> }}
+   */
+  const backupsInfo = () => {
+    const dir = backupsDirFor(stateDirOf())
+    const items = listBackups(dir).map((item) => ({
+      name: item.name,
+      dir: item.dir,
+      at: item.at,
+      atLocal: item.atLocal,
+      bytes: item.bytes,
+      files: item.files,
+      includePlugins: item.includePlugins,
+    }))
+    return {
+      dir,
+      max: config.maxBackups,
+      count: items.length,
+      items,
+    }
+  }
+
+  /**
    * THE DIAGNOSTICS of "report a problem".
    *
    * One generator, on the host: the browser copies the text it gets, so the
@@ -3699,6 +3743,10 @@ const titleOfSummary = (item) => {
      * and what the plugin may do about it.
      */
     startupMode: startupModeOf,
+    /**
+     * WHAT IS ON DISK RIGHT NOW: the backups of this host.
+     */
+    backupsInfo,
     /**
      * THE DIAGNOSTICS of "report a problem" (the text the user copies).
      */
@@ -6915,6 +6963,28 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             announcementsUrl: resolveAnnouncementsPath(config),
             backupOnRestart: config.backupOnRestart !== false,
             backupIncludePlugins: config.backupIncludePlugins !== false,
+            // WHAT IS ON DISK RIGHT NOW: the backups of this host (the count,
+            // the local time, the size, whether the plugins are in it and
+            // where it lives). The browser cannot read the disk, so the Host
+            // reads it — only the directory, never the contents.
+            backups: runtime.backupsInfo(),
+            // THE RESTART COMMAND that is in effect: what is written, and what
+            // an undo would restore. The settings page shows it in a folded
+            // "for a technical colleague" section.
+            restart: {
+              mode: config.restartMode,
+              command: typeof config.restartCommand === 'string' ? config.restartCommand : '',
+              written: typeof config.restartCommand === 'string' && config.restartCommand !== '',
+              canRevert: Boolean(
+                live.onboarding
+                && typeof live.onboarding === 'object'
+                && live.onboarding.previous
+                && typeof live.onboarding.previous.restartMode === 'string',
+              ),
+              previous: live.onboarding && typeof live.onboarding === 'object' && live.onboarding.previous
+                ? live.onboarding.previous
+                : null,
+            },
             parkedGoals: parkedGoalList(runtime),
             recovery: recoveryList(live),
             // THE ACCESS LINK of this instance (with the boot token). The boot

@@ -84,7 +84,30 @@
       "reason.external-supervisor": "Another supervisor is already in charge: a second one would fight over the port. The restart becomes \"exit gracefully and let it start me again\".",
       "reason.container-no-init": "This machine has no \"at login\" (a container), so no automatic start is promised.",
       "reason.port-not-fixable": "The port changes every time, so the browser would be logged out; the port has to be fixed first.",
-      "reason.supervised": "The supervisor of this plugin is in charge: the restart is handed to it."
+      "reason.supervised": "The supervisor of this plugin is in charge: the restart is handed to it.",
+      "status.external": "How I remember you were started: by your own script (the restart is its job — I stay out of it)",
+      "status.bareWritten": "How I remember you were started: restarted with the command you confirmed",
+      "status.bareUnknown": "I don't know yet how to start you again",
+      "status.unknown": "I cannot tell how you were started (I don't guess, and I won't start you on my own)",
+      "status.selfSupervised": "How I remember you were started: my own supervisor is in charge (the restart is its job)",
+      "status.container": "There is no 'at login' here: the orchestrator is in charge",
+      "redetect": "Detect again",
+      "deriveHelp": "Help me find out how to restart",
+      "technical": "Technical details",
+      "technicalHint": "What the plugin would actually run",
+      "previous": "What the undo restores"
+    },
+    "backup": {
+      "list": "What is backed up right now",
+      "count": "{n} copies right now",
+      "keep": "At most {n} copies are kept; the oldest one is deleted when there are more.",
+      "empty": "No backup yet; one is written before every restart.",
+      "path": "Where they live",
+      "copyPath": "Copy the path",
+      "copied": "The path is on the clipboard",
+      "copyFailed": "The copy failed — please select the path above by hand",
+      "withPlugins": "includes the installed plugins",
+      "withoutPlugins": "configuration only"
     },
     "report": {
       "label": "Something wrong?",

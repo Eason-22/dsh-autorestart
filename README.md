@@ -412,6 +412,21 @@ it is gone.
     (`~/.config/systemd/user/dsh-autorestart-web.service`). A machine without a service manager (a
     container, a WSL without systemd) has no "at login" at all — there the plugin says so and leaves
     the start command to the user.
+- **The guide of every platform.** "Start at login" means something different everywhere, so the
+  plugin hands out one piece of advice per platform (the settings page shows it, with the commands
+  you can copy):
+
+  | platform | what the plugin does |
+  |---|---|
+  | **Windows** | a scheduled task (`/SC ONLOGON /RL LIMITED`, no administrator); when the machine refuses it, a `.cmd` in the startup folder. The command names a **real node** + `supervisor.js` — never the application executable. |
+  | **Linux** | a systemd **user** service — plus the `loginctl enable-linger <user>` hint, because without the linger it only starts *after* a login, not at boot. |
+  | **WSL with systemd** | the same user unit, plus the linger hint. |
+  | **WSL without systemd** | no "at login" at all: two ways out — ① turn systemd on inside WSL (`/etc/wsl.conf` → `[boot] systemd=true` + `wsl --shutdown`; **a system configuration change**) or ② let Windows start the distribution (`wsl.exe -d <distro> -e <command>`; **needs a Windows-side action, but it is much closer to a real boot autostart**). Inside WSL the plugin **never** suggests Docker/Compose — the orchestrator of WSL is Windows. |
+  | **container / k8s** | no promise at all: the orchestrator brings it back (`restart: always`). |
+  | **unknown** | nothing is installed and nothing is guessed: the plugin says why and asks the user to choose. |
+
+  A host that is only **guessed** to be WSL (the mounted Windows drive is the only evidence) gets no
+  automatic anything: the plugin says "not sure, pick one yourself" and changes nothing.
 - **It is idempotent:** installing twice leaves exactly ONE record (the task/unit name is fixed, the
   task is created with `/F`, and the daemon takes an exclusive lock — two supervisors are impossible).
 - **A failed installation leaves nothing behind:** when a step fails half way, the unit (or the task)

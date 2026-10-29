@@ -60,6 +60,7 @@
       "startup.desktop": "the desktop app restarts itself",
       "startup.selfSupervised": "the supervisor of this plugin is in charge",
       "startup.unknown": "it could not be established who started it",
+      "autostart": "How \"start at login\" works here",
       "install": "Install the supervisor",
       "uninstall": "Uninstall the supervisor",
       "hint": "The supervisor is a process of its own: it starts at login, it starts the host again when its process is gone, and it restores the last snapshot when the host does not come up. No administrator rights needed.",

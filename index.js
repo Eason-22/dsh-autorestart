@@ -92,6 +92,8 @@ import {
 } from './lib/supervisor.js'
 import { composeFragment, detectInitSystems } from './lib/supervisor-install.js'
 import { classifyStartup } from './lib/startup-mode.js'
+import { detectHostKind } from './lib/host-kind.js'
+import { planAutostartAdvice } from './lib/autostart-advice.js'
 import { countBlockerTasks } from './lib/blockers.js'
 import {
   buildDryRunPlan,
@@ -2556,6 +2558,47 @@ const titleOfSummary = (item) => {
   }
 
   /**
+   * WHICH MACHINE IS THIS?
+   *
+   * The same answer the graceful shutdown uses (`lib/host-kind.js`): Windows,
+   * WSL, a real Linux, a macOS. It matters for the autostart: inside WSL the
+   * "start at login" is a different thing (a systemd user unit + the linger,
+   * or a task on the Windows side), and the Docker/Compose answer of a
+   * container is simply wrong there.
+   *
+   * @returns {object} the host (kind, evidence, suspect, distro)
+   */
+  const hostKindOf = () => detectHostKind({ platform: env.platform, env: process.env })
+
+  /**
+   * THE PLATFORM GUIDE: how "start at login" works on THIS machine.
+   *
+   * Windows (a scheduled task, with the startup folder as the fallback),
+   * Linux (a systemd user unit + the linger hint), WSL (the same, or the two
+   * ways out when there is no systemd), a container (the orchestrator) and the
+   * unknown host (nothing, and no guessing). The answer is computed ONCE
+   * (the machine does not change while the host runs) and the settings page
+   * reads it.
+   *
+   * @returns {object} the advice (kind, reason, notes, commands, options)
+   */
+  let cachedAutostart = null
+  const autostartAdviceOf = () => {
+    if (cachedAutostart !== null) return cachedAutostart
+    const host = hostKindOf()
+    const init = detectInitSystems({ platform: env.platform, homeDir: os.homedir() })
+    cachedAutostart = planAutostartAdvice({
+      host,
+      platform: env.platform,
+      hasSystemd: init.systemdUser,
+      container: detectContainer({ env: process.env }).container,
+      user: typeof process.env.USER === 'string' ? process.env.USER : '',
+      distro: host.distro,
+    })
+    return cachedAutostart
+  }
+
+  /**
    * HOW THIS HOST WAS STARTED (the startup matrix).
    *
    * The answer decides what the plugin may do: only a `bare` host (nobody
@@ -2599,6 +2642,9 @@ const titleOfSummary = (item) => {
     isDesktopApp: env.isDesktopApp === true,
     // HOW this host was started (the startup matrix), with its evidence.
     startup: startupModeOf(),
+    // THE PLATFORM GUIDE: how "start at login" works here (Windows / Linux /
+    // WSL / container), with the commands the user can copy.
+    autostart: autostartAdviceOf(),
   })
 
   /**
@@ -2666,6 +2712,9 @@ const titleOfSummary = (item) => {
       // The startup matrix: only a `bare` host (nobody manages it) may get
       // the supervisor of this plugin.
       startup: startupModeOf(),
+      // WHICH MACHINE IS THIS? (WSL is not a Linux: the autostart there is a
+      // different thing, and the Docker/Compose answer is a wrong one.)
+      host: hostKindOf(),
       nodePath: process.execPath,
       execPath: start.execPath,
       execArgv: start.execArgv,
@@ -3612,6 +3661,11 @@ const titleOfSummary = (item) => {
      * and what the plugin may do about it.
      */
     startupMode: startupModeOf,
+    /**
+     * WHICH MACHINE IS THIS? (Windows / WSL / Linux / macOS) — the same
+     * answer the graceful shutdown uses.
+     */
+    hostKind: hostKindOf,
     /**
      * Install the supervisor. `confirmed` must be true: the confirmation card
      * is what says "yes".
@@ -5123,6 +5177,8 @@ function registerTools(ctx, runtime, config) {
           isDesktopApp: runtime.env.isDesktopApp === true,
           // The startup matrix: only a `bare` host may get a supervisor.
           startup: runtime.startupMode(),
+          // WHICH MACHINE IS THIS? (WSL is not a Linux.)
+          host: runtime.hostKind(),
           nodePath: process.execPath,
           execPath: process.execPath,
           supervisorPath: supervisorPaths(path.dirname(runtime.stateFile)).script,
@@ -6121,6 +6177,8 @@ function buildSupervisorRoute(ctx, runtime, config) {
             isDesktopApp: runtime.env.isDesktopApp === true,
             // The startup matrix: only a `bare` host may get a supervisor.
             startup: runtime.startupMode(),
+            // WHICH MACHINE IS THIS? (WSL is not a Linux.)
+            host: runtime.hostKind(),
             nodePath: process.execPath,
             execPath: process.execPath,
             supervisorPath: supervisorPaths(path.dirname(runtime.stateFile)).script,

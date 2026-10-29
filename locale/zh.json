@@ -60,6 +60,7 @@
       "startup.desktop": "桌面版自带重启",
       "startup.selfSupervised": "插件自己的守护在管",
       "startup.unknown": "认不出是谁拉起它的",
+      "autostart": "开机自启怎么做",
       "install": "装上守护",
       "uninstall": "卸载守护",
       "hint": "守护是一个独立进程：登录时自动启动，宿主进程掉了自动拉起，启动失败自动回滚上次快照。不需要管理员。",

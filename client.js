@@ -4017,6 +4017,13 @@
           && typeof supervisorStatus.startup === 'object'
           ? supervisorStatus.startup
           : null
+        // THE PLATFORM GUIDE: how "start at login" works here (Windows /
+        // Linux / WSL / container) and the commands the user can copy.
+        const supervisorAutostart = supervisorStatus !== null
+          && supervisorStatus.autostart !== null
+          && typeof supervisorStatus.autostart === 'object'
+          ? supervisorStatus.autostart
+          : null
         const supervisorInstalled = supervisorStatus !== null && supervisorStatus.installed === true
         // WHICH END IS THIS? The same browser side serves the desktop app and
         // the hosted web host, so it may not assume one of them. The Host says
@@ -4347,6 +4354,34 @@
                     { className: 'dsh-autorestart-settings__hint' },
                     supervisorStartup.evidence + (supervisorStartup.suggestion !== '' ? ' — ' + supervisorStartup.suggestion : ''),
                   ),
+                )
+              : null,
+            supervisorAutostart !== null
+              ? h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__field' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__label' },
+                    t('settings.supervisor.autostart'),
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'autostart' },
+                    supervisorAutostart.kind,
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__hint' },
+                    supervisorAutostart.reason,
+                  ),
+                  supervisorAutostart.commands.length > 0
+                    ? h(
+                        'span',
+                        { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-supervisor': 'autostart-commands' },
+                        supervisorAutostart.commands.join('   ;   '),
+                      )
+                    : null,
                 )
               : null,
             supervisorInstalled || supervisorCanInstall

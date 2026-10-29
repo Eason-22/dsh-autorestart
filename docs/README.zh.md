@@ -87,6 +87,18 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 - **怎么登记自启（都不需要管理员）**：
   - **Windows**：计划任务 `dsh-autorestart-web`（`/SC ONLOGON /RL LIMITED`）。若该机策略不允许普通用户建计划任务，会自动降级到「启动文件夹」里的一个 `.cmd`（同样零权限、同样是"登录时"）。
   - **Linux / WSL**：systemd **用户**单元（`~/.config/systemd/user/dsh-autorestart-web.service`）。没有系统服务管理器的机器（容器、没开 systemd 的 WSL）根本没有"开机自启"这回事——插件会明说，并把启动命令交给用户。
+- **每个平台各有一份「开机自启怎么做」的引导**（设置页会显示，连带可复制的命令）：
+
+  | 托管平台 | 插件怎么做 |
+  |---|---|
+  | **Windows** | 计划任务（`/SC ONLOGON /RL LIMITED`，不要管理员）；这台机器拒绝时降级为「启动文件夹」里的 `.cmd`。注册的命令是**真 node** + `supervisor.js`，绝不是 DSH 客户端本体。 |
+  | **Linux（非 WSL）** | systemd **用户**服务；并提示 `loginctl enable-linger <user>`——**不开 linger 就只是"登录后自启"，不是"开机自启"**。 |
+  | **WSL（有 systemd）** | 同样的用户单元 + linger 提示。 |
+  | **WSL（无 systemd）** | 这里根本没有"登录时自启"：两条路 —— ① 在 WSL 内部开启 systemd（`/etc/wsl.conf` → `[boot] systemd=true` + `wsl --shutdown`；**这是系统配置改动**）；② 在 Windows 侧用计划任务/启动文件夹拉起 WSL（`wsl.exe -d <distro> -e <命令>`；**需要 Windows 侧操作，但更接近真正的开机自启**）。WSL 里**永不**建议 Docker/Compose —— WSL 的编排器是 Windows 本身。 |
+  | **容器 / k8s** | 不承诺开机自启：由编排器负责（compose 的 `restart: always`）。 |
+  | **认不出** | 不装任何东西、不猜命令：说明原因，让用户自己选。 |
+
+  只**猜成** WSL（仅凭挂载的 Windows 盘）时，插件**什么都不替你做**：只提示"没把握，建议手动选一条"。
 - **装多少次都只有一个**：任务/单元名是固定的，计划任务用 `/F` 覆盖，守护自己还持一把独占锁——两个守护不可能并存。
 - **装到一半失败不会留残骸**：某一步失败时，已经写下的 unit（或计划任务）会被撤掉，回滚过程也报在步骤列表里——半装的守护会在下次登录拉起一个过期的。
 - **命令名不会被拼两次**：一步里程序名放在 `file`、参数放在 `args`，所以跑的是 `systemctl --user enable --now …`，而不是 `systemctl systemctl …`（那会让 systemd 回一句 "Unknown command verb systemctl"）。

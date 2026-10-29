@@ -328,12 +328,12 @@
   },
   "restart": {
     "stage": {
-      "snapshotting": "正在备份…",
+      "snapshotting": "重启前备份中",
       "restarting": "正在重启…",
       "back": "已回来"
     },
     "overlay": {
-      "snapshotting": "正在备份",
+      "snapshotting": "DSH 重启前备份中",
       "size": "{done} / {total} MB",
       "sizeDone": "{done} MB",
       "restarting": "正在重启…",

@@ -333,7 +333,7 @@
       "back": "Back"
     },
     "overlay": {
-      "snapshotting": "Backing up",
+      "snapshotting": "Backing up before DSH restart",
       "size": "{done} / {total} MB",
       "sizeDone": "{done} MB",
       "restarting": "Restarting…",

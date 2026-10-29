@@ -481,7 +481,7 @@
     // 2026-10-29). While the gate waits the pill keeps its own composed line
     // ("待重启 · 空闲后自动重启" / "待重启 · 等待 N 个会话"); the three
     // other stages REPLACE that line with one of these.
-    'restart.stage.snapshotting': '正在备份…',
+    'restart.stage.snapshotting': '重启前备份中',
     'restart.stage.restarting': '正在重启…',
     'restart.stage.back': '已回来',
     // The centred overlay of a restart that is REALLY RUNNING (the backup, the
@@ -489,7 +489,7 @@
     // with an ellipsis (the card shrinks its font instead). The numbers come
     // from the Host's real measurements. There is no copy for `waiting`: no
     // card is drawn while the gate merely waits.
-    'restart.overlay.snapshotting': '正在备份',
+    'restart.overlay.snapshotting': 'DSH 重启前备份中',
     'restart.overlay.size': '{done} / {total} MB',
     'restart.overlay.sizeDone': '{done} MB',
     'restart.overlay.restarting': '正在重启…',
@@ -827,7 +827,7 @@
     'restart.stage.restarting': 'Restarting…',
     'restart.stage.back': 'Back',
     // The centred overlay of a running restart.
-    'restart.overlay.snapshotting': 'Backing up',
+    'restart.overlay.snapshotting': 'Backing up before DSH restart',
     'restart.overlay.size': '{done} / {total} MB',
     'restart.overlay.sizeDone': '{done} MB',
     'restart.overlay.restarting': 'Restarting…',
@@ -2096,7 +2096,7 @@
    *   while the gate waits      待重启 · 空闲后自动重启   (the composed line of
    *                             the pill itself — it already carries the short
    *                             count of the tasks that hold the gate)
-   *   while the snapshot runs   正在备份…
+   *   while the snapshot runs   重启前备份中
    *   while the host goes down  正在重启…
    *   after the new host is up  已回来           (1.5s, then the pill is plain)
    *
@@ -3232,7 +3232,7 @@
         //     "待重启 · 空闲后自动重启" / "待重启 · 等待 N 个…"
         //     (the noun of that count belongs to the capsule's own copy);
         //   snapshotting / restarting / back: the stage REPLACES that line —
-        //     "正在备份…" / "正在重启…" / "已回来", and nothing else.
+        //     "重启前备份中" / "正在重启…" / "已回来", and nothing else.
         // The sentence that used to sit here ("正在等待所有会话空闲…（还有 1 个
         // 会话在忙）") was clipped away by the composer row (user report,
         // 2026-10-29). The detail — the count of busy conversations, the
@@ -3622,7 +3622,7 @@
             //   waiting (or no stage at all): the composed line of the pill —
             //     "待重启 · 空闲后自动重启" / "待重启 · 等待 N 个…";
             //   snapshotting / restarting / back: the stage REPLACES it —
-            //     "正在备份…" / "正在重启…" / "已回来".
+            //     "重启前备份中" / "正在重启…" / "已回来".
             // The long sentence that used to live here was clipped away by the
             // composer row (user report, 2026-10-29): the detail is the CENTRED
             // OVERLAY, and the pill is one clipped line again.
@@ -3753,7 +3753,7 @@
        * a short line, a real progress bar and the measured megabytes.
        *
        * WHAT IS DRAWN, AND WHEN (the whole rule):
-       *   snapshotting  "正在备份" + the progress bar + "12.3 / 40 MB" + "31%"
+       *   snapshotting  "DSH 重启前备份中" + the progress bar + "12.3 / 40 MB" + "31%"
        *   restarting    "正在重启…"  (and it stays: the host is on its way out)
        *   back          "已回来", for 1.5s, and only for a restart THIS page
        *                 really watched (a leftover value must not draw a card)

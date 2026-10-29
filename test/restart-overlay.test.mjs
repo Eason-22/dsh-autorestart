@@ -12,7 +12,7 @@
  *
  *   1. the DETAIL moved to a CENTRED OVERLAY (320px, one short line, a real
  *      progress bar): waiting = "等待会话空闲" + "还有 N 个会话",
- *      snapshotting = "正在备份" + the bar + "12.3 / 40 MB" + "31%",
+ *      snapshotting = "DSH 重启前备份中" + the bar + "12.3 / 40 MB" + "31%",
  *      restarting = "正在重启…", back = "已回来" for 1.5s and then gone;
  *   2. the composer row got SHORT again: one line, never a sentence, and the
  *      long text of the Host never appears there any more;
@@ -365,7 +365,9 @@ test('phase=snapshotting: the overlay shows the megabytes, the percentage and a 
   assert.ok(overlay, 'the overlay shows the backup')
   assert.equal(overlay.props['data-dsh-autorestart-restart-overlay-phase'], 'snapshotting')
   const copy = textOf(overlay)
-  assert.match(copy, /正在备份/, `the stage is on the card: ${copy}`)
+  // THE OWNER'S SECOND REPORT: "正在备份" did not say WHAT was being backed up.
+  assert.match(copy, /重启前备份中/, `the card says what the backup is for: ${copy}`)
+  assert.doesNotMatch(copy, /正在备份/, `no bare "正在备份" on the card any more: ${copy}`)
   assert.match(copy, /12\.3 \/ 40 MB/, `the measured megabytes are on the card: ${copy}`)
   assert.match(copy, /31%/, `the percentage is on the card: ${copy}`)
 
@@ -382,7 +384,7 @@ test('phase=snapshotting: before the first measurement no number is invented', a
   const mounted = mountClient({ health: statePayload({ phase: 'snapshotting', progress: null }) })
   const overlay = await mounted.settled('autorestart-restart-overlay')
   assert.ok(overlay)
-  assert.match(textOf(overlay), /正在备份/)
+  assert.match(textOf(overlay), /重启前备份中/)
   assert.doesNotMatch(textOf(overlay), /MB/, 'nothing is measured yet, so nothing is claimed')
   assert.equal(findByAttribute(overlay, 'data-dsh-autorestart-restart-overlay-size'), undefined)
 })
@@ -502,7 +504,8 @@ test('the composer row shows the stage alone once the backup runs (and after it)
     phase: 'snapshotting',
     progress: { bytes: Math.round(12.3 * 1024 * 1024), total: 40 * 1024 * 1024, percent: 31 },
   }))
-  assert.equal(snapshotting, '正在备份…', `the backup is one word: ${snapshotting}`)
+  assert.equal(snapshotting, '重启前备份中', `the backup is one short phrase: ${snapshotting}`)
+  assert.ok(snapshotting.length <= 12, `and it stays short (<= 12): ${snapshotting.length}`)
 
   const restarting = await pillCopyFor(statePayload({ phase: 'restarting', blocking: 0, blockedBy: [] }))
   assert.equal(restarting, '正在重启…', `restarting is one word: ${restarting}`)
@@ -576,7 +579,9 @@ test('the overlay has a title for the stages it draws, and the megabytes read li
       assert.equal(api.isRestartOverlayPhase(phase), true)
       const title = api.restartOverlayTitle({ phase }, t)
       assert.ok(title !== '', `${phase} has an overlay title in ${language}`)
-      assert.ok(title.length <= 16, `${phase}/${language}: ${title} is short`)
+      // Not a paragraph: the card is 320px wide and shrinks its font, so a
+      // short phrase fits — but nothing long enough to be cut may get in.
+      assert.ok(title.length <= 40, `${phase}/${language}: ${title} is a short phrase`)
     }
     // No card is drawn while the gate merely waits, so there is no copy for it.
     assert.equal(api.isRestartOverlayPhase('waiting'), false)
@@ -777,4 +782,31 @@ test('a real restart keeps pendingRestart true while it snapshots and while it r
   const stage = runtime.restartStageInfo()
   assert.equal(stage.phase, 'restarting')
   assert.equal(stage.cancellable, false)
+})
+
+test('the card names WHAT is being backed up, in BOTH languages', async () => {
+  const progress = { bytes: 1024 * 1024, total: 2 * 1024 * 1024, percent: 50 }
+
+  // Chinese: the user's own words ("看不出是什么备份").
+  const zh = mountClient({ health: statePayload({ phase: 'snapshotting', progress }) })
+  const zhCard = await zh.settled('autorestart-restart-overlay')
+  const zhCopy = textOf(zhCard)
+  assert.match(zhCopy, /DSH 重启前备份中/, `the card says it is the pre-restart backup: ${zhCopy}`)
+  assert.doesNotMatch(zhCopy, /正在备份/, `and never the bare "正在备份": ${zhCopy}`)
+
+  // English: the same sentence.
+  const en = mountClient({ health: statePayload({ phase: 'snapshotting', progress }), language: 'en' })
+  const enCard = await en.settled('autorestart-restart-overlay')
+  const enCopy = textOf(enCard)
+  assert.match(enCopy, /before DSH restart/i, `the English card says it too: ${enCopy}`)
+  // The numbers are untouched: the bar, the size and the percentage are all there.
+  assert.match(enCopy, /1 \/ 2 MB/, `the megabytes survive the copy change: ${enCopy}`)
+  assert.equal(findByAttribute(enCard, 'data-dsh-autorestart-restart-overlay-bar').props.style.width, '50%')
+
+  // The composer row stays a WORD in both languages (never the sentence).
+  const enPill = await mountClient({ health: statePayload({ phase: 'snapshotting', progress }), language: 'en' })
+    .settled('autorestart-restart-pill', { sessionId: 'sess-x' })
+  const enPillCopy = capsuleCopy(enPill)
+  assert.equal(enPillCopy, 'Backing up…', `the English pill is a word: ${enPillCopy}`)
+  assert.ok(enPillCopy.length <= 12, `and short: ${enPillCopy.length}`)
 })

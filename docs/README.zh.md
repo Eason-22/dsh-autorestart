@@ -553,6 +553,31 @@ restart gate: action=wait reason=agents-busy-within-soft-window busyCount=1 quie
 
 **点一下就够了。** 月亮按钮按下就武装：宿主等所有忙会话收工，在角落里倒数 **20 秒**（浮动卡片，不遮挡界面），然后关掉整台机器。**再点一下**（或点卡片上的「算了，别关」）就取消。除此之外什么都不用用户做：没有确认框、不用点第二次。
 
+### 关机：关掉的是哪台机器？
+
+插件会先看自己跑在哪台机器上，然后关掉**那台机器**；设置页里那行字（`host.label`）写的就是它，不会让人猜：
+
+| DSH 跑在哪 | 关机按下去会关掉什么 | 界面上的原话 |
+|---|---|---|
+| Windows 桌面客户端 | 这台 Windows 电脑 | 「关掉这台 Windows 电脑」 |
+| Windows 上的 `dsh web` | 这台 Windows 电脑 | 「关掉这台 Windows 电脑」 |
+| Linux 主机上的 `dsh web` | 那台 Linux 主机 | 「关闭这台 Linux 主机」 |
+| **WSL 里的 `dsh web`** | **整台 Windows 主机**（不是那个 WSL 小环境！） | 「WSL 里的 DSH → 关掉整台 Windows」 |
+| 容器 | 什么都不会（命令是空的） | 「这台机器没有可靠的关机方式」 |
+
+> ⚠️ **在 WSL 里看到关机倒数，意味着你的整台机器会关机** —— 不是只停那个 Web 服务。
+> WSL 是 Windows 里的一个 Linux 小环境，关掉它只会停掉那个发行版；要让**主机**关机，
+> 插件走的是挂载盘里的 `shutdown.exe`（`/mnt/c/Windows/System32/shutdown.exe /s /f /t 0`），
+> 备选是 `powershell.exe -Command "Stop-Computer -Force"` 与
+> `cmd.exe /c shutdown.exe /s /f /t 0`。也就是说：**关的是主机**。
+
+**验到什么程度**：**计划层**每个平台都验过了（`test/sleep-plan-posix.test.mjs`：WSL 的
+计划必须走「关整台 Windows」那条分支；纯 Linux 的计划里不许出现任何 Windows 命令；
+不支持的平台命令为空、**什么都不执行**）。**Windows 真关电已验**；**POSIX 有意没有真关电**
+—— 为一条常识证据把所有人的会话都断掉不划算。
+
+每个平台的完整能力见 [平台能力矩阵](platform-matrix.md)。
+
 ### 关机和重启谁先谁后
 
 **一句话版本。** 点月亮按钮的意思是「**等活干完了再关电脑**」，不是「现在就算还有别的在跑也关掉」。所以：

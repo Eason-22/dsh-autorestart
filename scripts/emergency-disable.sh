@@ -1,6 +1,14 @@
 #!/bin/sh
 # dsh-autorestart - the emergency switch (POSIX: Linux, WSL, macOS).
 #
+# Three traps this file avoids (the whole story: scripts/README.md):
+#   1. the wording lives in rescue-strings.zh.json and is NESTED - it is read
+#      by path with node, never by a flat grep;
+#   2. the English fallbacks below must NOT contain parentheses: dash counts
+#      them even inside single quotes, and one stray ")" breaks the script;
+#   3. the sed expressions stay single-quoted: the shell eats the backslashes
+#      in a double-quoted sed program and truncates it.
+#
 # "I enabled the plugin and DSH does not start any more" is the hardest moment
 # for a plugin: fixing it needs the plugin itself. This script touches ONE file
 # - the package.json of the profile - and ONE array in it:

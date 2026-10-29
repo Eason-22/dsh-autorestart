@@ -1,6 +1,14 @@
 #!/bin/sh
 # dsh-autorestart - profile snapshot restorer (POSIX: Linux, WSL, macOS).
 #
+# Three traps this file avoids (the whole story: scripts/README.md):
+#   1. the wording lives in rescue-strings.zh.json and is NESTED - it is read
+#      by path with node, never by a flat grep;
+#   2. the English fallbacks below must NOT contain parentheses: dash counts
+#      them even inside single quotes, and one stray ")" breaks the script;
+#   3. the sed expressions stay single-quoted: the shell eats the backslashes
+#      in a double-quoted sed program and truncates it.
+#
 # The same rules as restore-profile.ps1: the newest snapshot that carries a
 # manifest is put back into a profile that is ALREADY there, the broken profile
 # is kept (never deleted), the result is read back, and DSH is NOT restarted

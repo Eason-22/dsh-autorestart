@@ -802,6 +802,35 @@ be cancelled — the card has a button, and the moon button itself becomes a tog
 is armed. If a conversation starts working again during the countdown, the countdown goes back to
 "waiting" and nothing is switched off.
 
+### Which machine gets switched off?
+
+The plugin works out where it runs and switches off **that machine** — and the label in the
+settings says which one, so there is no guessing:
+
+| Where DSH runs | What the shutdown switches off | The label you see |
+|---|---|---|
+| The Windows desktop app | that Windows computer | "Switch off this Windows computer" |
+| `dsh web` on Windows | that Windows computer | "Switch off this Windows computer" |
+| `dsh web` on a Linux host | that Linux host | "Shut down this Linux host" |
+| **`dsh web` inside WSL** | **the whole Windows machine** (not the little WSL box!) | "The DSH inside WSL → switches off the whole Windows" |
+| A container | nothing at all (there is no command) | "This machine has no reliable way to switch off" |
+
+> ⚠️ **A shutdown countdown inside WSL means your whole machine goes down** — not just that
+> web service. WSL is a small Linux environment *inside* Windows; shutting that environment
+> down would only stop the distribution. To switch off the **host**, the plugin goes through
+> the mounted drive: `shutdown.exe` (`/mnt/c/Windows/System32/shutdown.exe /s /f /t 0`), with
+> `powershell.exe -Command "Stop-Computer -Force"` and `cmd.exe /c shutdown.exe /s /f /t 0`
+> as the fallbacks. In other words: **the host goes off.**
+
+**How far this is verified.** The *plan* is verified for every platform
+(`test/sleep-plan-posix.test.mjs`: inside WSL the plan must take the "switch off the whole
+Windows" branch, a plain Linux plan must not contain a single Windows command, and a machine
+without a way to switch off has an empty command and **executes nothing**). The real power-off
+is verified on **Windows**; on POSIX it is deliberately **not** switched off for real — a
+common-sense fact is not worth ending every session on the machine for.
+
+The full picture per platform is in [`docs/platform-matrix.md`](docs/platform-matrix.md).
+
 ### Shutdown and restart: who goes first
 
 **The short version.** Pressing the moon button means "switch the machine off when the work is

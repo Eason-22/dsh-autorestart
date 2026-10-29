@@ -1,6 +1,14 @@
 #!/bin/sh
 # The rescue drill (POSIX): break a profile on purpose, put it back, prove it.
 #
+# Three traps this file avoids (the whole story: scripts/README.md):
+#   1. the wording lives in rescue-strings.zh.json and is NESTED - it is read
+#      by path with node, never by a flat grep;
+#   2. the English fallbacks below must NOT contain parentheses: dash counts
+#      them even inside single quotes, and one stray ")" breaks the script;
+#   3. the sed expressions stay single-quoted: the shell eats the backslashes
+#      in a double-quoted sed program and truncates it.
+#
 # The same assertions as drill-rescue.ps1, in a directory of its own under the
 # temp directory. Nothing here touches the profile of a running DSH.
 #

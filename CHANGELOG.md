@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.1 — 2026-10-29
+
+**修复打包遗漏**：0.8.0 的 npm 包按 `package.json` 的 `files` 白名单打包，而那份白名单只收了 `scripts/*.ps1` 与 `scripts/*.cmd`——**三个 POSIX 自救脚本（`restore-profile.sh` / `emergency-disable.sh` / `drill-rescue.sh`）、`scripts/README.md`、`scripts/rescue-strings.zh.json` 全都没进包**。Linux / WSL 用户装完 0.8.0 后，文档让他去双击/运行 `scripts/restore-profile.sh`，那个文件却不存在。
+
+现在把白名单补齐（`.sh`、`.mjs`、`scripts/README.md`、`scripts/rescue-strings.zh.json`、`CHANGELOG.md`），并用 `npm pack --dry-run` 逐项确认：**54 → 61 个文件**，三个 `.sh` 都在。单元测试 740 项仍全绿。
+
+0.8.0 的内容与行为没有其它变化；只是那个包缺文件。
+
 ## 0.8.0 — 2026-10-29
 
 这一版把"出事之后怎么办"做成真正的闭环：**起不来就自动还原、再拉起、留下报告**，并且桌面端与各种 Web 托管端（Windows / Linux / WSL）都覆盖。

@@ -58,3 +58,23 @@ test('the drill script never sweeps %TEMP% with a wildcard', () => {
   // The only cleanup must name its own directory, literally.
   assert.match(text, /Remove-Item\s+-LiteralPath\s+\$script:TempRoot/gi, 'the cleanup must delete the drill\'s own directory by literal path');
 });
+
+test('the drill checks the rejection REASON, not only the exit code', () => {
+  const text = bytesOf('drill-rescue.ps1').toString('utf8');
+  // A script that cannot even parse also exits non-zero. The drill has to
+  // tell "the script refused on purpose" apart from "the script broke".
+  assert.match(text, /function\s+Assert-Refused/, 'the drill must have a rejection assertion that reads the output');
+  const calls = text.match(/Assert-Refused\s+/g) || [];
+  assert.ok(calls.length >= 5, 'every rejection scenario must use Assert-Refused (found ' + calls.length + ')');
+  // The words that have to show up in the output for each scenario.
+  for (const keyword of ['不像', '不是 profile', '盘符', '根目录', '系统目录', '不允许', '不存在']) {
+    assert.ok(text.includes(keyword), 'the drill must look for the rejection reason «' + keyword + '»');
+  }
+});
+
+test('the drill refuses the system directories too', () => {
+  const text = bytesOf('drill-rescue.ps1').toString('utf8');
+  for (const dir of ['C:\\Windows', 'C:\\Program Files', 'C:\\ProgramData']) {
+    assert.ok(text.includes(dir), 'the drill must try the system directory ' + dir);
+  }
+});

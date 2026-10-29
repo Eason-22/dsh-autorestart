@@ -24,8 +24,10 @@
     4. 调用 restore-profile.ps1 还原；
     5. 断言：package.json 能解析、bundles 有内容、插件版本读得到、
        `broken-*` 证据目录存在、非 profile 目录被拒绝、目标目录不存在时被拒绝、
-       "配置说装了但没装"时必须失败、盘符根目录被拒绝、试运行不落盘、
-       脚本文件的编码规矩没破；
+       "配置说装了但没装"时必须失败、盘符根目录被拒绝、系统目录被拒绝、
+       试运行不落盘、脚本文件的编码规矩没破；
+       **拒绝类断言同时检查输出里的拒绝原因**（不只看退出码 ——
+       脚本自己解析失败也是非 0 退出码，那种假通过必须被抓住）；
     6. 清理（finally）。
 
 .EXAMPLE
@@ -64,6 +66,38 @@ function Assert-True {
   if ($Detail -ne '') { $suffix = ' —— ' + $Detail }
   Write-Host ('  [失败] ' + $Name + $suffix) -ForegroundColor Red
   $script:Failures += 1
+}
+
+# 拒绝类断言：**退出码之外，还必须看到具体的拒绝原因**。
+#
+# 只看退出码是不够的：BOM 丢了、脚本被改坏、语法错误 —— 这些都会让脚本
+# 非 0 退出，但那是"脚本自己没跑起来"，不是"脚本正确地拒绝了"。
+# 2026-10-29 那次 BOM 事故就是这么产生了假通过：脚本满屏 ParserError，
+# 退出码也是 1，看起来像"拒绝了"，其实什么都没拒绝。
+# 所以这里同时检查输出里有没有**该场景该有的那句话**。
+function Assert-Refused {
+  param([string] $Name, $Result, [string[]] $Keywords)
+  if ($null -eq $Result) {
+    Write-Host ('  [失败] ' + $Name + ' —— 没有拿到运行结果') -ForegroundColor Red
+    $script:Failures += 1
+    return
+  }
+  if ($Result.Code -eq 0) {
+    Write-Host ('  [失败] ' + $Name + ' —— 退出码是 0，脚本根本没有拒绝') -ForegroundColor Red
+    $script:Failures += 1
+    return
+  }
+  $text = [string]$Result.Output
+  $hit = ''
+  foreach ($keyword in $Keywords) {
+    if ($text -like ('*' + $keyword + '*')) { $hit = $keyword; break }
+  }
+  if ($hit -eq '') {
+    Write-Host ('  [失败] ' + $Name + ' —— 退出码是 ' + $Result.Code + '，但输出里没有拒绝原因（期望其中之一：' + ($Keywords -join '、') + '）') -ForegroundColor Red
+    $script:Failures += 1
+    return
+  }
+  Write-Host ('  [通过] ' + $Name + ' —— 退出码 ' + $Result.Code + '，输出里有拒绝原因「' + $hit + '」') -ForegroundColor Green
 }
 
 # 读一个文件；读不到就返回空字符串（绝不让断言自己先崩掉）。
@@ -271,21 +305,29 @@ try {
     Assert-True 'broken 目录里保留的还是坏掉的那份' $brokenKeeps
   }
 
-  # 4.6 目录长得不像 profile 的时候，脚本必须拒绝动手。
+  # 4.6 目录长得不像 profile 的时候，脚本必须拒绝动手，而且要说清楚为什么。
   $notAProfile = Join-Path $tempRoot 'not-a-profile'
   New-Item -ItemType Directory -Path $notAProfile -Force | Out-Null
   $refused = Invoke-Restore -Arguments @('-ProfileDir', $notAProfile, '-StateDir', $stateDir) -Label '不是 profile 的目录'
-  Assert-True '不像 profile 的目录被拒绝（退出码不是 0）' ($refused.Code -ne 0) ('退出码 ' + $refused.Code)
+  Assert-Refused '不像 profile 的目录被拒绝（退出码 + 拒绝原因）' $refused @('不像', '不是 profile')
   Assert-True '被拒绝的时候没有动那个目录' (@(Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'not-a-profile.broken-*').Count -eq 0)
 
   # 4.7 盘符根目录必须被拒绝。
   $rootRefused = Invoke-Restore -Arguments @('-ProfileDir', 'C:\', '-StateDir', $stateDir) -Label '盘符根目录'
-  Assert-True '盘符根目录被拒绝（退出码不是 0）' ($rootRefused.Code -ne 0) ('退出码 ' + $rootRefused.Code)
+  Assert-Refused '盘符根目录被拒绝（退出码 + 拒绝原因）' $rootRefused @('盘符', '根目录')
+
+  # 4.7b 系统目录必须被拒绝（Windows / Program Files / ProgramData）。
+  # 脚本在碰这些目录之前就拒了 —— 这里只是证明它拒得对。
+  foreach ($systemDir in @('C:\Windows', 'C:\Program Files', 'C:\ProgramData')) {
+    $systemRefused = Invoke-Restore -Arguments @('-ProfileDir', $systemDir, '-StateDir', $stateDir) -Label ('系统目录 ' + $systemDir)
+    Assert-Refused ('系统目录 ' + $systemDir + ' 被拒绝（退出码 + 拒绝原因）') $systemRefused @('系统目录', '不允许')
+    Assert-True ('系统目录 ' + $systemDir + ' 原封不动（没被挪走）') (Test-Path -LiteralPath $systemDir -PathType Container)
+  }
 
   # 4.8 目标 profile 目录不存在时必须被拒绝，而且**不许**被创建出来。
   $missingProfile = Join-Path $tempRoot 'not-there-yet'
   $missingRefused = Invoke-Restore -Arguments @('-ProfileDir', $missingProfile, '-StateDir', $stateDir) -Label '目标目录不存在'
-  Assert-True '目标 profile 目录不存在时被拒绝（退出码不是 0）' ($missingRefused.Code -ne 0) ('退出码 ' + $missingRefused.Code)
+  Assert-Refused '目标 profile 目录不存在时被拒绝（退出码 + 拒绝原因）' $missingRefused @('不存在')
   Assert-True '目标目录不存在时没有把它创建出来' (-not (Test-Path -LiteralPath $missingProfile))
 
   # 4.9 "配置说装了、实际没装"必须失败：profile 声明了插件，node_modules 里却没有。
@@ -309,7 +351,7 @@ try {
   }
   Write-TextFile (Join-Path $lyingSnapshot 'manifest.json') ($lyingManifest | ConvertTo-Json -Depth 5)
   $lying = Invoke-Restore -Arguments @('-ProfileDir', $lyingProfile, '-StateDir', $lyingState) -Label '配置说装了但没装'
-  Assert-True '声明了插件却没装 → 还原必须失败（退出码不是 0）' ($lying.Code -ne 0) ('退出码 ' + $lying.Code)
+  Assert-Refused '声明了插件却没装 → 还原必须失败（退出码 + 拒绝原因）' $lying @('没通过校验', '校验')
   Assert-True '声明了插件却没装 → 明确说 broken 目录还在' ($lying.Output -like '*broken*')
 
   # 4.10 交付物的编码规矩：ps1 带 BOM，cmd 是纯 ASCII。

@@ -26,7 +26,7 @@
  *
  * The four surfaces that must agree:
  *
- *   1. the capsule ("等待 N 个任务结束");
+ *   1. the capsule ("等待 N 个会话");
  *   2. the long wait ("N 项任务在跑");
  *   3. the shutdown card ("还有 N 个任务在干活");
  *   4. the `busyCount` the Host reports on its gate route.
@@ -457,8 +457,8 @@ test('the capsule counts the tasks, not the blockers', async () => {
   const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-waiting' })
   assert.ok(pill, 'the capsule must be shown while the restart waits')
   const text = textOf(pill)
-  assert.match(text, /等待 2 个任务结束/, `the capsule counts the tasks: ${text}`)
-  assert.doesNotMatch(text, /等待 3 个任务结束/, 'the parent and its own subagent are one task')
+  assert.match(text, /等待 2 个会话/, `the capsule counts the tasks: ${text}`)
+  assert.doesNotMatch(text, /等待 3 个会话/, 'the parent and its own subagent are one task')
 })
 
 test('the long wait counts the same tasks', async () => {

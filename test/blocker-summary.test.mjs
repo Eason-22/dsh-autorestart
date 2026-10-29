@@ -699,7 +699,7 @@ test('a long wait does not say the waiting sentence twice', async () => {
   const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-x' })
   const copy = copyOf(pill)
   assert.match(copy, /已等/, `the capsule says the long wait: ${copy}`)
-  assert.doesNotMatch(copy, /等待 \d+ 个任务结束/, `the waiting sentence is not said twice: ${copy}`)
+  assert.doesNotMatch(copy, /等待 \d+ 个会话/, `the waiting sentence is not said twice: ${copy}`)
   assert.ok(
     Array.from(copy).length <= CAPSULE_COPY_LIMIT,
     `the capsule stays short: ${Array.from(copy).length} characters — ${copy}`,
@@ -726,7 +726,7 @@ test('the waiting sentence of the capsule counts the tasks and names none of the
   const copy = copyOf(pill)
   // THREE tasks: the two subagents belong to the session "写代码" (one task),
   // plus "调研" and "另一个会话".
-  assert.equal(copy, '待重启 · 等待 3 个任务结束', `the capsule counts the tasks: ${copy}`)
+  assert.equal(copy, '待重启 · 等待 3 个会话', `the capsule counts the tasks: ${copy}`)
   for (const title of ['写代码', '调研', '另一个会话']) {
     assert.ok(!copy.includes(title), `the capsule names no blocker: ${title} — ${copy}`)
   }
@@ -750,7 +750,7 @@ test('a blocker without a name adds no clause to the waiting sentence', async ()
 
   const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-x' })
   const text = textOf(pill)
-  assert.match(text, /等待 1 个任务结束/, `the tasks are still counted: ${text}`)
+  assert.match(text, /等待 1 个会话/, `the tasks are still counted: ${text}`)
   assert.doesNotMatch(text, /有会话/, `a blocker without a name has nothing to show: ${text}`)
 })
 

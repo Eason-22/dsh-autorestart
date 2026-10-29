@@ -36,9 +36,10 @@ round starts, so the session goes idle and the restart can proceed. The goal is 
 restart and continues.
 
 The browser shows the state: a compact "pending restart" pill on the left side of the input toolbar
-and a small dot next to the session title in the sidebar. The pill's text reports how many **tasks**
-are still in the way — a conversation, a subagent or a teammate counts as one task each, and the
-tooltip explains that queued-but-not-started work counts too; it does not open a details panel. The
+and a small dot next to the session title in the sidebar. The pill's text reports how many
+**conversations** are still in the way (`待重启 · 等待 2 个会话` / `pending restart · waiting for 2
+session(s)`) — a conversation and its own subagents count as one, and the tooltip explains that
+queued-but-not-started work counts too; it does not open a details panel. The
 dot breathes when the restart is about to fire.
 
 Every blocker says **what it is**: a conversation is named by its own title, and a **subagent** is
@@ -198,7 +199,7 @@ what it adds before you install it.
 
 ## Install
 
-Current version: **0.8.2**.
+Current version: **0.8.3**.
 
 From npm — the package is published under the name `dsh-autorestart`:
 
@@ -271,7 +272,7 @@ The capsule in the composer row is 22px high and ONE line wide, so it carries nu
 (`待重启 · 已等 16 分钟 · 3 项任务在跑`) — never a name and never a hint. Clicking it (or pressing
 Enter/Space on it) opens a small panel above it:
 
-- how many tasks the restart is waiting for;
+- how many conversations the restart is waiting for (the same number the capsule shows);
 - how many OTHER sessions wait for the same restart;
 - one button: **Cancel my restart**.
 

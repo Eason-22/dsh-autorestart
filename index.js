@@ -387,7 +387,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.8.2'
+const PLUGIN_VERSION_FALLBACK = '0.8.3'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -4373,7 +4373,7 @@ const titleOfSummary = (item) => {
     /**
      * The stage of a restart, cut down for the health route (no long texts).
      *
-     * @returns {object} `{ phase, at, progress, slow, cancellable }`
+     * @returns {object} `{ phase, at, blocking, progress, slow, cancellable }`
      */
     restartStageBrief() {
       const info = restartStageInfo()
@@ -4381,6 +4381,9 @@ const titleOfSummary = (item) => {
         phase: info.phase,
         at: info.at,
         elapsedMs: info.elapsedMs,
+        // How many tasks still hold the gate: the centred overlay prints the
+        // number, so it travels as a number and not only inside `text`.
+        blocking: info.blocking,
         progress: info.progress === null
           ? null
           : { files: info.progress.files, bytes: info.progress.bytes, total: info.progress.total, percent: info.progress.percent, ageMs: info.progress.ageMs },
@@ -7879,11 +7882,16 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
           // without one is sent exactly as the gate produced it. The goal
           // reason (`goal-active` / `goal-exhausted`) is attached as well, so
           // the client can tell a goal-driven blocker from a busy session.
-          const blockedBy = goalAwareBlockingDetails(runtime, verdict.blockedBy).map((entry) => {
-            if (!entry || typeof entry !== 'object') return entry
-            const title = runtime.sessionTitle(entry.sessionId)
-            return title ? { ...entry, title } : entry
-          })
+          // A blocker that is not an object (an empty string still reported by
+          // an older route, a null) is not a blocker: it has no session and no
+          // name, and rendering one produced the bare ",," the user saw. It is
+          // dropped HERE, so the interface never receives one.
+          const blockedBy = goalAwareBlockingDetails(runtime, verdict.blockedBy)
+            .filter((entry) => entry && typeof entry === 'object')
+            .map((entry) => {
+              const title = runtime.sessionTitle(entry.sessionId)
+              return title ? { ...entry, title } : entry
+            })
           stateBody = JSON.stringify({
             ok: true,
             pendingRestart,
@@ -7891,6 +7899,12 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             generation: live.generation,
             waiters,
             blockedBy,
+            // THE ONE NUMBER both client surfaces read: the capsule and the
+            // panel it opens. Counting the blockers in the browser is what made
+            // "1 个会话在忙" sit next to "还在等 0 个任务" — the two surfaces
+            // counted different filtered copies of the same list (user report,
+            // 2026-10-29). A blocker without a readable name is still a task.
+            busyCount: countBlockerTasks(verdict.blockedBy),
             allowRestart: verdict.allow === true,
             // WHY the gate says what it says. Without this, "allowRestart is
             // false and blockedBy is empty" looks like a contradiction: the

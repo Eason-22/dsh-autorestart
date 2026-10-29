@@ -512,10 +512,17 @@ test('the pill counts TASKS, not conversations', async () => {
   const text = textOf(pill)
   // TWO tasks: the session "写代码" and its own subagent are ONE task (the
   // sidebar counts them once), plus the session "调研".
-  assert.match(text, /等待 2 个任务结束/, `the pill must count the tasks: ${text}`)
-  assert.doesNotMatch(text, /等待 3 个任务结束/, 'a session and its own subagent are one task')
+  assert.match(text, /等待 2 个会话/, `the pill must count the tasks: ${text}`)
+  assert.doesNotMatch(text, /等待 3 个会话/, 'a session and its own subagent are one task')
   assert.doesNotMatch(text, /会话占用/, 'the old wording must be gone')
-  assert.doesNotMatch(text, /个会话/, 'the pill must not talk about conversations any more')
+  // The counted UNIT is still a task (a session and its own subagent are one),
+  // and the sentence is the SHORT one: what must stay gone is the long line of
+  // the composer row that was clipped away ("正在等待所有会话空闲…（还有 N 个会话在忙）").
+  // t3 (2026-10-29) fixed the wording of the count to the user's own words —
+  // "等待 N 个会话" on the capsule, "还在等 N 个会话" on its panel — so the bare
+  // word 会话 is no longer banned; the LONG sentence still is.
+  assert.doesNotMatch(text, /还有 \d+ 个会话在忙/, 'the old long sentence of the composer row is gone')
+  assert.doesNotMatch(text, /正在等待所有会话空闲/, 'the old long sentence is gone')
 })
 
 test('the pill counts one task and no task the same way', async () => {
@@ -529,7 +536,7 @@ test('the pill counts one task and no task the same way', async () => {
     },
   })
   const onePill = await one.settled('autorestart-restart-pill', { sessionId: 'sess-waiting' })
-  assert.match(textOf(onePill), /等待 1 个任务结束/)
+  assert.match(textOf(onePill), /等待 1 个会话/)
 
   const none = mountClient({
     health: {
@@ -542,7 +549,7 @@ test('the pill counts one task and no task the same way', async () => {
   })
   const nonePill = await none.settled('autorestart-restart-pill', { sessionId: 'sess-waiting' })
   assert.match(textOf(nonePill), /空闲后自动重启/, 'without a blocker the pill says it is idle')
-  assert.doesNotMatch(textOf(nonePill), /个任务结束/)
+  assert.doesNotMatch(textOf(nonePill), /等待 \d+ 个会话/)
 })
 
 test('the waiting card tells a session and a subagent apart', async () => {

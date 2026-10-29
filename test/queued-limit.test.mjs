@@ -821,6 +821,6 @@ test('the bubble says that it waits for the other sessions when one blocks', asy
   const pill = await mounted.settled('autorestart-restart-pill', { sessionId: 'sess-x' })
   assert.ok(pill, 'the pill must be rendered')
   const text = textOf(pill)
-  assert.match(text, /等待 1 个任务结束/, `the bubble counts the blocker: ${text}`)
+  assert.match(text, /等待 1 个会话/, `the bubble counts the blocker: ${text}`)
   assert.doesNotMatch(text, /还在等这段安静期/, 'the quiet window is not the reason')
 })

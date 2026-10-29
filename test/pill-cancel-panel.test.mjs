@@ -347,7 +347,7 @@ test('clicking the capsule opens the panel', async () => {
   assert.ok(panel, 'the click opens the panel')
   assert.equal(panel.props.role, 'dialog', 'the panel is a dialog')
   assert.ok(panel.props['aria-label'], 'the panel is labelled')
-  assert.match(textOf(panel), /这次重启还在等 2 个任务结束/, `the panel says what the restart waits for: ${textOf(panel)}`)
+  assert.match(textOf(panel), /还在等 2 个会话/, `the panel says what the restart waits for: ${textOf(panel)}`)
   assert.match(textOf(panel), /还有 1 个会话也在等这次重启/, `the panel says who else waits: ${textOf(panel)}`)
 })
 

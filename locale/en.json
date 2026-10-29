@@ -1,7 +1,7 @@
 {
   "label": "Pending restart",
   "busyPrefix": " · waiting for ",
-  "busySuffix": " task(s) to finish",
+  "busySuffix": " session(s)",
   "idle": " · restarts once idle",
   "goalActive": " · held by a self-continuing goal",
   "goalExhausted": " · a goal ran out of rounds",
@@ -12,7 +12,7 @@
   "parkBusy": "Parking…",
   "parkError": "Park failed: {message}",
   "tooltip": "Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart.",
-  "tooltipBusy": "Waits for the other tasks to finish (the count includes work that is queued but not started yet), then restarts automatically; this session resumes its progress after the restart.",
+  "tooltipBusy": "Waits for the other sessions to finish (the count includes work that is queued but not started yet), then restarts automatically; this session resumes its progress after the restart.",
   "tooltipWithError": "Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart. {message}",
   "dotAria": "Pending restart",
   "panelHeading": "Pending restart",
@@ -48,7 +48,7 @@
   "durationMinutesShort": "{n} min",
   "durationHoursShort": "{n}h",
   "durationHoursMinutesShort": "{n}h {m}m",
-  "cancelPanelTasks": "This restart is still waiting for {n} task(s) to finish",
+  "cancelPanelTasks": "Still waiting for {n} session(s)",
   "cancelPanelOthers": "{n} other session(s) are waiting for this restart too",
   "cancelPanelOthersAfter": "{n} session(s) are still waiting",
   "cancelPanelAria": "Pending restart details",
@@ -299,6 +299,11 @@
       "tierNone": "(this machine has no way to run it)"
     },
     "error": "Could not save the settings: {message}",
+    "saveNotice": {
+      "saved": "Saved",
+      "failed": "Not saved",
+      "dismiss": "Dismiss"
+    },
     "autostartKind": {
       "other": "something else",
       "windows-task": "Windows scheduled task",
@@ -319,6 +324,20 @@
       "container": "it runs in a container; the orchestrator is in charge",
       "unknown": "it could not be established how it was started",
       "self-supervised": "the supervisor of this plugin started it"
+    }
+  },
+  "restart": {
+    "stage": {
+      "snapshotting": "Backing up…",
+      "restarting": "Restarting…",
+      "back": "Back"
+    },
+    "overlay": {
+      "snapshotting": "Backing up",
+      "size": "{done} / {total} MB",
+      "sizeDone": "{done} MB",
+      "restarting": "Restarting…",
+      "back": "Back again"
     }
   },
   "meta": {

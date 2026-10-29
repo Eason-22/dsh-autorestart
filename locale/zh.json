@@ -1,7 +1,7 @@
 {
   "label": "待重启",
   "busyPrefix": " · 等待 ",
-  "busySuffix": " 个任务结束",
+  "busySuffix": " 个会话",
   "idle": " · 空闲后自动重启",
   "goalActive": " · 被某个自动续跑的 goal 占着",
   "goalExhausted": " · 某个任务的 goal 轮次额度已用完，无法续跑",
@@ -12,7 +12,7 @@
   "parkBusy": "停泊中…",
   "parkError": "停泊失败：{message}",
   "tooltip": "等待其他会话空闲后自动重启；重启后会自动继续本会话进度",
-  "tooltipBusy": "等待其他任务结束（计数含“排队但还没开始”的任务）后自动重启；重启后本会话会自动继续进度",
+  "tooltipBusy": "等待其他会话结束（计数含“排队但还没开始”的会话）后自动重启；重启后本会话会自动继续进度",
   "tooltipWithError": "等待其他会话空闲后自动重启；重启后本会话会自动继续进度。{message}",
   "dotAria": "待重启",
   "panelHeading": "待重启",
@@ -48,7 +48,7 @@
   "durationMinutesShort": "{n} 分钟",
   "durationHoursShort": "{n} 小时",
   "durationHoursMinutesShort": "{n} 小时 {m} 分",
-  "cancelPanelTasks": "这次重启还在等 {n} 个任务结束",
+  "cancelPanelTasks": "还在等 {n} 个会话",
   "cancelPanelOthers": "还有 {n} 个会话也在等这次重启",
   "cancelPanelOthersAfter": "还剩 {n} 个会话在等",
   "cancelPanelAria": "待重启详情",
@@ -299,6 +299,11 @@
       "tierNone": "（这台机器没有可用机制）"
     },
     "error": "没能保存设置：{message}",
+    "saveNotice": {
+      "saved": "已生效",
+      "failed": "没保存成功",
+      "dismiss": "关闭"
+    },
     "autostartKind": {
       "other": "其他方式",
       "windows-task": "Windows 计划任务",
@@ -319,6 +324,20 @@
       "container": "它跑在容器里，由编排器负责",
       "unknown": "看不出它是怎么被拉起来的",
       "self-supervised": "它由本插件自己的守护在管"
+    }
+  },
+  "restart": {
+    "stage": {
+      "snapshotting": "正在备份…",
+      "restarting": "正在重启…",
+      "back": "已回来"
+    },
+    "overlay": {
+      "snapshotting": "正在备份",
+      "size": "{done} / {total} MB",
+      "sizeDone": "{done} MB",
+      "restarting": "正在重启…",
+      "back": "已回来"
     }
   },
   "meta": {

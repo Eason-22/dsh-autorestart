@@ -155,7 +155,7 @@
   const ZH = {
     label: '待重启',
     busyPrefix: ' · 等待 ',
-    busySuffix: ' 个任务结束',
+    busySuffix: ' 个会话',
     idle: ' · 空闲后自动重启',
     goalActive: ' · 被某个自动续跑的 goal 占着',
     goalExhausted: ' · 某个任务的 goal 轮次额度已用完，无法续跑',
@@ -166,7 +166,7 @@
     parkBusy: '停泊中…',
     parkError: '停泊失败：{message}',
     tooltip: '等待其他会话空闲后自动重启；重启后会自动继续本会话进度',
-    tooltipBusy: '等待其他任务结束（计数含“排队但还没开始”的任务）后自动重启；重启后本会话会自动继续进度',
+    tooltipBusy: '等待其他会话结束（计数含“排队但还没开始”的会话）后自动重启；重启后本会话会自动继续进度',
     tooltipWithError: '等待其他会话空闲后自动重启；重启后本会话会自动继续进度。{message}',
     dotAria: '待重启',
     panelHeading: '待重启',
@@ -219,7 +219,7 @@
     // The manual cancel of the capsule: the panel, the confirmation and the
     // readable reasons. The capsule's own text stays free of hints — the panel
     // is the discoverability.
-    cancelPanelTasks: '这次重启还在等 {n} 个任务结束',
+    cancelPanelTasks: '还在等 {n} 个会话',
     cancelPanelOthers: '还有 {n} 个会话也在等这次重启',
     cancelPanelOthersAfter: '还剩 {n} 个会话在等',
     cancelPanelAria: '待重启详情',
@@ -412,6 +412,9 @@
     'settings.report.issueTitle': '重启 / 开机自启相关的问题',
     'settings.report.issueBody': '请把刚才复制的诊断信息粘贴到下面。\n\n## 发生了什么\n\n\n## 期望什么\n\n\n## 怎么复现\n',
     'settings.error': '没能保存设置：{message}',
+    'settings.saveNotice.saved': '已生效',
+    'settings.saveNotice.failed': '没保存成功',
+    'settings.saveNotice.dismiss': '关闭',
     'sleep.dryRun.title': '试运行：不会真的关机',
     'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
     'sleep.dryRun.close': '知道了',
@@ -473,12 +476,30 @@
     'announcement.disabled': '按钮目前关闭，可在设置里打开。',
     'announcement.button': '知道了',
     'announcement.error': '没能记下来：{message}',
+    // THE COPY OF THE COMPOSER ROW. It is one SHORT line and never a sentence:
+    // the long stage sentence was clipped away there (user report,
+    // 2026-10-29). While the gate waits the pill keeps its own composed line
+    // ("待重启 · 空闲后自动重启" / "待重启 · 等待 N 个会话"); the three
+    // other stages REPLACE that line with one of these.
+    'restart.stage.snapshotting': '正在备份…',
+    'restart.stage.restarting': '正在重启…',
+    'restart.stage.back': '已回来',
+    // The centred overlay of a restart that is REALLY RUNNING (the backup, the
+    // shutdown, the return): one short line per stage, never wrapped, never cut
+    // with an ellipsis (the card shrinks its font instead). The numbers come
+    // from the Host's real measurements. There is no copy for `waiting`: no
+    // card is drawn while the gate merely waits.
+    'restart.overlay.snapshotting': '正在备份',
+    'restart.overlay.size': '{done} / {total} MB',
+    'restart.overlay.sizeDone': '{done} MB',
+    'restart.overlay.restarting': '正在重启…',
+    'restart.overlay.back': '已回来',
   }
 
   const EN = {
     label: 'Pending restart',
     busyPrefix: ' · waiting for ',
-    busySuffix: ' task(s) to finish',
+    busySuffix: ' session(s)',
     idle: ' · restarts once idle',
     goalActive: ' · held by a self-continuing goal',
     goalExhausted: ' · a goal ran out of rounds',
@@ -491,7 +512,7 @@
     tooltip:
       'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart.',
     tooltipBusy:
-      'Waits for the other tasks to finish (the count includes work that is queued but not started yet), then restarts automatically; this session resumes its progress after the restart.',
+      'Waits for the other sessions to finish (the count includes work that is queued but not started yet), then restarts automatically; this session resumes its progress after the restart.',
     tooltipWithError:
       'Waits for the other sessions to become idle, then restarts automatically; this session resumes its progress after the restart. {message}',
     dotAria: 'Pending restart',
@@ -543,7 +564,7 @@
     // The manual cancel of the capsule: the panel, the confirmation and the
     // readable reasons. The capsule's own text stays free of hints — the panel
     // is the discoverability.
-    cancelPanelTasks: 'This restart is still waiting for {n} task(s) to finish',
+    cancelPanelTasks: 'Still waiting for {n} session(s)',
     cancelPanelOthers: '{n} other session(s) are waiting for this restart too',
     cancelPanelOthersAfter: '{n} session(s) are still waiting',
     cancelPanelAria: 'Pending restart details',
@@ -736,6 +757,9 @@
     'settings.report.issueTitle': 'A problem with the restart / start at login',
     'settings.report.issueBody': 'Please paste the diagnostics you just copied below.\n\n## What happened\n\n\n## What you expected\n\n\n## How to reproduce\n',
     'settings.error': 'Could not save the settings: {message}',
+    'settings.saveNotice.saved': 'Saved',
+    'settings.saveNotice.failed': 'Not saved',
+    'settings.saveNotice.dismiss': 'Dismiss',
     'sleep.dryRun.title': 'Dry run: the machine stays on',
     'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
     'sleep.dryRun.close': 'Got it',
@@ -797,6 +821,17 @@
     'announcement.disabled': 'The button is currently switched off; you can turn it on in the settings.',
     'announcement.button': 'Got it',
     'announcement.error': 'Could not record it: {message}',
+    // THE COPY OF THE COMPOSER ROW (see the Chinese block): one short line,
+    // never a sentence.
+    'restart.stage.snapshotting': 'Backing up…',
+    'restart.stage.restarting': 'Restarting…',
+    'restart.stage.back': 'Back',
+    // The centred overlay of a running restart.
+    'restart.overlay.snapshotting': 'Backing up',
+    'restart.overlay.size': '{done} / {total} MB',
+    'restart.overlay.sizeDone': '{done} MB',
+    'restart.overlay.restarting': 'Restarting…',
+    'restart.overlay.back': 'Back again',
   }
 
   /**
@@ -1385,6 +1420,40 @@
   }
 
   /**
+   * THE number of tasks the pending restart waits for — ONE source for every
+   * surface of the interface.
+   *
+   * THE DEFECT THIS FIXES (user report, 2026-10-29)
+   *
+   * The capsule said "还有 1 个会话在忙" while the panel it opens said
+   * "这次重启还在等 0 个会话". Two numbers, ONE fact: the capsule counted
+   * the blockers itself, the panel re-counted a FILTERED copy of them (the own
+   * session dropped out, the goal blockers dropped out) — so the same pending
+   * restart was "1" on one line and "0" on the next.
+   *
+   * THE RULE
+   *
+   * The Host counts the TASKS that hold the gate and publishes the number as
+   * `busyCount` on its state route. Everything reads THAT number — the
+   * capsule, its panel and the long-wait line — so the two can never disagree
+   * again. Only a payload without the number (an older Host, a test fixture)
+   * falls back to counting the blockers, and then both surfaces count the SAME
+   * list.
+   *
+   * A blocker WITHOUT a readable name is still a task: the count never drops
+   * to 0 just because the name is missing.
+   *
+   * @param {any} info the state payload of the Host
+   * @param {any[]} [entries] the list to count when the Host sent no number
+   * @returns {number}
+   */
+  function waitingTaskCount(info, entries) {
+    const host = info && typeof info === 'object' ? info.busyCount : undefined
+    if (typeof host === 'number' && Number.isFinite(host) && host >= 0) return Math.floor(host)
+    return countBlockerTasks(Array.isArray(entries) ? entries : [])
+  }
+
+  /**
    * How many of those tasks are carried by SUBAGENTS ONLY.
    *
    * A task whose session is idle and whose subagent works is a task of the
@@ -1616,9 +1685,9 @@
     // capsule: the capsule cannot afford "16 分 37 秒".
     const duration = formatDurationMs(longWait.waitedMs, translate)
     const compact = formatCompactDurationMs(longWait.waitedMs, translate)
-    // The count is about TASKS, not blockers: a session and its own subagents
-    // are ONE task, exactly as the left sidebar counts them.
-    const count = countBlockerTasks(blockedBy)
+    // THE same number the capsule and its panel show (the Host's `busyCount`
+    // when it sends one): a session and its own subagents are ONE task.
+    const count = waitingTaskCount(info, blockedBy)
     // The tooltip: the whole story, every name, nothing cut.
     const sentence = fillTemplate(translate('longWaitTooltip'), { duration, blockers: summary.full })
     return {
@@ -2015,6 +2084,111 @@
   }
 
   /**
+   * THE COPY OF THE COMPOSER ROW: one SHORT line, never a sentence.
+   *
+   * WHY (user report, 2026-10-29): the pill sits in the composer tool row — a
+   * single clipped line inside a 22px toolbar. The long stage sentence
+   * ("正在等待所有会话空闲…（还有 1 个会话在忙）") was cut off on a narrow
+   * window and the ellipsis ate exactly the part that mattered.
+   *
+   * SO the pill now shows ONE of these, and nothing else:
+   *
+   *   while the gate waits      待重启 · 空闲后自动重启   (the composed line of
+   *                             the pill itself — it already carries the short
+   *                             count of the tasks that hold the gate)
+   *   while the snapshot runs   正在备份…
+   *   while the host goes down  正在重启…
+   *   after the new host is up  已回来           (1.5s, then the pill is plain)
+   *
+   * The detail — the number of busy conversations, the megabytes of the copy,
+   * the progress bar — lives in the CENTRED OVERLAY (`restart.overlay.*`),
+   * where there is room for it. The words come from the same dictionaries as
+   * everything else, so no surface has a second source of truth.
+   */
+  const RESTART_PILL_STAGE_KEYS = Object.freeze({
+    // `waiting` is deliberately MISSING: while the gate waits the pill already
+    // says "待重启 · 等待 N 个…" / "待重启 · 空闲后自动重启", and saying
+    // the stage as well would put two lines into a one-line row.
+    snapshotting: 'restart.stage.snapshotting',
+    restarting: 'restart.stage.restarting',
+    back: 'restart.stage.back',
+  })
+
+  /**
+   * The locale keys of the centred overlay.
+   *
+   * `waiting` is deliberately MISSING: while the gate waits for the other
+   * conversations there is NOTHING in progress yet, so no card is drawn at all
+   * (user report, 2026-10-29: "不是应该触发备份才触发吗？备份完就消失" — a card
+   * that said "等待会话空闲" hung on screen for ten minutes while the request
+   * merely queued). The waiting count belongs to the pill, which is where it
+   * always was: "待重启 · 等待 N 个会话".
+   */
+  const RESTART_OVERLAY_KEYS = Object.freeze({
+    snapshotting: 'restart.overlay.snapshotting',
+    restarting: 'restart.overlay.restarting',
+    back: 'restart.overlay.back',
+  })
+
+  /**
+   * Is this a stage the centred overlay draws at all?
+   *
+   * @param {unknown} phase
+   * @returns {boolean}
+   */
+  function isRestartOverlayPhase(phase) {
+    return typeof phase === 'string' && Object.prototype.hasOwnProperty.call(RESTART_OVERLAY_KEYS, phase)
+  }
+
+  /**
+   * THE COPY OF THE COMPOSER ROW for a stage ('' = the pill keeps its own
+   * composed line, "待重启 · …").
+   *
+   * @param {{ phase?: string }|null|undefined} stage the `restartPhase` payload
+   * @param {Function} [translator] the translator (the built-in one otherwise)
+   * @returns {string}
+   */
+  function restartPillStageText(stage, translator) {
+    const phase = stage && typeof stage === 'object' && typeof stage.phase === 'string' ? stage.phase : ''
+    if (!Object.prototype.hasOwnProperty.call(RESTART_PILL_STAGE_KEYS, phase)) return ''
+    const t = typeof translator === 'function' ? translator : makeTranslate(null)
+    return t(RESTART_PILL_STAGE_KEYS[phase])
+  }
+
+  /**
+   * The short line of the centred overlay for a stage ('' when there is none).
+   *
+   * @param {{ phase?: string }|null|undefined} stage
+   * @param {Function} [translator]
+   * @returns {string}
+   */
+  function restartOverlayTitle(stage, translator) {
+    const phase = stage && typeof stage === 'object' && typeof stage.phase === 'string' ? stage.phase : ''
+    if (!isRestartOverlayPhase(phase)) return ''
+    const t = typeof translator === 'function' ? translator : makeTranslate(null)
+    return t(RESTART_OVERLAY_KEYS[phase])
+  }
+
+  /**
+   * The megabytes of the copy, ONE decimal at most, NO unit ("12.3", "40").
+   *
+   * The overlay prints "12.3 / 40 MB": the unit is written once instead of
+   * twice, so the line stays short enough to never be wrapped or cut. A whole
+   * number keeps no ".0" — "40 MB" is what a reader expects, not "40.0 MB".
+   *
+   * @param {number|null|undefined} bytes
+   * @returns {string} '' when the Host did not measure anything
+   */
+  function overlayMegabytes(bytes) {
+    // No measurement is NOT a measurement of zero: a missing byte count must
+    // never be printed as "0" (Number(null) is 0, which is exactly the trap).
+    if (bytes === null || bytes === undefined || bytes === '') return ''
+    const value = Number(bytes)
+    if (!Number.isFinite(value) || value < 0) return ''
+    return String(Math.round((value / (1024 * 1024)) * 10) / 10)
+  }
+
+  /**
    * The named exports of this module.
    *
    * The client module system materializes `factory(require) -> exports`, so
@@ -2035,8 +2209,10 @@
     summarizeBlockers,
     truncateBlockerName,
     // The task count: one rule, four surfaces (mirrored from lib/blockers.js).
+    // `waitingTaskCount` is THE number the capsule and its panel both show.
     blockerTaskKeys,
     countBlockerTasks,
+    waitingTaskCount,
     countSubagentTasks,
     resolveAccessRedirect,
     supervisorModeLabel,
@@ -2062,6 +2238,12 @@
     startupStatusLine,
     formatBackupSize,
     formatBackupTime,
+    // The stage of a restart on the two surfaces that have room for it: the
+    // composer row (one short line) and the centred overlay (the detail).
+    isRestartOverlayPhase,
+    restartPillStageText,
+    restartOverlayTitle,
+    overlayMegabytes,
     // The TRANSLATOR: the Host's one when it answers, the built-in dictionary
     // when it does not (a key name is never shown).
     makeTranslate,
@@ -2591,6 +2773,87 @@
         opacity: 0.85,
       }
 
+      // HOW LONG THE "已回来" CARD STAYS after the new host is up (ms).
+      const RESTART_OVERLAY_BACK_MS = 1500
+      // The id of the injected stylesheet, so a second mount never duplicates it.
+      const RESTART_OVERLAY_STYLE_ID = 'dsh-autorestart-restart-overlay'
+
+      // THE CENTRED OVERLAY of a running restart.
+      //
+      // WHY IT EXISTS (user report, 2026-10-29): the stage line lived in the
+      // composer row, a single clipped line inside a 22px toolbar — on a narrow
+      // window "正在等待所有会话空闲…（还有 1 个会话在忙）" was cut off, and an
+      // ellipsis ate exactly the part that mattered. The detail therefore moved
+      // OUT of the composer row onto the middle of the interface: a fixed 320px
+      // card, one short line per stage, a real progress bar for the backup.
+      //
+      // TWO RULES:
+      //   1. IT NEVER COVERS THE INPUT. `pointer-events: none` and a translation
+      //      only — every click goes through to the interface below, and the
+      //      card sits in the middle of the conversation, not over the composer;
+      //   2. NO TEXT IS EVER CUT. The card keeps its line unwrapped, has no
+      //      `text-overflow` at all, and shrinks its font on a narrow window
+      //      (`clamp`), so the number of the backup is never replaced by "…".
+      const RESTART_OVERLAY_CSS = [
+        '.dsh-autorestart-restart-overlay{',
+        '  position:fixed;',
+        '  top:44%;',
+        '  left:50%;',
+        '  transform:translate(-50%,-50%);',
+        '  z-index:9997;',
+        '  box-sizing:border-box;',
+        '  width:min(320px,calc(100vw - 32px));',
+        '  padding:14px 16px;',
+        '  border:1px solid var(--dsw-alias-border-l1);',
+        '  border-radius:14px;',
+        '  background:color-mix(in srgb, var(--dsw-alias-bg-layer-1) 88%, transparent);',
+        '  box-shadow:0 10px 30px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 20%, transparent);',
+        '  color:var(--dsw-alias-label-primary);',
+        '  text-align:center;',
+        '  pointer-events:none;',
+        '}',
+        '.dsh-autorestart-restart-overlay__title{',
+        '  margin:0;',
+        '  font-size:clamp(11px,2.6vw,14px);',
+        '  font-weight:600;',
+        '  line-height:1.4;',
+        '  white-space:nowrap;',
+        '  overflow:visible;',
+        '}',
+        '.dsh-autorestart-restart-overlay__detail{',
+        '  margin:4px 0 0;',
+        '  font-size:clamp(10px,2.2vw,12.5px);',
+        '  line-height:1.5;',
+        '  color:var(--dsw-alias-label-secondary);',
+        '  white-space:nowrap;',
+        '  overflow:visible;',
+        '}',
+        '.dsh-autorestart-restart-overlay__bar{',
+        '  margin:9px 0 0;',
+        '  height:6px;',
+        '  border-radius:999px;',
+        '  background:color-mix(in srgb, var(--dsw-alias-label-primary) 14%, transparent);',
+        '  overflow:hidden;',
+        '}',
+        '.dsh-autorestart-restart-overlay__bar-fill{',
+        '  height:100%;',
+        '  border-radius:999px;',
+        '  background:var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#5b8def));',
+        '  transition:width .3s ease-out;',
+        '}',
+        '.dsh-autorestart-restart-overlay__size{',
+        '  display:flex;',
+        '  align-items:baseline;',
+        '  justify-content:space-between;',
+        '  gap:8px;',
+        '  margin:6px 0 0;',
+        '  font-size:clamp(10px,2.2vw,12px);',
+        '  line-height:1.5;',
+        '  color:var(--dsw-alias-label-secondary);',
+        '  white-space:nowrap;',
+        '}',
+      ].join('\n')
+
       // The details panel: anchored to the wrapper, above the pill, left
       // aligned. It uses the host theme tokens (background / border / label
       // color) so it follows the app theme.
@@ -2964,7 +3227,17 @@
         // whether a cancel is still honest. Both come from the Host: the pill
         // never guesses the stage and never invents progress.
         const stage = info && info.restartPhase && typeof info.restartPhase === 'object' ? info.restartPhase : null
-        const stageText = restartStageText(stage)
+        // THE COPY OF THE COMPOSER ROW: ONE short line, never a sentence.
+        //   waiting (or no stage at all): the pill keeps its own composed line —
+        //     "待重启 · 空闲后自动重启" / "待重启 · 等待 N 个…"
+        //     (the noun of that count belongs to the capsule's own copy);
+        //   snapshotting / restarting / back: the stage REPLACES that line —
+        //     "正在备份…" / "正在重启…" / "已回来", and nothing else.
+        // The sentence that used to sit here ("正在等待所有会话空闲…（还有 1 个
+        // 会话在忙）") was clipped away by the composer row (user report,
+        // 2026-10-29). The detail — the count of busy conversations, the
+        // megabytes, the progress bar — is the CENTRED OVERLAY.
+        const pillStageText = restartPillStageText(stage, t)
         const cancelLocked = restartStageLocked(stage)
         // The TASK of every blocker: a session and its own subagents are ONE
         // task (the sidebar counts them once). The keys are aligned with the
@@ -2999,9 +3272,6 @@
         const busyBlockers = others.filter(
           (entry) => String(entry.reason) !== 'goal-active' && String(entry.reason) !== 'goal-exhausted',
         )
-        // The count is about TASKS, not blockers: a parent session and its own
-        // subagents are ONE task, exactly as the left sidebar counts them.
-        const otherBusy = countBlockerTasks(busyBlockers)
 
         // WHY the gate is closed: the Host reports the reason next to the
         // blockers. With no blocker but the reason "settling" the restart is
@@ -3013,6 +3283,18 @@
         // more line about it — how long it has been waiting and how many tasks
         // are running.
         const longWait = formatLongWaitNoteParts(info, t)
+        // THE ONE NUMBER both surfaces show (user report, 2026-10-29: the
+        // capsule said "还有 1 个会话在忙" while the panel it opens said
+        // "这次重启还在等 0 个会话"). The Host counts the tasks that hold
+        // the gate and publishes `busyCount`; the capsule AND its panel read
+        // that very value, so the two can never disagree again. A blocker
+        // WITHOUT a readable name is still counted.
+        const longWaitBlockers = info && info.longWait && Array.isArray(info.longWait.blockedBy)
+          ? info.longWait.blockedBy
+          : []
+        const countingBlockers = others.length > 0 || !longWait.hasLongWait ? others : longWaitBlockers
+        const waitingCount = waitingTaskCount(info, countingBlockers)
+        const otherBusy = waitingCount
         // The blockers of the ordinary list: the SAME rule as the long wait
         // (grouped by the session that created them).
         const blockers = summarizeBlockers(busyBlockers, { t })
@@ -3047,7 +3329,9 @@
         // The panel: how many tasks the restart waits for, and how many OTHER
         // sessions wait for the same restart. The count is about TASKS (a
         // session and its own subagents are one), like everywhere else.
-        const taskCount = longWait.hasLongWait ? longWait.count : countBlockerTasks(others)
+        // The SAME variable the capsule used: the panel can never claim a
+        // different count than the line it was opened from.
+        const taskCount = waitingCount
         const otherWaiters = waiters.filter((waiter) => String(waiter) !== key).length
         const sessionsWaiting = sessionsLeft === null ? otherWaiters : sessionsLeft
         // The session that asks for the cancel: without it the own request
@@ -3213,7 +3497,14 @@
                 if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
               },
             },
-            h('p', { style: { margin: 0 } }, fill(t('cancelPanelTasks'), { n: taskCount })),
+            // THE SAME number the capsule shows (one variable, one number).
+            // A restart that waits for nobody says so in words — "还在等 0 个
+            // 会话" is not a sentence anybody writes.
+            h(
+              'p',
+              { style: { margin: 0 } },
+              taskCount > 0 ? fill(t('cancelPanelTasks'), { n: taskCount }) : t('panelStateIdle'),
+            ),
             sessionsWaiting > 0
               ? h(
                 'p',
@@ -3326,22 +3617,27 @@
               onKeyDown: onPillKeyDown,
             },
             h('span', { style: dotStyle(DOT_STYLE, pulsing), 'aria-hidden': 'true' }),
-            h('span', { style: TEXT_STYLE }, h('b', null, t('label')), status),
-            // ONE MORE LINE: WHICH STAGE THE RESTART IS IN, with the real
-            // progress of the backup. It is the answer to "I clicked restart
-            // and nothing happened" — the pill says "waiting", then "backing up
-            // 120 MB of 156 MB", then "restarting".
-            stageText === ''
-              ? null
-              : h(
-                'span',
-                {
-                  style: LONG_WAIT_STYLE,
-                  'data-dsh-autorestart-stage': String(stage && stage.phase ? stage.phase : ''),
-                  title: stageText,
-                },
-                stageText,
-              ),
+            // THE ONE VISIBLE LINE OF THE COMPOSER ROW — short, never a
+            // sentence:
+            //   waiting (or no stage at all): the composed line of the pill —
+            //     "待重启 · 空闲后自动重启" / "待重启 · 等待 N 个…";
+            //   snapshotting / restarting / back: the stage REPLACES it —
+            //     "正在备份…" / "正在重启…" / "已回来".
+            // The long sentence that used to live here was clipped away by the
+            // composer row (user report, 2026-10-29): the detail is the CENTRED
+            // OVERLAY, and the pill is one clipped line again.
+            h(
+              'span',
+              {
+                style: TEXT_STYLE,
+                'data-dsh-autorestart-copy': 'true',
+                'data-dsh-autorestart-stage': String(stage && stage.phase ? stage.phase : ''),
+              },
+              pillStageText === ''
+                ? h('b', { key: 'label' }, t('label'))
+                : h('b', { key: 'stage' }, pillStageText),
+              pillStageText === '' ? status : null,
+            ),
             // One more line for the long wait: how long the restart has been
             // waiting and how many tasks are running. It is only there when the
             // Host says so. The line carries NO name at all — it is one
@@ -3427,6 +3723,172 @@
           'aria-live': 'polite',
           'aria-label': t('dotAria'),
         })
+      }
+
+      /**
+       * Inject the overlay stylesheet exactly once. The id keeps a second
+       * injection from duplicating the rule.
+       */
+      function ensureRestartOverlayStyle() {
+        if (typeof document === 'undefined' || !document.head) return
+        try {
+          if (document.getElementById(RESTART_OVERLAY_STYLE_ID)) return
+          const style = document.createElement('style')
+          style.id = RESTART_OVERLAY_STYLE_ID
+          style.textContent = RESTART_OVERLAY_CSS
+          document.head.appendChild(style)
+        } catch {
+          // Without the stylesheet the card is still readable, just plainer.
+        }
+      }
+
+      /**
+       * THE CENTRED OVERLAY OF A RESTART — the stage, on the interface itself.
+       *
+       * WHY (user report, 2026-10-29): the stage was only on the composer row,
+       * one clipped line inside a 22px toolbar. On a narrow window it read
+       * "正在等待所有会话空闲…" and the rest was cut off; the user could not
+       * tell a slow backup from a dead button. The detail therefore moved onto
+       * the middle of the conversation, where a fixed 320px card has room for
+       * a short line, a real progress bar and the measured megabytes.
+       *
+       * WHAT IS DRAWN, AND WHEN (the whole rule):
+       *   snapshotting  "正在备份" + the progress bar + "12.3 / 40 MB" + "31%"
+       *   restarting    "正在重启…"  (and it stays: the host is on its way out)
+       *   back          "已回来", for 1.5s, and only for a restart THIS page
+       *                 really watched (a leftover value must not draw a card)
+       *   waiting       NOTHING AT ALL: the gate merely waits, nothing is in
+       *                 progress, and the pill already says "待重启 · 等待 N 个会话"
+       *   idle          NOTHING AT ALL
+       *
+       * And a running stage counts only while the restart is really PENDING
+       * (`pendingRestart`): the stage a previous restart left in the state file
+       * is not an action, and a card for it would be the very thing the user
+       * complained about.
+       *
+       * IT LIVES ON THIS PAGE ONLY. The component reads the shared per-page
+       * poll and writes nothing anywhere (no localStorage, no global marker):
+       * an interface that is opened again asks its host again, so it shows the
+       * stage the host is really in — never a remembered one.
+       *
+       * It never covers the input: `pointer-events: none` on the card (see
+       * RESTART_OVERLAY_CSS) means every click goes to the interface below.
+       */
+      function RestartOverlay() {
+        const info = useSharedInfo(true)
+        const t = makeTranslate(translate)
+        // The stage said goodbye: the card folds away once, and only once.
+        const [backGone, setBackGone] = useState(false)
+        // DID THIS PAGE WATCH A RESTART IN PROGRESS? `state.json` keeps the
+        // stage of the last restart, so a page that is opened afterwards reads
+        // a LEFTOVER value. A card that says "已回来" ten minutes later would
+        // be a lie, so the goodbye card is only drawn for a restart this page
+        // really saw running.
+        const [sawRunning, setSawRunning] = useState(false)
+
+        const stage = info && info.restartPhase && typeof info.restartPhase === 'object' ? info.restartPhase : null
+        const phase = stage && typeof stage.phase === 'string' ? stage.phase : ''
+        // A RESTART THAT IS REALLY PENDING. `state.json` keeps the stage of the
+        // last restart; the request itself is what says "something is going on
+        // right now". The Host keeps it non-null through the snapshot and until
+        // the process is gone, so this costs nothing in the real flow — and it
+        // is the difference between a live card and a leftover one.
+        const pending = Boolean(info && info.pendingRestart === true)
+        // THE ONLY TWO STAGES THAT ARE "SOMETHING IS REALLY HAPPENING": the
+        // snapshot is being written, or the host is on its way out.
+        const running = pending && (phase === 'snapshotting' || phase === 'restarting')
+
+        useEffect(() => {
+          if (running) setSawRunning(true)
+        }, [running])
+
+        // "已回来" is a MOMENT, not a state: it is shown for 1.5s and then the
+        // card disappears. Every other stage stays exactly as long as the Host
+        // keeps reporting it — a restarting host keeps its card (the interface
+        // is about to vanish with it).
+        useEffect(() => {
+          if (phase !== 'back') {
+            setBackGone(false)
+            return undefined
+          }
+          const timer = setTimeout(() => setBackGone(true), RESTART_OVERLAY_BACK_MS)
+          return () => clearTimeout(timer)
+        }, [phase])
+
+        // THE CARD IS ONLY DRAWN WHILE SOMETHING IS REALLY IN PROGRESS:
+        //   snapshotting / restarting   the backup runs, or the host goes down;
+        //   back                        only for a restart THIS page watched,
+        //                               and only for 1.5s.
+        // Everything else draws NOTHING — no card while the gate merely waits
+        // (`waiting`, which is the pill's business), and no card for the stage a
+        // previous restart left behind in the state file.
+        const visible = running || (phase === 'back' && sawRunning)
+        if (!visible) return null
+        if (phase === 'back' && backGone) return null
+
+        const progress = stage.progress && typeof stage.progress === 'object' ? stage.progress : null
+        const bytes = progress !== null && Number.isFinite(Number(progress.bytes)) ? Number(progress.bytes) : null
+        const total = progress !== null && Number.isFinite(Number(progress.total)) ? Number(progress.total) : null
+        const percent = progress !== null && Number.isFinite(Number(progress.percent))
+          ? Math.max(0, Math.min(100, Math.round(Number(progress.percent))))
+          : null
+
+        const title = restartOverlayTitle(stage, t)
+        let detail = null
+        let bar = null
+        if (phase === 'snapshotting') {
+          // The numbers are the ones the copy loop really measured; when there
+          // is no measurement yet, the card shows no number at all (an invented
+          // progress bar is worse than none).
+          const done = bytes === null ? '' : overlayMegabytes(bytes)
+          const all = total === null ? '' : overlayMegabytes(total)
+          const sizeText = done === ''
+            ? ''
+            : (all === '' ? fill(t('restart.overlay.sizeDone'), { done }) : fill(t('restart.overlay.size'), { done, total: all }))
+          bar = h(
+            'div',
+            {
+              className: 'dsh-autorestart-restart-overlay__bar',
+              role: 'progressbar',
+              'aria-valuemin': 0,
+              'aria-valuemax': 100,
+              'aria-valuenow': percent === null ? 0 : percent,
+            },
+            h('div', {
+              className: 'dsh-autorestart-restart-overlay__bar-fill',
+              'data-dsh-autorestart-restart-overlay-bar': 'true',
+              style: { width: (percent === null ? 0 : percent) + '%' },
+            }),
+          )
+          detail = sizeText === ''
+            ? null
+            : h(
+              'p',
+              { className: 'dsh-autorestart-restart-overlay__size' },
+              h('span', { 'data-dsh-autorestart-restart-overlay-size': 'true' }, sizeText),
+              h('span', { 'data-dsh-autorestart-restart-overlay-percent': 'true' }, percent === null ? '' : percent + '%'),
+            )
+        }
+
+        ensureRestartOverlayStyle()
+
+        return h(
+          'div',
+          {
+            className: 'dsh-autorestart-restart-overlay',
+            role: 'status',
+            'aria-live': 'polite',
+            'data-dsh-autorestart-restart-overlay': 'true',
+            'data-dsh-autorestart-restart-overlay-phase': phase,
+          },
+          h(
+            'p',
+            { className: 'dsh-autorestart-restart-overlay__title', 'data-dsh-autorestart-restart-overlay-title': 'true' },
+            title,
+          ),
+          bar,
+          detail,
+        )
       }
 
       /**
@@ -4577,6 +5039,299 @@
        * @param {object} props the Host's props: `t` (the translator of the
        *   registered locale, injected by the section registration)
        */
+      /* ---------------------------------------------------------------- *
+       * THE RECEIPT OF A SETTINGS CHANGE
+       *
+       * A setting is written the moment the user picks it ("change it and it
+       * is in effect"), which left the user unable to tell whether it was
+       * really stored. This is the missing half: ONE line at the top of the
+       * window that says "Saved 21:40:12" once the HOST answered `ok: true`,
+       * or "Not saved — <the reason>" in red when it refused.
+       *
+       * The rules it keeps:
+       *
+       *   - NOTHING is announced before the Host's receipt: rendering the
+       *     page, polling it and clicking a control all stay silent;
+       *   - a failure is never swallowed and never fades: it stays until the
+       *     next change succeeds or the user closes it;
+       *   - a success fades out on its own after a moment, and three changes
+       *     in a row update the SAME line instead of stacking new ones.
+       * ---------------------------------------------------------------- */
+
+      /** The id of the one stylesheet of the receipt line. */
+      const SAVE_NOTICE_STYLE_ID = 'dsh-autorestart-save-notice'
+      /** How long the green line stays; the red one stays for ever. */
+      const SAVE_NOTICE_HIDE_MS = 3000
+
+      /**
+       * The receipt on screen right now (one for the whole window: two
+       * changes never produce two lines).
+       *
+       * `notice` is `null` until a save came back from the Host, and it is
+       * `{ kind: 'ok' | 'failed', at, atText, reason }` afterwards.
+       */
+      const saveNoticeStore = {
+        notice: null,
+        listeners: new Set(),
+        timer: null,
+      }
+
+      /** Tell every mounted receipt about the current one. */
+      function notifySaveNotice() {
+        saveNoticeStore.listeners.forEach((listener) => {
+          try {
+            listener(saveNoticeStore.notice)
+          } catch {
+            // One broken listener must not stop the others.
+          }
+        })
+      }
+
+      /** The local clock time of a receipt, as HH:MM:SS. */
+      function formatSaveNoticeClock(at) {
+        const moment = new Date(at)
+        const pad = (value) => (value < 10 ? '0' + value : String(value))
+        return pad(moment.getHours()) + ':' + pad(moment.getMinutes()) + ':' + pad(moment.getSeconds())
+      }
+
+      /**
+       * Publish one receipt.
+       *
+       * A pending fade-out of the previous receipt is dropped first, so a
+       * second change restarts the clock on the SAME line (test: "two saves,
+       * one line").
+       */
+      function publishSaveNotice(notice) {
+        if (saveNoticeStore.timer !== null) {
+          clearTimeout(saveNoticeStore.timer)
+          saveNoticeStore.timer = null
+        }
+        saveNoticeStore.notice = notice
+        notifySaveNotice()
+        // A failure stays: only the user closes it (or a save that works).
+        if (notice.kind !== 'ok') return
+        const timer = setTimeout(() => {
+          saveNoticeStore.timer = null
+          // A newer receipt replaced this one while the timer ran.
+          if (saveNoticeStore.notice !== notice) return
+          saveNoticeStore.notice = null
+          notifySaveNotice()
+        }, SAVE_NOTICE_HIDE_MS)
+        // In a browser this is a number; under Node it is a Timeout that must
+        // not hold the process open (the tests run in one).
+        if (timer && typeof timer.unref === 'function') timer.unref()
+        saveNoticeStore.timer = timer
+      }
+
+      /**
+       * The Host took the change (`ok: true`): this is the ONE moment the
+       * page may say "Saved".
+       */
+      function publishSaveSaved() {
+        const at = Date.now()
+        publishSaveNotice({ kind: 'ok', at, atText: formatSaveNoticeClock(at), reason: '' })
+      }
+
+      /**
+       * The Host refused the change: say so, with the reason it gave, and
+       * keep saying it.
+       *
+       * @param {string} reason the error of the Host answer (or of the request)
+       */
+      function publishSaveFailure(reason) {
+        const at = Date.now()
+        publishSaveNotice({
+          kind: 'failed',
+          at,
+          atText: formatSaveNoticeClock(at),
+          reason: typeof reason === 'string' ? reason : '',
+        })
+      }
+
+      /** Close the receipt: only the user does that, with the close button. */
+      function clearSaveNotice() {
+        if (saveNoticeStore.timer !== null) {
+          clearTimeout(saveNoticeStore.timer)
+          saveNoticeStore.timer = null
+        }
+        if (saveNoticeStore.notice === null) return
+        saveNoticeStore.notice = null
+        notifySaveNotice()
+      }
+
+      /** The receipt on screen, re-rendered whenever it changes. */
+      function useSaveNotice() {
+        const [notice, setNotice] = useState(saveNoticeStore.notice)
+        useEffect(() => {
+          setNotice(saveNoticeStore.notice)
+          saveNoticeStore.listeners.add(setNotice)
+          return () => { saveNoticeStore.listeners.delete(setNotice) }
+        }, [])
+        return notice
+      }
+
+      // The line hangs at the top CENTRE of the WINDOW: it is `fixed`, so it
+      // stays where it is while the settings page scrolls and while a
+      // dropdown is open. It starts below the frame chrome (the buttons of
+      // the top bar stay reachable and uncovered) and it lets every click
+      // through — only its close button takes one.
+      const SAVE_NOTICE_CSS = [
+        '.dsh-autorestart-save-notice{',
+        '  position:fixed;',
+        '  top:calc(var(--dsh-frame-chrome-top,0px) + 8px);',
+        '  left:50%;',
+        '  transform:translateX(-50%);',
+        '  z-index:9999;',
+        '  display:flex;',
+        '  align-items:center;',
+        '  gap:8px;',
+        '  box-sizing:border-box;',
+        '  max-width:min(560px,calc(100vw - 32px));',
+        '  padding:5px 6px 5px 12px;',
+        '  border:1px solid var(--dsw-alias-border-l1);',
+        '  border-radius:10px;',
+        '  background:var(--dsw-alias-bg-layer-1);',
+        '  box-shadow:0 8px 24px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 18%, transparent);',
+        '  color:var(--dsw-alias-label-primary);',
+        '  font-size:13px;',
+        '  line-height:18px;',
+        '  white-space:nowrap;',
+        '  pointer-events:none;',
+        '}',
+        // The green receipt: "Saved 21:40:12".
+        '.dsh-autorestart-save-notice--ok{',
+        '  border-color:color-mix(in srgb, var(--dsw-alias-state-success,#1a7f37) 45%, var(--dsw-alias-border-l1));',
+        '  color:var(--dsw-alias-state-success-fg,var(--dsw-alias-state-success,#1a7f37));',
+        '}',
+        // The red one: "Not saved — <the reason>". It does not fade.
+        '.dsh-autorestart-save-notice--failed{',
+        '  border-color:color-mix(in srgb, var(--dsw-alias-danger,#d14343) 45%, var(--dsw-alias-border-l1));',
+        '  color:var(--dsw-alias-danger,#d14343);',
+        '}',
+        '.dsh-autorestart-save-notice__title{flex:none;font-weight:600;}',
+        '.dsh-autorestart-save-notice__time{',
+        '  flex:none;',
+        '  font-size:11.5px;',
+        '  color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));',
+        '  font-variant-numeric:tabular-nums;',
+        '}',
+        // The reason is the only text that may be cut, and even then the whole
+        // text is in the tooltip: the short line itself is never cut.
+        '.dsh-autorestart-save-notice__reason{',
+        '  min-width:0;',
+        '  overflow:hidden;',
+        '  text-overflow:ellipsis;',
+        '}',
+        '.dsh-autorestart-save-notice__close{',
+        '  flex:none;',
+        '  width:20px;',
+        '  height:20px;',
+        '  padding:0;',
+        '  border:none;',
+        '  border-radius:6px;',
+        '  background:transparent;',
+        '  color:inherit;',
+        '  font:inherit;',
+        '  font-size:14px;',
+        '  line-height:18px;',
+        '  cursor:pointer;',
+        '  pointer-events:auto;',
+        '}',
+        '.dsh-autorestart-save-notice__close:hover{',
+        '  background:var(--dsw-alias-bg-layer-2,color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent));',
+        '}',
+        '.dsh-autorestart-save-notice__close:focus-visible{',
+        '  outline:2px solid var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
+        '  outline-offset:2px;',
+        '}',
+        // The fade is decoration: a system that asks for less motion gets none.
+        '@media (prefers-reduced-motion: no-preference){',
+        '  .dsh-autorestart-save-notice{animation:dsh-autorestart-save-notice-in .18s ease-out;}',
+        '}',
+        '@keyframes dsh-autorestart-save-notice-in{',
+        '  from{opacity:0;transform:translate(-50%,-4px);}',
+        '  to{opacity:1;transform:translate(-50%,0);}',
+        '}',
+      ].join('\n')
+
+      /** Inject the stylesheet of the receipt exactly once. */
+      function ensureSaveNoticeStyle() {
+        if (typeof document === 'undefined' || !document.head) return
+        try {
+          if (document.getElementById(SAVE_NOTICE_STYLE_ID)) return
+          const style = document.createElement('style')
+          style.id = SAVE_NOTICE_STYLE_ID
+          style.textContent = SAVE_NOTICE_CSS
+          document.head.appendChild(style)
+        } catch {
+          // Without the stylesheet the line is still readable, just plainer.
+        }
+      }
+
+      /**
+       * THE RECEIPT LINE: a fixed strip at the top of the window.
+       *
+       * It is registered on `shell.overlay` (the frame-wide floating layer),
+       * so it sits above every column and is not clipped by the settings
+       * column it was triggered from. It renders NOTHING until a save came
+       * back from the Host — the first render and every poll are silent.
+       *
+       * @param {object} props the Host's props: `t` (the translator of the
+       *   registered locale, handed to a slot entry that declares `locale`)
+       */
+      function SaveNoticeOverlay(props) {
+        const t = makeTranslate(props && typeof props.t === 'function' ? props.t : translate)
+        const notice = useSaveNotice()
+        if (!notice) return null
+        ensureSaveNoticeStyle()
+        const saved = notice.kind === 'ok'
+        return h(
+          'div',
+          {
+            className: 'dsh-autorestart-save-notice'
+              + (saved ? ' dsh-autorestart-save-notice--ok' : ' dsh-autorestart-save-notice--failed'),
+            role: saved ? 'status' : 'alert',
+            'aria-live': saved ? 'polite' : 'assertive',
+            'data-dsh-autorestart-save-notice': saved ? 'ok' : 'failed',
+            'data-dsh-autorestart-save-notice-at': notice.atText,
+            // The strip never eats a click (the top bar stays usable); only
+            // the close button below does.
+            style: { pointerEvents: 'none' },
+          },
+          h(
+            'span',
+            { className: 'dsh-autorestart-save-notice__title' },
+            saved ? t('settings.saveNotice.saved') : t('settings.saveNotice.failed'),
+          ),
+          h('span', { className: 'dsh-autorestart-save-notice__time' }, notice.atText),
+          saved || notice.reason === ''
+            ? null
+            : h(
+              'span',
+              {
+                className: 'dsh-autorestart-save-notice__reason',
+                'data-dsh-autorestart-save-notice-reason': 'true',
+                // A reason can be long: the tooltip carries all of it.
+                title: notice.reason,
+              },
+              notice.reason,
+            ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-autorestart-save-notice__close',
+              'data-dsh-autorestart-save-notice-close': 'true',
+              onClick: clearSaveNotice,
+              title: t('settings.saveNotice.dismiss'),
+              'aria-label': t('settings.saveNotice.dismiss'),
+              style: { pointerEvents: 'auto' },
+            },
+            '×',
+          ),
+        )
+      }
+
       function AutorestartSection(props) {
         const status = useSleepStatus()
         const info = useSharedInfo(true)
@@ -4805,6 +5560,9 @@
          * back with a fresh poll — so the controls never show a value the
          * Host did not take.
          *
+         * ONLY the Host's answer (`ok: true`) makes the window say "Saved":
+         * picking a value, rendering the page and polling it stay silent.
+         *
          * @param {object} changes the keys to write
          */
         const save = async (changes) => {
@@ -4823,12 +5581,31 @@
                 ? (body.message || body.error || String(response.status))
                 : String(response.status)
               setError(fill(t('settings.error'), { message }))
+              // The Host refused the write: the red line keeps the reason
+              // until the next change works (or the user closes it).
+              publishSaveFailure(message)
               return
             }
+            if (!body || typeof body !== 'object' || body.ok !== true) {
+              // The request came back, but the Host did not confirm it: a
+              // "saved" line here would be a lie.
+              const reason = body && typeof body === 'object'
+                ? String(body.message || body.error || '')
+                : ''
+              setError(fill(t('settings.error'), {
+                message: reason === '' ? String(response.status) : reason,
+              }))
+              publishSaveFailure(reason)
+              return
+            }
+            // The receipt is there: now the window may say "Saved".
+            publishSaveSaved()
             // Read the new values back from the Host.
             await pollSleepOnce()
           } catch (failure) {
-            setError(fill(t('settings.error'), { message: describeError(failure) }))
+            const message = describeError(failure)
+            setError(fill(t('settings.error'), { message }))
+            publishSaveFailure(message)
           } finally {
             setBusy(false)
           }
@@ -6735,6 +7512,16 @@
           // The countdown overlay: a frame-wide floating layer above every
           // column.
           ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-sleep-overlay', order: 60 }, SleepOverlay))
+          // THE CENTRED OVERLAY of a running restart: the stage (waiting / the
+          // backup with its real megabytes and its progress bar / restarting /
+          // back) in the middle of the interface, so the composer row can stay
+          // one short clipped line. It draws NOTHING when no restart is staged.
+          ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-restart-overlay', order: 55, locale: NS }, RestartOverlay))
+          // The receipt of a settings change: ONE fixed line at the top of the
+          // WINDOW, so the user sees "Saved" (or the reason it was not saved)
+          // while the settings page is scrolled and while a dropdown is open.
+          // It is a frame-wide overlay, so no column can clip it.
+          ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-save-notice', order: 65, locale: NS }, SaveNoticeOverlay))
         },
         // The named exports of this module (the client module system hands
         // `factory(require) -> exports` to every importer).

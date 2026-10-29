@@ -490,8 +490,13 @@
     // from the Host's real measurements. There is no copy for `waiting`: no
     // card is drawn while the gate merely waits.
     'restart.overlay.snapshotting': 'DSH 重启前备份中',
-    'restart.overlay.size': '{done} / {total} MB',
-    'restart.overlay.sizeDone': '{done} MB',
+    // The unit travels WITH the number (KB or MB, chosen by the size): a 92 KB
+    // profile must never be rounded down to "0 MB".
+    'restart.overlay.size': '{done} / {total}',
+    'restart.overlay.sizeDone': '{done}',
+    // THE RECEIPT: the copy is over, and the card says so for 1.2 s — the user
+    // reported "I never saw the backup" although it really happened.
+    'restart.overlay.snapshotDone': '重启前备份完成（{size}）',
     'restart.overlay.restarting': '正在重启…',
     'restart.overlay.back': '已回来',
   }
@@ -828,8 +833,9 @@
     'restart.stage.back': 'Back',
     // The centred overlay of a running restart.
     'restart.overlay.snapshotting': 'Backing up before DSH restart',
-    'restart.overlay.size': '{done} / {total} MB',
-    'restart.overlay.sizeDone': '{done} MB',
+    'restart.overlay.size': '{done} / {total}',
+    'restart.overlay.sizeDone': '{done}',
+    'restart.overlay.snapshotDone': 'Pre-restart backup done ({size})',
     'restart.overlay.restarting': 'Restarting…',
     'restart.overlay.back': 'Back again',
   }
@@ -2170,22 +2176,176 @@
   }
 
   /**
-   * The megabytes of the copy, ONE decimal at most, NO unit ("12.3", "40").
+   * A SIZE, WITH THE UNIT THAT FITS IT: "92 KB", "156 MB", "12.3 MB", "0 B".
    *
-   * The overlay prints "12.3 / 40 MB": the unit is written once instead of
-   * twice, so the line stays short enough to never be wrapped or cut. A whole
-   * number keeps no ".0" — "40 MB" is what a reader expects, not "40.0 MB".
+   * WHY the unit is chosen here (user report, 2026-10-29): a hosted profile is
+   * only 92 KB. Printed in megabytes that is "0.1 MB" at best and "0 MB" after
+   * rounding — the size of a real backup would have looked like nothing at all.
+   * So: below 1 MB the number is KB, below 1 KB it is B, and a whole number of
+   * megabytes keeps no ".0".
    *
    * @param {number|null|undefined} bytes
    * @returns {string} '' when the Host did not measure anything
    */
-  function overlayMegabytes(bytes) {
+  function formatOverlaySize(bytes) {
     // No measurement is NOT a measurement of zero: a missing byte count must
     // never be printed as "0" (Number(null) is 0, which is exactly the trap).
     if (bytes === null || bytes === undefined || bytes === '') return ''
     const value = Number(bytes)
     if (!Number.isFinite(value) || value < 0) return ''
-    return String(Math.round((value / (1024 * 1024)) * 10) / 10)
+    if (value < 1024) return Math.round(value) + ' B'
+    if (value < 1024 * 1024) return Math.round(value / 1024) + ' KB'
+    return String(Math.round((value / (1024 * 1024)) * 10) / 10) + ' MB'
+  }
+
+  /**
+   * HOW LONG THE CARD IS OWED TO THE USER (milliseconds).
+   *
+   * THE REPORT (user, 2026-10-29): the backup of a hosted profile is 92 KB and
+   * takes ~5 ms, so the card was on screen for a blink — "I never saw the
+   * backup", although it really happened. These two numbers are a DISPLAY rule
+   * only: they never delay the copy and they never delay the restart.
+   */
+  const SNAPSHOT_MIN_VISIBLE_MS = 800
+  const SNAPSHOT_DONE_MS = 1200
+
+  /**
+   * The empty display clock of the card.
+   *
+   * @returns {{ stage: string, startedAt: number, bytes: number|null, total: number|null, percent: number|null, doneAt: number, receiptGiven: boolean }}
+   */
+  function emptyOverlayClock() {
+    return { stage: '', startedAt: 0, bytes: null, total: null, percent: null, doneAt: 0, receiptGiven: false }
+  }
+
+  /**
+   * WHAT THE CARD SHOWS NOW — a pure function of the Host report and the page's
+   * own clock.
+   *
+   * THE RULE, in order:
+   *   1. the copy runs (phase snapshotting): the card counts up with the real
+   *      bytes; the clock remembers when it started and how big it got;
+   *   2. the copy is over and the host is going down (phase restarting):
+   *      a. this page SAW the copy → its card stays for at least
+   *         SNAPSHOT_MIN_VISIBLE_MS, then the receipt;
+   *      b. this page did NOT see it (a 92 KB profile is copied in ~5 ms while
+   *         the page polls every 2 s) → the receipt straight away, using the
+   *         size the Host carried over: the user must learn that a backup
+   *         happened;
+   *   3. the receipt itself lasts SNAPSHOT_DONE_MS, then the ordinary card of
+   *      the stage takes over;
+   *   4. anything else (a cancelled copy, phase waiting, no restart at all):
+   *      nothing is owed — a "done" receipt for a cancelled backup would be a
+   *      lie.
+   *
+   * @param {object} state the clock (see emptyOverlayClock)
+   * @param {{ phase?: string, pending?: boolean, progress?: object|null, snapshotBytes?: number|null }} report
+   * @param {number} now
+   * @returns {{ state: object, card: { kind: string, bytes: number|null, total?: number|null, percent?: number|null }|null }}
+   */
+  function advanceOverlayClock(state, report, now) {
+    const clock = state && typeof state === 'object' && typeof state.stage === 'string'
+      ? state
+      : emptyOverlayClock()
+    const phase = report && typeof report.phase === 'string' ? report.phase : ''
+    const pending = Boolean(report && report.pending === true)
+    const progress = report && report.progress && typeof report.progress === 'object' ? report.progress : null
+    const number = (value) => {
+      if (value === null || value === undefined || value === '') return null
+      const parsed = Number(value)
+      return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : null
+    }
+    const bytes = progress === null ? null : number(progress.bytes)
+    const total = progress === null ? null : number(progress.total)
+    const percent = progress !== null && Number.isFinite(Number(progress.percent))
+      ? Math.max(0, Math.min(100, Math.round(Number(progress.percent))))
+      : null
+    const reportedSize = report === null || report === undefined ? null : number(report.snapshotBytes)
+
+    // (0) Nothing is running: the clock is empty again, so the NEXT restart owes
+    // its own receipt.
+    if (!pending) return { state: emptyOverlayClock(), card: null }
+    if (phase === 'waiting') return { state: emptyOverlayClock(), card: null }
+
+    // (1) The copy runs.
+    if (phase === 'snapshotting') {
+      const fresh = clock.stage !== 'snapshot'
+      const nextBytes = bytes === null ? clock.bytes : Math.max(clock.bytes === null ? 0 : clock.bytes, bytes)
+      const nextTotal = total === null ? clock.total : total
+      const nextPercent = percent === null ? clock.percent : percent
+      const unchanged = !fresh
+        && clock.bytes === nextBytes
+        && clock.total === nextTotal
+        && clock.percent === nextPercent
+        && clock.receiptGiven === false
+      const next = unchanged
+        ? clock
+        : {
+          stage: 'snapshot',
+          startedAt: fresh ? now : clock.startedAt,
+          bytes: nextBytes,
+          total: nextTotal,
+          percent: nextPercent,
+          doneAt: 0,
+          receiptGiven: false,
+        }
+      return { state: next, card: { kind: 'snapshot', bytes: next.bytes, total: next.total, percent: next.percent } }
+    }
+
+    // Anything that is not "the host is going down" means the restart is over or
+    // was called off: nothing is owed (the back card has its own rule).
+    if (phase !== 'restarting') return { state: emptyOverlayClock(), card: null }
+
+    // (2a) The copy ended just now — hold its card for the minimum, then the
+    // receipt.
+    if (clock.stage === 'snapshot') {
+      const heldUntil = clock.startedAt + SNAPSHOT_MIN_VISIBLE_MS
+      if (now < heldUntil) {
+        return {
+          state: clock,
+          card: { kind: 'snapshot', bytes: clock.bytes, total: clock.total, percent: clock.percent },
+        }
+      }
+      const done = { ...clock, stage: 'done', doneAt: now, receiptGiven: true }
+      return { state: done, card: { kind: 'done', bytes: clock.bytes } }
+    }
+
+    // (3) The receipt is on screen.
+    if (clock.stage === 'done') {
+      if (now < clock.doneAt + SNAPSHOT_DONE_MS) {
+        return { state: clock, card: { kind: 'done', bytes: clock.bytes } }
+      }
+      return { state: { ...emptyOverlayClock(), receiptGiven: true }, card: null }
+    }
+
+    // (2b) The copy happened, but this page never saw it: say it anyway.
+    if (clock.receiptGiven !== true && reportedSize !== null && reportedSize > 0) {
+      const started = {
+        stage: 'done',
+        startedAt: now,
+        bytes: reportedSize,
+        total: null,
+        percent: null,
+        doneAt: now,
+        receiptGiven: true,
+      }
+      return { state: started, card: { kind: 'done', bytes: reportedSize } }
+    }
+
+    return { state: clock, card: null }
+  }
+
+  /**
+   * When the card must be redrawn even if no poll arrives (ms), or null.
+   *
+   * @param {object} state the clock
+   * @returns {number|null}
+   */
+  function overlayClockDeadline(state) {
+    if (!state || typeof state !== 'object') return null
+    if (state.stage === 'snapshot') return state.startedAt + SNAPSHOT_MIN_VISIBLE_MS
+    if (state.stage === 'done') return state.doneAt + SNAPSHOT_DONE_MS
+    return null
   }
 
   /**
@@ -2243,7 +2403,14 @@
     isRestartOverlayPhase,
     restartPillStageText,
     restartOverlayTitle,
-    overlayMegabytes,
+    // The size with the unit that fits it, and the display clock that keeps the
+    // card on screen long enough to be read.
+    formatOverlaySize,
+    emptyOverlayClock,
+    advanceOverlayClock,
+    overlayClockDeadline,
+    SNAPSHOT_MIN_VISIBLE_MS,
+    SNAPSHOT_DONE_MS,
     // The TRANSLATOR: the Host's one when it answers, the built-in dictionary
     // when it does not (a key name is never shown).
     makeTranslate,
@@ -3745,67 +3912,56 @@
       /**
        * THE CENTRED OVERLAY OF A RESTART — the stage, on the interface itself.
        *
-       * WHY (user report, 2026-10-29): the stage was only on the composer row,
-       * one clipped line inside a 22px toolbar. On a narrow window it read
-       * "正在等待所有会话空闲…" and the rest was cut off; the user could not
-       * tell a slow backup from a dead button. The detail therefore moved onto
-       * the middle of the conversation, where a fixed 320px card has room for
-       * a short line, a real progress bar and the measured megabytes.
+       * WHY (first report): the stage lived in the composer row, one clipped line
+       * inside a 22px toolbar, where the sentence was cut off by an ellipsis.
        *
-       * WHAT IS DRAWN, AND WHEN (the whole rule):
-       *   snapshotting  "DSH 重启前备份中" + the progress bar + "12.3 / 40 MB" + "31%"
-       *   restarting    "正在重启…"  (and it stays: the host is on its way out)
-       *   back          "已回来", for 1.5s, and only for a restart THIS page
-       *                 really watched (a leftover value must not draw a card)
-       *   waiting       NOTHING AT ALL: the gate merely waits, nothing is in
-       *                 progress, and the pill already says "待重启 · 等待 N 个会话"
-       *   idle          NOTHING AT ALL
+       * WHY IT HAS A CLOCK (second report, 2026-10-29): the card was never seen at
+       * all. The backup of a hosted profile is 92 KB and takes ~5 ms, while the
+       * page polls every 2 s — the card existed for less than one frame of the
+       * user's attention. The backup really happened; nobody could tell.
        *
-       * And a running stage counts only while the restart is really PENDING
-       * (`pendingRestart`): the stage a previous restart left in the state file
-       * is not an action, and a card for it would be the very thing the user
-       * complained about.
+       * SO the card is drawn from a DISPLAY CLOCK (advanceOverlayClock):
+       *   snapshotting  the card counts up with the real bytes, and once it has
+       *                 been on screen it stays for at least
+       *                 SNAPSHOT_MIN_VISIBLE_MS;
+       *   after the copy a receipt says "重启前备份完成（92 KB）" for
+       *                 SNAPSHOT_DONE_MS — on a page that never saw the copy too,
+       *                 because the Host carries the measured size across the
+       *                 stage change;
+       *   restarting    "正在重启…" until the host is really gone;
+       *   back          "已回来", for 1.5s, and only for a restart THIS page saw;
+       *   waiting/idle  NOTHING: the gate merely waits, nothing is in progress.
        *
-       * IT LIVES ON THIS PAGE ONLY. The component reads the shared per-page
-       * poll and writes nothing anywhere (no localStorage, no global marker):
-       * an interface that is opened again asks its host again, so it shows the
-       * stage the host is really in — never a remembered one.
+       * The clock is a DISPLAY rule only: it never delays the copy and it never
+       * delays the restart.
        *
-       * It never covers the input: `pointer-events: none` on the card (see
-       * RESTART_OVERLAY_CSS) means every click goes to the interface below.
+       * IT LIVES ON THIS PAGE ONLY (no localStorage, no global marker), it never
+       * covers the input (pointer-events: none), and it never cuts a word.
        */
       function RestartOverlay() {
         const info = useSharedInfo(true)
         const t = makeTranslate(translate)
+        // The display clock: how long each card is owed to the user.
+        const [clock, setClock] = useState(emptyOverlayClock)
         // The stage said goodbye: the card folds away once, and only once.
         const [backGone, setBackGone] = useState(false)
-        // DID THIS PAGE WATCH A RESTART IN PROGRESS? `state.json` keeps the
-        // stage of the last restart, so a page that is opened afterwards reads
-        // a LEFTOVER value. A card that says "已回来" ten minutes later would
-        // be a lie, so the goodbye card is only drawn for a restart this page
-        // really saw running.
+        // DID THIS PAGE WATCH A RESTART IN PROGRESS? A page opened afterwards
+        // reads a LEFTOVER stage from the state file and must draw nothing.
         const [sawRunning, setSawRunning] = useState(false)
+        // Wakes the card up when a hold expires: the minimum shown time and the
+        // receipt are timers, not poll events.
+        const [, setTick] = useState(0)
 
         const stage = info && info.restartPhase && typeof info.restartPhase === 'object' ? info.restartPhase : null
         const phase = stage && typeof stage.phase === 'string' ? stage.phase : ''
-        // A RESTART THAT IS REALLY PENDING. `state.json` keeps the stage of the
-        // last restart; the request itself is what says "something is going on
-        // right now". The Host keeps it non-null through the snapshot and until
-        // the process is gone, so this costs nothing in the real flow — and it
-        // is the difference between a live card and a leftover one.
         const pending = Boolean(info && info.pendingRestart === true)
-        // THE ONLY TWO STAGES THAT ARE "SOMETHING IS REALLY HAPPENING": the
-        // snapshot is being written, or the host is on its way out.
         const running = pending && (phase === 'snapshotting' || phase === 'restarting')
 
         useEffect(() => {
           if (running) setSawRunning(true)
         }, [running])
 
-        // "已回来" is a MOMENT, not a state: it is shown for 1.5s and then the
-        // card disappears. Every other stage stays exactly as long as the Host
-        // keeps reporting it — a restarting host keeps its card (the interface
-        // is about to vanish with it).
+        // "已回来" is a MOMENT, not a state: 1.5s and then the card is gone.
         useEffect(() => {
           if (phase !== 'back') {
             setBackGone(false)
@@ -3815,36 +3971,64 @@
           return () => clearTimeout(timer)
         }, [phase])
 
-        // THE CARD IS ONLY DRAWN WHILE SOMETHING IS REALLY IN PROGRESS:
-        //   snapshotting / restarting   the backup runs, or the host goes down;
-        //   back                        only for a restart THIS page watched,
-        //                               and only for 1.5s.
-        // Everything else draws NOTHING — no card while the gate merely waits
-        // (`waiting`, which is the pill's business), and no card for the stage a
-        // previous restart left behind in the state file.
-        const visible = running || (phase === 'back' && sawRunning)
-        if (!visible) return null
-        if (phase === 'back' && backGone) return null
+        const now = Date.now()
+        const report = {
+          phase,
+          pending,
+          progress: stage && stage.progress && typeof stage.progress === 'object' ? stage.progress : null,
+          snapshotBytes: stage && Number.isFinite(Number(stage.snapshotBytes)) ? Number(stage.snapshotBytes) : null,
+        }
+        const view = advanceOverlayClock(clock, report, now)
+        // Persist the clock the moment it moves, so the minimum shown time and
+        // the receipt survive the next poll.
+        useEffect(() => {
+          if (view.state !== clock) setClock(view.state)
+        }, [view.state])
 
-        const progress = stage.progress && typeof stage.progress === 'object' ? stage.progress : null
-        const bytes = progress !== null && Number.isFinite(Number(progress.bytes)) ? Number(progress.bytes) : null
-        const total = progress !== null && Number.isFinite(Number(progress.total)) ? Number(progress.total) : null
-        const percent = progress !== null && Number.isFinite(Number(progress.percent))
-          ? Math.max(0, Math.min(100, Math.round(Number(progress.percent))))
-          : null
+        // …and wake up when a hold is over, so the card leaves on time even when
+        // no poll happens in between.
+        const deadline = overlayClockDeadline(view.state)
+        useEffect(() => {
+          if (deadline === null) return undefined
+          const delay = Math.max(0, deadline - Date.now()) + 20
+          const timer = setTimeout(() => setTick((value) => value + 1), delay)
+          return () => clearTimeout(timer)
+        }, [deadline])
 
-        const title = restartOverlayTitle(stage, t)
-        let detail = null
+        const card = view.card
+        // The receipt is only drawn when there is a size to quote: without a
+        // measurement the card says nothing instead of "0 MB".
+        const holdTitle = card === null
+          ? ''
+          : (card.kind === 'done'
+            ? (formatOverlaySize(card.bytes) === ''
+              ? ''
+              : fill(t('restart.overlay.snapshotDone'), { size: formatOverlaySize(card.bytes) }))
+            : t('restart.overlay.snapshotting'))
+
+        const ordinaryRestarting = holdTitle === '' && phase === 'restarting' && pending
+        const ordinaryBack = holdTitle === '' && phase === 'back' && sawRunning && !backGone
+        if (holdTitle === '' && !ordinaryRestarting && !ordinaryBack) return null
+
+        const cardKind = holdTitle === ''
+          ? (ordinaryBack ? 'back' : 'restarting')
+          : (card !== null && card.kind === 'done' ? 'done' : 'snapshot')
+        let title = holdTitle
+        if (cardKind === 'restarting') title = t('restart.overlay.restarting')
+        if (cardKind === 'back') title = restartOverlayTitle(stage, t)
+
         let bar = null
-        if (phase === 'snapshotting') {
-          // The numbers are the ones the copy loop really measured; when there
-          // is no measurement yet, the card shows no number at all (an invented
+        let detail = null
+        if (cardKind === 'snapshot' && card !== null) {
+          // The numbers are the ones the copy loop really measured; when there is
+          // no measurement yet, the card shows no number at all (an invented
           // progress bar is worse than none).
-          const done = bytes === null ? '' : overlayMegabytes(bytes)
-          const all = total === null ? '' : overlayMegabytes(total)
+          const done = card.bytes === null ? '' : formatOverlaySize(card.bytes)
+          const all = card.total === null ? '' : formatOverlaySize(card.total)
           const sizeText = done === ''
             ? ''
             : (all === '' ? fill(t('restart.overlay.sizeDone'), { done }) : fill(t('restart.overlay.size'), { done, total: all }))
+          const percent = card.percent === null ? null : card.percent
           bar = h(
             'div',
             {
@@ -3879,7 +4063,12 @@
             role: 'status',
             'aria-live': 'polite',
             'data-dsh-autorestart-restart-overlay': 'true',
+            // THE HOST PHASE (what the restart is doing) …
             'data-dsh-autorestart-restart-overlay-phase': phase,
+            // … and WHAT IS ON THE CARD: holding the snapshot card while the
+            // host is already restarting is a normal state now, and so is the
+            // receipt of a copy this page never saw.
+            'data-dsh-autorestart-restart-overlay-card': cardKind,
           },
           h(
             'p',

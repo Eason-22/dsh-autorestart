@@ -2714,6 +2714,9 @@ const titleOfSummary = (item) => {
       at: record && typeof record === 'object' ? record.at : null,
       progress: record && typeof record === 'object' ? record.progress : null,
       blocking: record && typeof record === 'object' && Number.isFinite(record.blocked) ? record.blocked : blocked,
+      // The measured size of the pre-restart snapshot: it survives the stage
+      // change, so a page that missed the copy can still report it.
+      snapshotBytes: record && typeof record === 'object' ? record.snapshotBytes : null,
       now: Date.now(),
     })
   }
@@ -4384,6 +4387,8 @@ const titleOfSummary = (item) => {
         // How many tasks still hold the gate: the centred overlay prints the
         // number, so it travels as a number and not only inside `text`.
         blocking: info.blocking,
+        // The size of the pre-restart snapshot, on every stage (bytes).
+        snapshotBytes: info.snapshotBytes,
         progress: info.progress === null
           ? null
           : { files: info.progress.files, bytes: info.progress.bytes, total: info.progress.total, percent: info.progress.percent, ageMs: info.progress.ageMs },

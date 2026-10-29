@@ -334,8 +334,9 @@
     },
     "overlay": {
       "snapshotting": "DSH 重启前备份中",
-      "size": "{done} / {total} MB",
-      "sizeDone": "{done} MB",
+      "size": "{done} / {total}",
+      "sizeDone": "{done}",
+      "snapshotDone": "重启前备份完成（{size}）",
       "restarting": "正在重启…",
       "back": "已回来"
     }

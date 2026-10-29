@@ -1,22 +1,37 @@
-﻿<#
+<#
 .SYNOPSIS
-  dsh-autorestart 的急救开关：DSH 起不来的时候，不用 DSH 也能把本插件摘掉（或装回去）。
+  The dsh-autorestart emergency switch: take this plugin out (or put it back)
+  when DSH does not come up.
 
 .DESCRIPTION
-  “刚打开插件，DSH 就起不来了” 是插件最难受的时刻：修它需要它自己。
-  这个脚本只动一个文件 —— 桌面版 profile 的 package.json —— 而且只动一个数组：
-  `dsh.profile.bundles`。
+  "I enabled the plugin and DSH does not start any more" is the hardest moment
+  for a plugin: fixing it needs the plugin itself. This script touches ONE
+  file - the package.json of the desktop profile - and ONE array in it:
+  `dsh.profile.bundles`.
 
-    - disable：从 bundles 里拿掉 "dsh-autorestart"（本来就不在 → 报告“已经禁用”，不算失败）；
-    - enable ：把 "dsh-autorestart" 加回 bundles（已经在 → 报告“已经启用”）；
-    - status ：只读，打印现在在不在 bundles 里。
+    - disable: take "dsh-autorestart" out of the bundles (it was not there
+      anyway -> report "already disabled", that is not a failure);
+    - enable : put "dsh-autorestart" back into the bundles (it was already
+      there -> report "already enabled");
+    - status : read only, prints whether it is in the bundles right now.
 
-  两条硬规矩：
+  Two hard rules:
 
-    1. 写之前先备份成 `package.json.bak-emergency-<yyyyMMdd-HHmmss>`；
-    2. 写完之后重新解析一遍 JSON 校验；校验不过就用备份回滚，并且如实报错。
+    1. the file is backed up as `package.json.bak-emergency-<yyyyMMdd-HHmmss>`
+       before anything is written;
+    2. after writing, the JSON is parsed again and checked; if the check
+       fails, the backup is put back and the failure is reported honestly.
 
-  文件的缩进、行尾和末尾换行都原样保留（改的是文本，不是重新序列化整个 JSON）。
+  The indentation, the line endings and the trailing newline of the file are
+  kept as they are (the text is edited, the JSON is not re-serialized).
+
+  LANGUAGE: this file is pure ASCII on purpose. Windows PowerShell 5.1 reads a
+  UTF-8 file without a byte order mark as ANSI, so one Chinese character
+  inside the script turns into mojibake and the script dies with a ParserError
+  before it does anything. The Chinese wording lives in
+  scripts\rescue-strings.zh.json (UTF-8, no BOM) and is read at runtime; if
+  that file is missing or broken, every message falls back to English and the
+  script says so.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File .\emergency-toggle.ps1 -Action status
@@ -25,28 +40,75 @@
   powershell -NoProfile -ExecutionPolicy Bypass -File .\emergency-toggle.ps1 -Action disable
 
 .NOTES
-  Windows PowerShell 5.1 就能跑（没有用 6.0+ 的语法），双击的 .cmd 入口也是它。
+  Windows PowerShell 5.1 is enough (nothing from 6.0+ is used); the .cmd entry
+  point double-clicked by the user is that one too.
 #>
 [CmdletBinding()]
 param(
-  # 要做什么。
+  # What to do.
   [ValidateSet('disable', 'enable', 'status')]
   [string] $Action = 'status',
 
-  # 只打印“将会怎么写”，不落盘。
+  # Only print what would be written, change nothing.
   [switch] $DryRun,
 
-  # 要操作的 package.json（测试和别的 profile 用）。
+  # The package.json to work on (for tests and for other profiles).
   [string] $PackageJson = (Join-Path $env:USERPROFILE '.dsh\profiles\desktop\package.json')
 )
 
 $ErrorActionPreference = 'Stop'
 
-# 本插件在 bundles 里的名字。
+# The name of this plugin inside the bundles.
 $PackageName = 'dsh-autorestart'
 
-# 装回去时插在它后面（位置其实无所谓，但有个锚点更稳）。
+# The anchor it is put back after (the position does not matter, but an anchor
+# is steadier than the end of the array).
 $AnchorName = 'dsh-github-guard'
+
+# ---------------------------------------------------------------------------
+# The Chinese strings: read from rescue-strings.zh.json, fall back to English.
+# ---------------------------------------------------------------------------
+
+$script:Strings = $null
+$script:StringsError = ''
+
+function Initialize-Strings {
+  $path = Join-Path $PSScriptRoot 'rescue-strings.zh.json'
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    $script:StringsError = (T 'common.stringsMissingEn' 'the Chinese strings file is missing: {0} (falling back to English messages)') -f $path
+    return
+  }
+  try {
+    # Read as UTF-8 explicitly: Get-Content would use the console code page.
+    $text = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+    $script:Strings = $text | ConvertFrom-Json
+  } catch {
+    $script:StringsError = (T 'common.stringsBrokenEn' 'the Chinese strings file could not be read: {0} (falling back to English messages)') -f $_.Exception.Message
+    $script:Strings = $null
+  }
+}
+
+# Look a string up. The English fallback is right here in the script, so a
+# missing key (or a broken strings file) never stops the rescue.
+function T {
+  param([string] $Key, [string] $Fallback)
+  if ($null -ne $script:Strings) {
+    $node = $script:Strings
+    foreach ($part in $Key.Split('.')) {
+      if ($null -eq $node) { break }
+      $property = $node.PSObject.Properties[$part]
+      if ($null -eq $property) { $node = $null; break }
+      $node = $property.Value
+    }
+    if ($null -ne $node) {
+      $text = [string] $node
+      if ($text -ne '') { return $text }
+    }
+  }
+  return $Fallback
+}
+
+Initialize-Strings
 
 function Say {
   param([string] $Text, [string] $Color = 'Gray')
@@ -55,22 +117,22 @@ function Say {
 
 function Fail {
   param([string] $Text)
-  Write-Host ('急救开关失败：' + $Text) -ForegroundColor Red
+  Write-Host ((T 'emergency.failed' 'the emergency switch failed: {0}') -f $Text) -ForegroundColor Red
   exit 1
 }
 
 # ---------------------------------------------------------------------------
-# 文本工具：只在 bundles 数组那一段里动刀，其余字节一个不碰。
+# Text helpers: only the bundles array is touched, every other byte stays.
 # ---------------------------------------------------------------------------
 
-# bundles 数组的方括号位置。
+# The square brackets of the bundles array.
 function Get-ArrayRange {
   param([string] $Text)
   $marker = '"bundles"'
   $markerIndex = $Text.IndexOf($marker)
-  if ($markerIndex -lt 0) { throw 'package.json 里没有 bundles 这一项' }
+  if ($markerIndex -lt 0) { throw 'package.json has no bundles entry' }
   $open = $Text.IndexOf('[', $markerIndex)
-  if ($open -lt 0) { throw 'bundles 不是数组' }
+  if ($open -lt 0) { throw 'bundles is not an array' }
   $depth = 0
   $inString = $false
   $escaped = $false
@@ -89,10 +151,11 @@ function Get-ArrayRange {
       if ($depth -eq 0) { return @($open, $i) }
     }
   }
-  throw 'bundles 数组没有闭合'
+  throw 'the bundles array is not closed'
 }
 
-# 数组里的每一项：名字、缩进、有没有逗号、它在文本里的位置。
+# Every item of the array: the name, the indentation, the comma, the position
+# in the text.
 function Get-Items {
   param([string] $Text, [int] $Open, [int] $Close)
   $body = $Text.Substring($Open + 1, $Close - $Open - 1)
@@ -101,7 +164,7 @@ function Get-Items {
   foreach ($match in [regex]::Matches($body, $pattern)) {
     $lineStart = $Open + 1 + $match.Index
     $lineEnd = $lineStart + $match.Length
-    # 这一行末尾的行尾符（\r\n 或 \n）算在行里。
+    # The line ending of that line (\r\n or \n) belongs to the line.
     if ($lineEnd -lt $Text.Length -and $Text[$lineEnd] -eq "`n") { $lineEnd++ }
     $nameGroup = $match.Groups['name']
     $commaGroup = $match.Groups['comma']
@@ -110,7 +173,8 @@ function Get-Items {
       Indent     = $match.Groups['indent'].Value
       HasComma   = ($commaGroup.Value -eq ',')
       CommaIndex = $commaGroup.Index
-      # 名字后面那个右引号之后的位置（插逗号用）。
+      # The position right after the closing quote of the name (where the
+      # comma goes).
       ContentEnd = $nameGroup.Index + $nameGroup.Length + 1
       LineStart  = $lineStart
       LineEnd    = $lineEnd
@@ -119,7 +183,7 @@ function Get-Items {
   return $items
 }
 
-# 某一行的缩进（用来插出同样式子的新行）。
+# The indentation of a line (so a new line can look the same).
 function Get-LineIndent {
   param([string] $Text, [int] $Index)
   $start = $Text.LastIndexOf("`n", [Math]::Max(0, $Index - 1))
@@ -133,7 +197,7 @@ function Get-LineIndent {
   return $indent
 }
 
-# 文件用的行尾符。
+# The line ending the file uses.
 function Get-LineEnding {
   param([string] $Text)
   if ($Text.Contains("`r`n")) { return "`r`n" }
@@ -141,11 +205,15 @@ function Get-LineEnding {
 }
 
 # ---------------------------------------------------------------------------
-# 开始。
+# Start.
 # ---------------------------------------------------------------------------
 
+if ($script:StringsError -ne '') {
+  Write-Host ('WARNING: ' + $script:StringsError) -ForegroundColor Yellow
+}
+
 if (-not (Test-Path -LiteralPath $PackageJson -PathType Leaf)) {
-  Fail ('找不到 profile 的 package.json：' + $PackageJson)
+  Fail ((T 'emergency.notFound' 'the package.json of the profile cannot be found: {0}') -f $PackageJson)
 }
 
 $path = (Resolve-Path -LiteralPath $PackageJson).Path
@@ -156,7 +224,7 @@ $raw = [System.IO.File]::ReadAllText($path)
 try {
   $document = $raw | ConvertFrom-Json
 } catch {
-  Fail ('这个 package.json 不是合法的 JSON：' + $_.Exception.Message)
+  Fail ((T 'emergency.badJson' 'this package.json is not valid JSON: {0}') -f $_.Exception.Message)
 }
 
 $bundles = @()
@@ -168,20 +236,20 @@ if ($null -ne $document -and $null -ne $document.dsh -and $null -ne $document.ds
 
 $present = ($bundles -contains $PackageName)
 
-Say ('文件：' + $path)
+Say ((T 'emergency.file' 'file: {0}') -f $path)
 
 if ($Action -eq 'status') {
-  if ($present) { Say ('已启用：' + $PackageName + ' 在 bundles 里。') 'Green' }
-  else { Say ('已禁用：' + $PackageName + ' 不在 bundles 里。') 'Yellow' }
+  if ($present) { Say ((T 'emergency.enabled' 'enabled: {0} is in the bundles.') -f $PackageName) 'Green' }
+  else { Say ((T 'emergency.disabled' 'disabled: {0} is not in the bundles.') -f $PackageName) 'Yellow' }
   exit 0
 }
 
 if ($Action -eq 'enable' -and -not $hasBundles) {
-  Fail '这个 profile 里没有 dsh.profile.bundles 列表，装不回去（请手动加一行 "dsh-autorestart"）。'
+  Fail (T 'emergency.noBundles' 'this profile has no dsh.profile.bundles list, so the plugin cannot be put back (please add a line "dsh-autorestart" by hand).')
 }
 
 # ---------------------------------------------------------------------------
-# 算出新的文本。
+# Work out the new text.
 # ---------------------------------------------------------------------------
 
 $new = $raw
@@ -191,14 +259,15 @@ $eol = Get-LineEnding $raw
 
 if ($Action -eq 'disable') {
   if (-not $present) {
-    Say ('已经禁用：bundles 里本来就没有 ' + $PackageName + '（没有改动任何文件）。') 'Yellow'
+    Say ((T 'emergency.alreadyDisabled' 'already disabled: {0} was not in the bundles anyway (no file was changed).') -f $PackageName) 'Yellow'
     exit 0
   }
   $target = $items | Where-Object { $_.Name -eq $PackageName } | Select-Object -First 1
-  if ($null -eq $target) { Fail ('在 bundles 里找不到 ' + $PackageName) }
+  if ($null -eq $target) { Fail ((T 'emergency.notInBundles' '{0} cannot be found in the bundles') -f $PackageName) }
   $shift = 0
   if (-not $target.HasComma) {
-    # 它是数组里的最后一项：前一项的逗号要去掉，否则 JSON 非法。
+    # It is the last item of the array: the comma of the item before it has to
+    # go, otherwise the JSON is invalid.
     $previous = $items | Where-Object { $_.LineEnd -le $target.LineStart } | Select-Object -Last 1
     if ($null -ne $previous -and $previous.HasComma) {
       $new = $new.Remove($previous.CommaIndex, 1)
@@ -206,11 +275,11 @@ if ($Action -eq 'disable') {
     }
   }
   $new = $new.Remove($target.LineStart + $shift, $target.LineEnd - $target.LineStart)
-  $summary = ('把 ' + $PackageName + ' 从 bundles 里拿掉')
+  $summary = (T 'emergency.summaryRemove' 'take {0} out of the bundles') -f $PackageName
 } else {
   # enable
   if ($present) {
-    Say ('已经启用：' + $PackageName + ' 本来就在 bundles 里（没有改动任何文件）。') 'Yellow'
+    Say ((T 'emergency.alreadyEnabled' 'already enabled: {0} was in the bundles anyway (no file was changed).') -f $PackageName) 'Yellow'
     exit 0
   }
   $anchor = $items | Where-Object { $_.Name -eq $AnchorName } | Select-Object -First 1
@@ -221,7 +290,8 @@ if ($Action -eq 'disable') {
       $insertAt = $anchor.LineEnd
       $line = $anchor.Indent + '"' + $PackageName + '",'
     } else {
-      # 锚点是最后一项：先给它补上逗号，再插新的一项（新的这项不带逗号）。
+      # The anchor is the last item: give it a comma first, then insert the new
+      # item (the new one has no comma).
       $new = $new.Insert($anchor.ContentEnd, ',')
       $insertAt = $anchor.LineEnd + 1
       $line = $anchor.Indent + '"' + $PackageName + '"'
@@ -237,39 +307,40 @@ if ($Action -eq 'disable') {
       }
       $line = $last.Indent + '"' + $PackageName + '"'
     } else {
-      # 数组是空的。
+      # The array is empty.
       $insertAt = $range[1]
       $line = (Get-LineIndent $raw $range[1]) + '  "' + $PackageName + '"'
     }
   }
   $new = $new.Insert($insertAt, $line + $eol)
-  $summary = ('把 ' + $PackageName + ' 加回 bundles')
+  $summary = (T 'emergency.summaryAdd' 'put {0} back into the bundles') -f $PackageName
 }
 
 if ($DryRun) {
-  Say ('[试运行] 将会' + $summary + '。') 'Cyan'
-  Say ('[试运行] 将会写入：' + $path) 'Cyan'
-  Say ('[试运行] 将会先备份成：' + $path + '.bak-emergency-<时间戳>') 'Cyan'
-  Say ('[试运行] 没有改动任何文件。') 'Cyan'
+  Say ((T 'emergency.dryRunWill' '[dry run] would {0}.') -f $summary) 'Cyan'
+  Say ((T 'emergency.dryRunWrite' '[dry run] would write: {0}') -f $path) 'Cyan'
+  Say ((T 'emergency.dryRunBackup' '[dry run] would back it up as: {0}.bak-emergency-<timestamp>') -f $path) 'Cyan'
+  Say (T 'emergency.dryRunNoChange' '[dry run] no file was changed.') 'Cyan'
   exit 0
 }
 
 # ---------------------------------------------------------------------------
-# 写：先备份，再写，然后重新解析校验；校验不过就回滚。
+# Write: back up first, write, then parse and check again; on a failure, roll
+# back.
 # ---------------------------------------------------------------------------
 
 $backup = $path + '.bak-emergency-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
 try {
   Copy-Item -LiteralPath $path -Destination $backup -Force
 } catch {
-  Fail ('备份失败（没有动原文件）：' + $_.Exception.Message)
+  Fail ((T 'emergency.backupFailed' 'the backup failed (the original file was not touched): {0}') -f $_.Exception.Message)
 }
 
 try {
   $encoding = New-Object System.Text.UTF8Encoding($hasBom)
   [System.IO.File]::WriteAllText($path, $new, $encoding)
 } catch {
-  Fail ('写入失败（备份在 ' + $backup + '）：' + $_.Exception.Message)
+  Fail ((T 'emergency.writeFailed' 'the write failed (the backup is at {0}): {1}') -f $backup, $_.Exception.Message)
 }
 
 try {
@@ -280,23 +351,23 @@ try {
     $names = @($parsed.dsh.profile.bundles)
   }
   if ($Action -eq 'enable' -and -not ($names -contains $PackageName)) {
-    throw '写完之后 bundles 里仍然没有 ' + $PackageName
+    throw ('after writing, the bundles still do not hold ' + $PackageName)
   }
   if ($Action -eq 'disable' -and ($names -contains $PackageName)) {
-    throw '写完之后 bundles 里仍然有 ' + $PackageName
+    throw ('after writing, the bundles still hold ' + $PackageName)
   }
 } catch {
-  # 校验不过：用备份把原文件放回去，然后如实报错。
+  # The check failed: put the original file back, then report honestly.
   try {
     Copy-Item -LiteralPath $backup -Destination $path -Force
-    Say ('已经用备份回滚：' + $backup) 'Yellow'
+    Say ((T 'emergency.rolledBack' 'the backup was put back: {0}') -f $backup) 'Yellow'
   } catch {
-    Fail ('校验失败，而且回滚也失败了（备份在 ' + $backup + '）：' + $_.Exception.Message)
+    Fail ((T 'emergency.verifyFailedNoRollback' 'the check failed and the rollback failed too (the backup is at {0}): {1}') -f $backup, $_.Exception.Message)
   }
-  Fail ('校验失败（已回滚）：' + $_.Exception.Message)
+  Fail ((T 'emergency.verifyFailedRolledBack' 'the check failed (it was rolled back): {0}') -f $_.Exception.Message)
 }
 
-Say ('已经' + $summary + '。') 'Green'
-Say ('备份：' + $backup) 'Gray'
-Say ('请重启 DSH 才会生效。') 'Gray'
+Say ((T 'emergency.done' 'done: {0}.') -f $summary) 'Green'
+Say ((T 'emergency.backup' 'backup: {0}') -f $backup) 'Gray'
+Say (T 'emergency.restartHint' 'restart DSH for it to take effect.') 'Gray'
 exit 0

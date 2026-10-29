@@ -17,10 +17,12 @@ DSH 起不来的时候，这个文件夹里的东西**不用 DSH 自己**就能�
 powershell -NoProfile -ExecutionPolicy Bypass -File .\drill-rescue.ps1
 ```
 
-在临时目录里造一个假 profile → 故意把 `package.json` 写坏、删掉插件目录 → 调 `restore-profile.ps1` 救回来 → 断言（能解析、插件版本读得到、`broken-*` 目录存在、非 profile 目录被拒绝、目标目录不存在时被拒绝、"配置说装了却没装"时必须失败）→ 清理临时目录。全绿时退出码是 0。
+在临时目录里造一个假 profile → 故意把 `package.json` 写坏、删掉插件目录 → 调 `restore-profile.ps1` 救回来 → 断言（能解析、插件版本读得到、`broken-*` 目录存在、非 profile 目录被拒绝、目标目录不存在时被拒绝、"配置说装了却没装"时必须失败、**还原脚本的输出里真的有中文**（证明中文是从 JSON 读出来的））→ 清理临时目录。全绿时退出码是 0。
 
 演练的目录纪律（**并发跑也互不干扰**）：每次跑用 `%TEMP%\dsh-rescue-drill-<完整 GUID>` 这个**唯一**目录，目录由本次演练自己创建（已存在就报错退出），目录里放一个独占的锁文件 `.lock`；清理**只删自己那一个绝对路径**（`Remove-Item -LiteralPath`），**绝不按前缀/通配符扫 `%TEMP%`** —— 那会踩到同时在跑的另一个演练。成功、断言不过、抛错中断，走的都是同一个 `finally`，一定会清理；清理不干净就把残留路径打印出来。
 
 `restore-profile.ps1` 的参数：`-DryRun`（只打印将要做什么）、`-Snapshot <目录>`（指定某一份快照）、`-ProfileDir <路径>`（演练用的隔离目录）、`-StateDir <路径>`（插件状态目录，默认 `<DSH_HOME>\storages\dsh-autorestart`）。`DSH_HOME` 可以用环境变量覆盖，但目标 profile 目录必须已经在那儿。
 
-> 编码规矩：两个 `.ps1` 必须是 **UTF-8 带 BOM**（Windows PowerShell 5.1 按 ANSI 读无 BOM 的 UTF-8，中文会变乱码、直接 ParserError），`.cmd` 必须是**纯 ASCII**。这条规矩由 `test/scripts-encoding.test.mjs` 天天盯着，脚本被改坏了一眼就能看见。
+> 编码规矩（为什么 `.ps1` 是英文的）：这台机器只有 Windows PowerShell 5.1，它按 ANSI 读**不带 BOM 的 UTF-8** —— 脚本里只要有一个中文字符，整份文件就变乱码、直接 ParserError，脚本连第一步都走不到。这个坑一天之内踩了三次，所以现在是**根治**而不是"记得加 BOM"：**所有 `.ps1` 必须是纯 ASCII（所有字节 < 128、不带 BOM）**，`.cmd` 同样纯 ASCII。面向用户的中文全部放在**一个文件**里：`scripts/rescue-strings.zh.json`（UTF-8、**不带 BOM**，带 BOM 会让 `JSON.parse` 直接失败），脚本运行时读它；读不到或读坏了，脚本会用**英文兜底**继续跑，并明确打印一行英文说明（不会崩成乱码）。
+>
+> **以后要改文案，改 `rescue-strings.zh.json`，不要往 `.ps1` 里塞中文。** 键名是语义化的（`restore.title`、`restore.brokenKept`、`drill.passed`、`emergency.failed` …），值里可以用 `{0}`、`{1}` 这类占位符。这条规矩由 `test/scripts-encoding.test.mjs` 天天盯着：它会扫目录（不是写死文件名）、断言每个 `.ps1` 都是纯 ASCII、断言 JSON 无 BOM 且能被 `JSON.parse`、断言每个 `.ps1` 里用到的键在 JSON 里都存在、断言 `.cmd` 调的是 `powershell.exe` 而不是 `pwsh`。

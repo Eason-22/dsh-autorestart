@@ -1,55 +1,131 @@
-﻿<#
+<#
 .SYNOPSIS
-  dsh-autorestart 自救包的演练：在隔离目录里把 profile 弄坏，再救回来。
+  The dsh-autorestart rescue drill: break a profile on purpose, rescue it.
 
 .DESCRIPTION
-  这个脚本**只碰自己这一次的临时目录**，绝不读写用户正在用的 profile。
+  This script only touches ITS OWN temporary directory. It never reads or
+  writes the profile the user is running.
 
-  目录纪律（并发跑的硬要求）：
+  Directory discipline (the hard requirement for running two drills at once):
 
-    - 目录名是 `%TEMP%\dsh-rescue-drill-<完整 GUID>`，每次唯一；
-    - 目录由本次演练**自己创建**（不带 -Force）：已经存在就说明有人在用，直接报错退出；
-    - 目录里放一个锁文件 `.lock`（独占创建）：锁拿不到就直接报错退出，不继续；
-    - 清理**只删自己那一个绝对路径**（`Remove-Item -LiteralPath`），
-      **绝不按前缀/通配符扫 `%TEMP%`** —— 那会踩到同时在跑的另一个演练；
-    - 成功、断言不过、抛错中断，走的是**同一个 finally**：一定会清理，
-      清理不干净就把残留路径打印出来。
+    - the directory is %TEMP%\dsh-rescue-drill-<full GUID>, unique every run;
+    - the drill creates it itself (without -Force): if it is already there,
+      somebody else is using it and the drill stops;
+    - the drill puts a lock file .lock inside it (created exclusively): no lock,
+      no drill;
+    - the cleanup deletes ONLY its own absolute path (Remove-Item -LiteralPath),
+      never a wildcard scan of %TEMP% - that would delete the directory of a
+      drill that is running at the same time;
+    - success, a failed assertion and a crash all go through the same finally:
+      the directory is always cleaned, and a directory that could not be
+      cleaned is printed so a human can remove it.
 
-  演练内容：
+  What the drill does:
 
-    1. 造一个假的 profile（package.json + cordis.patch.yml + 插件树）；
-    2. 造一份快照当"备份源"（放在假的 DSH_HOME 下面），另外再放一个
-       **更新但没有 manifest** 的目录 —— 快照选择必须跳过它；
-    3. **故意弄坏**：把 package.json 写成非法 JSON，删掉插件目录；
-    4. 调用 restore-profile.ps1 还原；
-    5. 断言：package.json 能解析、bundles 有内容、插件版本读得到、
-       `broken-*` 证据目录存在、非 profile 目录被拒绝、目标目录不存在时被拒绝、
-       "配置说装了但没装"时必须失败、盘符根目录被拒绝、系统目录被拒绝、
-       试运行不落盘、脚本文件的编码规矩没破；
-       **拒绝类断言同时检查输出里的拒绝原因**（不只看退出码 ——
-       脚本自己解析失败也是非 0 退出码，那种假通过必须被抓住）；
-    6. 清理（finally）。
+    1. builds a fake profile (package.json + cordis.patch.yml + plugin tree);
+    2. builds a snapshot (the "backup source") plus a NEWER directory that has
+       no manifest - the snapshot selection has to skip it;
+    3. breaks it on purpose: package.json becomes invalid JSON and the plugin
+       directory is deleted;
+    4. calls restore-profile.ps1;
+    5. asserts: package.json parses, the bundles have content, the plugin
+       version can be read, the broken-* evidence directory exists, a directory
+       that is not a profile is refused, a missing target is refused, "the
+       configuration says it is installed but it is not" must fail, a drive root
+       is refused, a system directory is refused, a dry run changes nothing,
+       the encoding rules hold;
+    6. cleans up (finally).
+
+  LANGUAGE: this file is pure ASCII on purpose. Windows PowerShell 5.1 reads a
+  UTF-8 file without a byte order mark as ANSI, so one Chinese character
+  inside the script turns into mojibake and the script dies with a ParserError
+  before it does anything. The Chinese wording lives in
+  scripts\rescue-strings.zh.json (UTF-8, no BOM) and is read at runtime; if
+  that file is missing or broken, every message falls back to English and the
+  script says so.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File .\drill-rescue.ps1
 
 .NOTES
-  全部断言通过时退出码是 0；任何一条断言不过，退出码是 1。
+  Every assertion passing means exit code 0; any failing assertion means 1.
 #>
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
 
-# 演练用的插件名。
+# The plugin the drill works with.
 $PackageName = 'dsh-autorestart'
 
-# 断言失败的条数（最后用它决定退出码）。
+# How many assertions failed (the exit code is decided by it).
 $script:Failures = 0
 
-# 本次演练自己的目录，以及"这个目录是不是我建的"。
+# This run's own directory, and whether this run is the one that created it.
 $script:TempRoot = ''
 $script:OwnsTempRoot = $false
+
+# ---------------------------------------------------------------------------
+# The Chinese strings: read from rescue-strings.zh.json, fall back to English.
+# ---------------------------------------------------------------------------
+
+$script:Strings = $null
+$script:StringsError = ''
+
+function Initialize-Strings {
+  $path = Join-Path $PSScriptRoot 'rescue-strings.zh.json'
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    $script:StringsError = (T 'common.stringsMissingEn' 'the Chinese strings file is missing: {0} (falling back to English messages)') -f $path
+    return
+  }
+  try {
+    # Read as UTF-8 explicitly: Get-Content would use the console code page.
+    $text = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+    $script:Strings = $text | ConvertFrom-Json
+  } catch {
+    $script:StringsError = (T 'common.stringsBrokenEn' 'the Chinese strings file could not be read: {0} (falling back to English messages)') -f $_.Exception.Message
+    $script:Strings = $null
+  }
+}
+
+# The node behind a dotted key, or $null when the key does not exist.
+function Get-StringNode {
+  param([string] $Key)
+  if ($null -eq $script:Strings) { return $null }
+  $node = $script:Strings
+  foreach ($part in $Key.Split('.')) {
+    if ($null -eq $node) { return $null }
+    $property = $node.PSObject.Properties[$part]
+    if ($null -eq $property) { return $null }
+    $node = $property.Value
+  }
+  return $node
+}
+
+# Look a string up. The English fallback is right here in the script, so a
+# missing key (or a broken strings file) never stops the drill.
+function T {
+  param([string] $Key, [string] $Fallback)
+  $node = Get-StringNode $Key
+  if ($null -ne $node) {
+    $text = [string] $node
+    if ($text -ne '') { return $text }
+  }
+  return $Fallback
+}
+
+# The same, for a list of strings (the words a refusal has to contain).
+function TA {
+  param([string] $Key, [string[]] $Fallback)
+  $node = Get-StringNode $Key
+  if ($null -ne $node) {
+    $items = @($node)
+    if ($items.Count -gt 0) { return $items }
+  }
+  return $Fallback
+}
+
+Initialize-Strings
 
 function Say {
   param([string] $Text, [string] $Color = 'Gray')
@@ -59,31 +135,34 @@ function Say {
 function Assert-True {
   param([string] $Name, [bool] $Condition, [string] $Detail = '')
   if ($Condition) {
-    Write-Host ('  [通过] ' + $Name) -ForegroundColor Green
+    Write-Host ((T 'drill.assertPass' '  [pass] {0}') -f $Name) -ForegroundColor Green
     return
   }
-  $suffix = ''
-  if ($Detail -ne '') { $suffix = ' —— ' + $Detail }
-  Write-Host ('  [失败] ' + $Name + $suffix) -ForegroundColor Red
+  if ($Detail -eq '') {
+    Write-Host ((T 'drill.assertFailPlain' '  [fail] {0}') -f $Name) -ForegroundColor Red
+  } else {
+    Write-Host ((T 'drill.assertFail' '  [fail] {0} - {1}') -f $Name, $Detail) -ForegroundColor Red
+  }
   $script:Failures += 1
 }
 
-# 拒绝类断言：**退出码之外，还必须看到具体的拒绝原因**。
+# A rejection has to be more than a non-zero exit code.
 #
-# 只看退出码是不够的：BOM 丢了、脚本被改坏、语法错误 —— 这些都会让脚本
-# 非 0 退出，但那是"脚本自己没跑起来"，不是"脚本正确地拒绝了"。
-# 2026-10-29 那次 BOM 事故就是这么产生了假通过：脚本满屏 ParserError，
-# 退出码也是 1，看起来像"拒绝了"，其实什么都没拒绝。
-# 所以这里同时检查输出里有没有**该场景该有的那句话**。
+# An exit code on its own is not enough: a missing BOM, a broken script, a
+# syntax error - all of those make the script exit non-zero without it having
+# refused anything. That is how the BOM incident of 2026-10-29 produced a
+# false pass: the screen was full of ParserErrors, the exit code was 1, and
+# that looked like "the script refused on purpose".
+# So the output has to contain the sentence that belongs to this scenario.
 function Assert-Refused {
   param([string] $Name, $Result, [string[]] $Keywords)
   if ($null -eq $Result) {
-    Write-Host ('  [失败] ' + $Name + ' —— 没有拿到运行结果') -ForegroundColor Red
+    Write-Host ((T 'drill.refusedNoResult' '  [fail] {0} - there is no result to look at') -f $Name) -ForegroundColor Red
     $script:Failures += 1
     return
   }
   if ($Result.Code -eq 0) {
-    Write-Host ('  [失败] ' + $Name + ' —— 退出码是 0，脚本根本没有拒绝') -ForegroundColor Red
+    Write-Host ((T 'drill.refusedNotRefused' '  [fail] {0} - the exit code is 0, the script did not refuse at all') -f $Name) -ForegroundColor Red
     $script:Failures += 1
     return
   }
@@ -93,14 +172,15 @@ function Assert-Refused {
     if ($text -like ('*' + $keyword + '*')) { $hit = $keyword; break }
   }
   if ($hit -eq '') {
-    Write-Host ('  [失败] ' + $Name + ' —— 退出码是 ' + $Result.Code + '，但输出里没有拒绝原因（期望其中之一：' + ($Keywords -join '、') + '）') -ForegroundColor Red
+    Write-Host ((T 'drill.refusedNoReason' '  [fail] {0} - the exit code is {1}, but the output does not say why it refused (one of these was expected: {2})') -f $Name, $Result.Code, ($Keywords -join ', ')) -ForegroundColor Red
     $script:Failures += 1
     return
   }
-  Write-Host ('  [通过] ' + $Name + ' —— 退出码 ' + $Result.Code + '，输出里有拒绝原因「' + $hit + '」') -ForegroundColor Green
+  Write-Host ((T 'drill.refusedOk' '  [pass] {0} - exit code {1}, the output says why: {2}') -f $Name, $Result.Code, $hit) -ForegroundColor Green
 }
 
-# 读一个文件；读不到就返回空字符串（绝不让断言自己先崩掉）。
+# Read a file; an unreadable file gives an empty string (an assertion must
+# never take the drill down with it).
 function Read-TextOrEmpty {
   param([string] $Path)
   try {
@@ -110,7 +190,8 @@ function Read-TextOrEmpty {
   }
 }
 
-# 写一个 UTF-8（无 BOM）的文件（父目录顺手建好）。
+# Write a UTF-8 file without a byte order mark (the parent directory is
+# created on the way).
 function Write-TextFile {
   param([string] $Path, [string] $Text)
   $parent = Split-Path -Parent $Path
@@ -120,32 +201,30 @@ function Write-TextFile {
   [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
 }
 
-# ---------------------------------------------------------------------------
-# 本次演练自己的目录：唯一 + 独占
-# ---------------------------------------------------------------------------
-
 $scriptRoot = $PSScriptRoot
 $restoreScript = Join-Path $scriptRoot 'restore-profile.ps1'
 $cmdScript = Join-Path $scriptRoot 'restore-profile.cmd'
 
 if (-not (Test-Path -LiteralPath $restoreScript -PathType Leaf)) {
-  Write-Host ('演练失败：找不到 ' + $restoreScript) -ForegroundColor Red
+  Write-Host ((T 'drill.noScript' 'the drill cannot run: {0} was not found') -f $restoreScript) -ForegroundColor Red
   exit 1
 }
 
-# 完整 GUID：每次跑都是一个新的目录，两个演练不会撞在一起。
+# A full GUID: every run gets a new directory, two drills never collide.
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('dsh-rescue-drill-' + ([guid]::NewGuid().ToString('N')))
 $script:TempRoot = $tempRoot
-# 锁文件放在目录**里面**：目录没了锁也没了，不会给 %TEMP% 留下同前缀的残留。
+# The lock file lives INSIDE the directory: when the directory is gone the lock
+# is gone too, so %TEMP% never keeps a leftover with the same prefix.
 $lockFile = Join-Path $tempRoot '.lock'
 
-# 重入保护 1：目录已经在 = 有人（或上一次没清干净的自己）在用。
+# Re-entry guard 1: the directory is already there, so somebody (or a run of
+# ours that did not clean up) is using it.
 if (Test-Path -LiteralPath $tempRoot) {
-  Write-Host ('演练失败：这个演练目录已经被占用了：' + $tempRoot) -ForegroundColor Red
+  Write-Host ((T 'drill.dirOccupied' 'the drill cannot run: this drill directory is already taken: {0}') -f $tempRoot) -ForegroundColor Red
   exit 1
 }
 
-# 跑还原脚本。
+# Run the restore script.
 function Invoke-Restore {
   param([string[]] $Arguments, [string] $Label)
   $previous = $ErrorActionPreference
@@ -153,22 +232,23 @@ function Invoke-Restore {
   $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $restoreScript @Arguments 2>&1
   $code = $LASTEXITCODE
   $ErrorActionPreference = $previous
-  Say ('--- 还原脚本的输出（' + $Label + '）---') 'DarkGray'
+  Say ((T 'drill.outputHeader' '--- the output of the restore script ({0}) ---') -f $Label) 'DarkGray'
   foreach ($line in $output) { Write-Host ('    ' + [string]$line) }
-  Say '--- 输出结束 ---' 'DarkGray'
+  Say (T 'drill.outputEnd' '--- end of the output ---') 'DarkGray'
   return [pscustomobject]@{ Code = $code; Output = ($output | Out-String) }
 }
 
 try {
-  # --- 重入保护 2：目录由本次演练自己建（不带 -Force，已存在会失败） ---
+  # --- Re-entry guard 2: this drill creates the directory itself (without
+  # -Force, so an existing directory is an error). ---
   New-Item -ItemType Directory -Path $tempRoot -ErrorAction Stop | Out-Null
 
-  # --- 重入保护 3：锁文件独占创建 ---
+  # --- Re-entry guard 3: the lock file is created exclusively. ---
   $lock = [System.IO.File]::Open($lockFile, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
   $lock.Dispose()
   $script:OwnsTempRoot = $true
 
-  Say ('演练目录：' + $tempRoot) 'Cyan'
+  Say ((T 'drill.dir' 'drill directory: {0}') -f $tempRoot) 'Cyan'
 
   $fakeHome = Join-Path $tempRoot 'dsh-home'
   $stateDir = Join-Path (Join-Path $fakeHome 'storages') 'dsh-autorestart'
@@ -177,7 +257,7 @@ try {
   $pluginDir = Join-Path (Join-Path $profileDir 'node_modules') $PackageName
 
   # -------------------------------------------------------------------------
-  # 1. 造一个假的 profile
+  # 1. Build a fake profile
   # -------------------------------------------------------------------------
 
   New-Item -ItemType Directory -Path $pluginDir -Force | Out-Null
@@ -200,7 +280,8 @@ try {
   Write-TextFile (Join-Path $pluginDir 'index.js') "export default 1`n"
 
   # -------------------------------------------------------------------------
-  # 2. 造快照（备份源）+ 一个更新但没有 manifest 的目录（快照选择必须跳过它）
+  # 2. Build the snapshot (the backup source) plus a newer directory without a
+  #    manifest - the snapshot selection has to skip it.
   # -------------------------------------------------------------------------
 
   $goodStamp = '2026-10-29T01-00-00-000Z'
@@ -227,40 +308,44 @@ try {
   }
   Write-TextFile (Join-Path $goodSnapshot 'manifest.json') ($manifest | ConvertTo-Json -Depth 5)
 
-  # 诱饵：更新的目录，但没有 manifest —— 而且它的 package.json 是另一份。
+  # The decoy: a newer directory, but no manifest - and a different package.json.
   New-Item -ItemType Directory -Path (Join-Path $decoySnapshot 'config') -Force | Out-Null
   Write-TextFile (Join-Path $decoySnapshot 'config\package.json') '{"name":"should-not-be-used"}'
 
   # -------------------------------------------------------------------------
-  # 3. 故意弄坏
+  # 3. Break it on purpose
   # -------------------------------------------------------------------------
 
   Write-TextFile (Join-Path $profileDir 'package.json') '{ "name": "drill-profile", oops '
   Remove-Item -LiteralPath $pluginDir -Recurse -Force
 
-  Say '已经故意弄坏：package.json 写成非法 JSON，插件目录删掉了。' 'Yellow'
+  Say (T 'drill.broke' 'broken on purpose: package.json is invalid JSON now and the plugin directory is gone.') 'Yellow'
 
   # -------------------------------------------------------------------------
-  # 跑还原脚本
+  # Run the restore script
   # -------------------------------------------------------------------------
 
-  # 试运行：只打印，不落盘。
-  $dryRun = Invoke-Restore -Arguments @('-DryRun', '-ProfileDir', $profileDir, '-StateDir', $stateDir) -Label '试运行'
-  Assert-True '试运行退出码是 0' ($dryRun.Code -eq 0) ('退出码 ' + $dryRun.Code)
-  Assert-True '试运行没有改动 package.json' ((Read-TextOrEmpty (Join-Path $profileDir 'package.json')) -like '*oops*')
-  Assert-True '试运行没有留下 broken 目录' (@(Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'profile.broken-*').Count -eq 0)
+  # The dry run: it only prints.
+  $dryRun = Invoke-Restore -Arguments @('-DryRun', '-ProfileDir', $profileDir, '-StateDir', $stateDir) -Label 'dry run'
+  Assert-True (T 'drill.assertDryRunExit' 'the dry run exits with 0') ($dryRun.Code -eq 0) ('exit code ' + $dryRun.Code)
+  Assert-True (T 'drill.assertDryRunUntouched' 'the dry run did not touch package.json') ((Read-TextOrEmpty (Join-Path $profileDir 'package.json')) -like '*oops*')
+  Assert-True (T 'drill.assertDryRunNoBroken' 'the dry run left no broken directory') (@(Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'profile.broken-*').Count -eq 0)
 
-  # 真正的还原。
-  $restore = Invoke-Restore -Arguments @('-ProfileDir', $profileDir, '-StateDir', $stateDir) -Label '真正的还原'
-  Assert-True '还原退出码是 0' ($restore.Code -eq 0) ('退出码 ' + $restore.Code)
+  # The real restore.
+  $restore = Invoke-Restore -Arguments @('-ProfileDir', $profileDir, '-StateDir', $stateDir) -Label 'the real restore'
+  Assert-True (T 'drill.assertRestoreExit' 'the restore exits with 0') ($restore.Code -eq 0) ('exit code ' + $restore.Code)
 
   # -------------------------------------------------------------------------
-  # 4. 断言
+  # 4. The assertions
   # -------------------------------------------------------------------------
 
-  Say '断言：' 'Cyan'
+  Say (T 'drill.assertions' 'the assertions:') 'Cyan'
 
-  # 4.1 package.json 能解析。
+  # 4.1 The Chinese wording really comes out of the JSON.
+  $hasChinese = [regex]::IsMatch([string]$restore.Output, '[\u4e00-\u9fff]')
+  Assert-True (T 'drill.assertChineseOutput' 'the output of the restore script contains Chinese (the wording is read from the JSON)') $hasChinese
+
+  # 4.2 package.json parses.
   $restoredPackage = $null
   $parseError = ''
   try {
@@ -268,21 +353,21 @@ try {
   } catch {
     $parseError = $_.Exception.Message
   }
-  Assert-True '还原后 package.json 能解析' ($null -ne $restoredPackage) $parseError
+  Assert-True (T 'drill.assertParses' 'package.json parses after the restore') ($null -ne $restoredPackage) $parseError
 
-  # 4.2 用的是带 manifest 的那份快照，不是更新的那个诱饵。
+  # 4.3 The snapshot with the manifest was used, not the newer decoy.
   $restoredName = ''
   if ($null -ne $restoredPackage) { $restoredName = [string] $restoredPackage.name }
-  Assert-True '用的是带 manifest 的那份快照（跳过了更新的诱饵）' ($restoredName -eq 'drill-profile') ('还原出来的 name 是 "' + $restoredName + '"')
+  Assert-True (T 'drill.assertUsedSnapshot' 'the snapshot with the manifest was used (the newer decoy was skipped)') ($restoredName -eq 'drill-profile') ('the name that came back is "' + $restoredName + '"')
 
-  # 4.3 bundles 有内容。
+  # 4.4 The bundles have content.
   $bundles = @()
   if ($null -ne $restoredPackage -and $null -ne $restoredPackage.dsh -and $null -ne $restoredPackage.dsh.profile -and $null -ne $restoredPackage.dsh.profile.bundles) {
     $bundles = @($restoredPackage.dsh.profile.bundles)
   }
-  Assert-True '还原后 dsh.profile.bundles 有内容' ($bundles.Count -gt 0) ('bundles 数量 ' + $bundles.Count)
+  Assert-True (T 'drill.assertBundles' 'dsh.profile.bundles has content after the restore') ($bundles.Count -gt 0) ('bundles: ' + $bundles.Count)
 
-  # 4.4 插件版本读得到。
+  # 4.5 The plugin version can be read.
   $pluginVersion = ''
   $pluginPkgPath = Join-Path $pluginDir 'package.json'
   if (Test-Path -LiteralPath $pluginPkgPath -PathType Leaf) {
@@ -293,44 +378,48 @@ try {
       $pluginVersion = ''
     }
   }
-  Assert-True '还原后插件版本读得到' ($pluginVersion -ne '') ('版本 "' + $pluginVersion + '"')
-  Assert-True '插件版本是快照里的那一个' ($pluginVersion -eq '0.7.0') ('版本 "' + $pluginVersion + '"')
+  Assert-True (T 'drill.assertVersionReadable' 'the plugin version can be read after the restore') ($pluginVersion -ne '') ('version "' + $pluginVersion + '"')
+  Assert-True (T 'drill.assertVersionSame' 'the plugin version is the one of the snapshot') ($pluginVersion -eq '0.7.0') ('version "' + $pluginVersion + '"')
 
-  # 4.5 broken 证据目录存在，而且里面还是坏掉的那份。
+  # 4.6 The broken evidence directory exists and still holds the broken one.
   $brokenDirs = @(Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'profile.broken-*' -ErrorAction SilentlyContinue)
-  Assert-True 'broken 证据目录存在' ($brokenDirs.Count -ge 1) ('找到 ' + $brokenDirs.Count + ' 个')
+  Assert-True (T 'drill.assertBrokenExists' 'the broken evidence directory exists') ($brokenDirs.Count -ge 1) ('found ' + $brokenDirs.Count)
   if ($brokenDirs.Count -ge 1) {
     $brokenPackagePath = Join-Path $brokenDirs[0].FullName 'package.json'
     $brokenKeeps = (Test-Path -LiteralPath $brokenPackagePath -PathType Leaf) -and ((Read-TextOrEmpty $brokenPackagePath) -like '*oops*')
-    Assert-True 'broken 目录里保留的还是坏掉的那份' $brokenKeeps
+    Assert-True (T 'drill.assertBrokenKeeps' 'the broken directory still holds the broken one') $brokenKeeps
   }
 
-  # 4.6 目录长得不像 profile 的时候，脚本必须拒绝动手，而且要说清楚为什么。
+  # 4.7 A directory that does not look like a profile has to be refused, with
+  #     a reason.
   $notAProfile = Join-Path $tempRoot 'not-a-profile'
   New-Item -ItemType Directory -Path $notAProfile -Force | Out-Null
-  $refused = Invoke-Restore -Arguments @('-ProfileDir', $notAProfile, '-StateDir', $stateDir) -Label '不是 profile 的目录'
-  Assert-Refused '不像 profile 的目录被拒绝（退出码 + 拒绝原因）' $refused @('不像', '不是 profile')
-  Assert-True '被拒绝的时候没有动那个目录' (@(Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'not-a-profile.broken-*').Count -eq 0)
+  $refused = Invoke-Restore -Arguments @('-ProfileDir', $notAProfile, '-StateDir', $stateDir) -Label 'a directory that is not a profile'
+  Assert-Refused (T 'drill.assertNotProfileRefused' 'a directory that is not a profile is refused (exit code + reason)') $refused (TA 'drill.keywords.notProfile' @('does not look like a DSH profile'))
+  Assert-True (T 'drill.assertNotProfileUntouched' 'the refused directory was not touched') (@(Get-ChildItem -LiteralPath $tempRoot -Directory -Filter 'not-a-profile.broken-*').Count -eq 0)
 
-  # 4.7 盘符根目录必须被拒绝。
-  $rootRefused = Invoke-Restore -Arguments @('-ProfileDir', 'C:\', '-StateDir', $stateDir) -Label '盘符根目录'
-  Assert-Refused '盘符根目录被拒绝（退出码 + 拒绝原因）' $rootRefused @('盘符', '根目录')
+  # 4.8 A drive root has to be refused, with a reason.
+  $rootRefused = Invoke-Restore -Arguments @('-ProfileDir', 'C:\', '-StateDir', $stateDir) -Label 'a drive root'
+  Assert-Refused (T 'drill.assertDriveRootRefused' 'a drive root is refused (exit code + reason)') $rootRefused (TA 'drill.keywords.driveRoot' @('drive root'))
 
-  # 4.7b 系统目录必须被拒绝（Windows / Program Files / ProgramData）。
-  # 脚本在碰这些目录之前就拒了 —— 这里只是证明它拒得对。
+  # 4.9 The system directories have to be refused, with a reason (Windows /
+  #     Program Files / ProgramData). The script refuses them before it
+  #     touches them - this only proves that it refuses them the right way.
   foreach ($systemDir in @('C:\Windows', 'C:\Program Files', 'C:\ProgramData')) {
-    $systemRefused = Invoke-Restore -Arguments @('-ProfileDir', $systemDir, '-StateDir', $stateDir) -Label ('系统目录 ' + $systemDir)
-    Assert-Refused ('系统目录 ' + $systemDir + ' 被拒绝（退出码 + 拒绝原因）') $systemRefused @('系统目录', '不允许')
-    Assert-True ('系统目录 ' + $systemDir + ' 原封不动（没被挪走）') (Test-Path -LiteralPath $systemDir -PathType Container)
+    $systemRefused = Invoke-Restore -Arguments @('-ProfileDir', $systemDir, '-StateDir', $stateDir) -Label ('the system directory ' + $systemDir)
+    Assert-Refused ((T 'drill.assertSystemDirRefused' 'the system directory {0} is refused (exit code + reason)') -f $systemDir) $systemRefused (TA 'drill.keywords.systemDir' @('system directory'))
+    Assert-True ((T 'drill.assertSystemDirIntact' 'the system directory {0} is untouched (it was not moved away)') -f $systemDir) (Test-Path -LiteralPath $systemDir -PathType Container)
   }
 
-  # 4.8 目标 profile 目录不存在时必须被拒绝，而且**不许**被创建出来。
+  # 4.10 A target profile that does not exist has to be refused, with a
+  #      reason, and it must NOT be created.
   $missingProfile = Join-Path $tempRoot 'not-there-yet'
-  $missingRefused = Invoke-Restore -Arguments @('-ProfileDir', $missingProfile, '-StateDir', $stateDir) -Label '目标目录不存在'
-  Assert-Refused '目标 profile 目录不存在时被拒绝（退出码 + 拒绝原因）' $missingRefused @('不存在')
-  Assert-True '目标目录不存在时没有把它创建出来' (-not (Test-Path -LiteralPath $missingProfile))
+  $missingRefused = Invoke-Restore -Arguments @('-ProfileDir', $missingProfile, '-StateDir', $stateDir) -Label 'a target that does not exist'
+  Assert-Refused (T 'drill.assertMissingDirRefused' 'a target profile that does not exist is refused (exit code + reason)') $missingRefused (TA 'drill.keywords.missingDir' @('does not exist'))
+  Assert-True (T 'drill.assertMissingDirNotCreated' 'the target was not created') (-not (Test-Path -LiteralPath $missingProfile))
 
-  # 4.9 "配置说装了、实际没装"必须失败：profile 声明了插件，node_modules 里却没有。
+  # 4.11 "the configuration says it is installed but it is not" has to fail:
+  #      the profile lists the plugin, node_modules does not have it.
   $lyingProfile = Join-Path $tempRoot 'lying-profile'
   $lyingState = Join-Path $tempRoot 'state-lying'
   $lyingBackups = Join-Path $lyingState 'backups'
@@ -350,60 +439,70 @@ try {
     bytes    = 64
   }
   Write-TextFile (Join-Path $lyingSnapshot 'manifest.json') ($lyingManifest | ConvertTo-Json -Depth 5)
-  $lying = Invoke-Restore -Arguments @('-ProfileDir', $lyingProfile, '-StateDir', $lyingState) -Label '配置说装了但没装'
-  Assert-Refused '声明了插件却没装 → 还原必须失败（退出码 + 拒绝原因）' $lying @('没通过校验', '校验')
-  Assert-True '声明了插件却没装 → 明确说 broken 目录还在' ($lying.Output -like '*broken*')
+  $lying = Invoke-Restore -Arguments @('-ProfileDir', $lyingProfile, '-StateDir', $lyingState) -Label 'the configuration says it is installed'
+  Assert-Refused (T 'drill.assertLyingRefused' 'a profile that lists the plugin without having it must fail (exit code + reason)') $lying (TA 'drill.keywords.notValidated' @('did not pass the check'))
+  Assert-True (T 'drill.assertLyingBrokenHint' 'the failed restore says where the broken one is') ($lying.Output -like '*broken*')
 
-  # 4.10 交付物的编码规矩：ps1 带 BOM，cmd 是纯 ASCII。
+  # 4.12 The encoding rules of the delivered files: the .ps1 is pure ASCII,
+  #       the .cmd is pure ASCII.
   $ps1Bytes = [System.IO.File]::ReadAllBytes($restoreScript)
-  $hasBom = ($ps1Bytes.Length -ge 3 -and $ps1Bytes[0] -eq 0xEF -and $ps1Bytes[1] -eq 0xBB -and $ps1Bytes[2] -eq 0xBF)
-  Assert-True 'restore-profile.ps1 是 UTF-8 带 BOM' $hasBom
+  $ps1IsAscii = $true
+  foreach ($byte in $ps1Bytes) {
+    if ($byte -gt 127) { $ps1IsAscii = $false; break }
+  }
+  Assert-True (T 'drill.assertPs1Ascii' 'restore-profile.ps1 is pure ASCII (maxByte <= 127)') $ps1IsAscii
   $cmdBytes = [System.IO.File]::ReadAllBytes($cmdScript)
   $cmdIsAscii = $true
   foreach ($byte in $cmdBytes) {
     if ($byte -gt 127) { $cmdIsAscii = $false; break }
   }
-  Assert-True 'restore-profile.cmd 是纯 ASCII' $cmdIsAscii
+  Assert-True (T 'drill.assertCmdAscii' 'restore-profile.cmd is pure ASCII') $cmdIsAscii
 
-  # 4.11 全程只在临时目录里动手（所以根本不需要去读用户真实的 profile）。
+  # 4.13 Everything happened inside the temporary directory (so the real
+  #       profile of the user never has to be read).
   $insideTemp = $true
   if ($brokenDirs.Count -ge 1) {
     $insideTemp = $brokenDirs[0].FullName.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)
   }
-  Assert-True '演练只在临时目录里动手（broken 目录在临时目录下面）' $insideTemp
+  Assert-True (T 'drill.assertOnlyTemp' 'the drill only worked inside the temporary directory') $insideTemp
 
-  # 4.12 演练自己占的目录有一个锁文件（重入保护的证据）。
-  Assert-True '演练目录里有锁文件' (Test-Path -LiteralPath $lockFile -PathType Leaf)
+  # 4.14 The directory of this drill holds a lock file (the evidence of the
+  #       re-entry guard).
+  Assert-True (T 'drill.assertLockFile' 'the drill directory holds a lock file') (Test-Path -LiteralPath $lockFile -PathType Leaf)
 } catch {
-  Write-Host ('演练出错：' + $_.Exception.Message) -ForegroundColor Red
+  Write-Host ((T 'drill.error' 'the drill hit an error: {0}') -f $_.Exception.Message) -ForegroundColor Red
   $script:Failures += 1
 } finally {
   # -------------------------------------------------------------------------
-  # 清理：**只删自己这一个绝对路径**，绝不按前缀/通配符扫 %TEMP%。
+  # The cleanup: ONLY its own absolute path, never a wildcard scan of %TEMP%.
   # -------------------------------------------------------------------------
   if ($script:OwnsTempRoot -and $script:TempRoot -ne '') {
-    Say ('清理临时目录：' + $script:TempRoot) 'DarkGray'
+    Say ((T 'drill.cleanup' 'cleaning up the temporary directory: {0}') -f $script:TempRoot) 'DarkGray'
     try {
       Remove-Item -LiteralPath $script:TempRoot -Recurse -Force -ErrorAction Stop
     } catch {
-      # 清理失败不算演练失败，但要如实说。
+      # A failed cleanup does not fail the drill, but it is reported.
     }
     if (Test-Path -LiteralPath $script:TempRoot) {
-      Write-Host ('临时目录没有清理干净，请自己删掉：' + $script:TempRoot) -ForegroundColor Yellow
+      Write-Host ((T 'drill.notCleaned' 'the temporary directory was not cleaned up, please delete it yourself: {0}') -f $script:TempRoot) -ForegroundColor Yellow
       $script:Failures += 1
     } else {
-      Say '临时目录已清理干净。' 'Green'
+      Say (T 'drill.cleaned' 'the temporary directory is clean.') 'Green'
     }
   }
 }
 
 # ---------------------------------------------------------------------------
-# 结论
+# The result
 # ---------------------------------------------------------------------------
 
+if ($script:StringsError -ne '') {
+  Write-Host ('WARNING: ' + $script:StringsError) -ForegroundColor Yellow
+}
+
 if ($script:Failures -gt 0) {
-  Write-Host ('演练失败：' + $script:Failures + ' 条断言没过。') -ForegroundColor Red
+  Write-Host ((T 'drill.failed' 'the drill failed: {0} assertions did not hold.') -f $script:Failures) -ForegroundColor Red
   exit 1
 }
-Say '演练全部通过：故意弄坏 → 还原 → 校验 → 清理，一整圈跑通了。' 'Green'
+Say (T 'drill.passed' 'the drill passed: break it on purpose, restore it, check it, clean up - the whole round trip works.') 'Green'
 exit 0

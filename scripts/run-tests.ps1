@@ -1,4 +1,4 @@
-﻿# dsh-autorestart — run the plugin's node:test suite with the DSH bundled Node.
+# dsh-autorestart - run the plugin's node:test suite with the DSH bundled Node.
 #
 # There is no `node` on PATH in the DSH desktop environment, so this script uses
 # the runtime that ships with the app. Usage (from anywhere):

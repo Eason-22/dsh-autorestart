@@ -1,29 +1,43 @@
-﻿<#
+<#
 .SYNOPSIS
-  dsh-autorestart 的 profile 快照还原器（自救包的一半）。
+  dsh-autorestart profile snapshot restorer (half of the rescue kit).
 
 .DESCRIPTION
-  DSH 起不来了（插件升级把 profile 弄坏、配置写坏了、node_modules 装崩了），
-  这个脚本把 profile 放回最近一次快照的状态 —— 不依赖 DSH 自己，也不依赖 node。
+  When DSH does not come up (a plugin upgrade broke the profile, the
+  configuration was damaged, node_modules is a mess), this script puts the
+  profile back the way the last snapshot found it. It does not need DSH itself
+  and it does not need node.
 
-  它做四件事，按这个顺序：
+  It does four things, in this order:
 
-    1. 找到要还原的快照（默认：`<stateDir>\backups\` 里最新的一份、带 manifest 的）；
-    2. **先把现在的 profile 整份挪到 `<profileDir>.broken-<yyyyMMdd-HHmmss>`**
-       —— 不覆盖、不删除，出事也还有证据；
-    3. 把快照里的配置文件和插件树复制回 profile；
-    4. **回读校验**：package.json 能解析、dsh.profile.bundles 有内容、
-       dsh-autorestart 的版本号读得到；任何一项不过就如实报错，
-       并且明确告诉你原来那份还在哪个目录里。
+    1. find the snapshot to restore (by default: the newest one under
+       <stateDir>\backups\ that carries a manifest);
+    2. MOVE the current profile to <profileDir>.broken-<yyyyMMdd-HHmmss> first
+       - never overwritten, never deleted, so the evidence survives;
+    3. copy the configuration files and the plugin tree back;
+    4. read the result back: package.json parses, dsh.profile.bundles has
+       content, the version of dsh-autorestart can be read. Anything that does
+       not hold is reported honestly, together with the directory that still
+       holds the old profile.
 
-  两条硬规矩：
+  Two hard rules:
 
-    1. **只动 DSH profile 目录**：默认只认 `<用户主目录>\.dsh\profiles\*`；
-       用 `-ProfileDir` 显式指定别的目录时，也一样拒绝盘符根目录、系统目录、
-       别人的用户目录。目标目录不像 DSH profile（有 package.json 但没有
-       dsh.profile 字段、或者干脆什么都没有）就**拒绝动手**。
-    2. **不自动重启 DSH**：脚本只管把文件放回去，重启由用户自己来 ——
-       一个"救不回来还顺手再弄挂一次"的脚本没有意义。
+    1. ONLY DSH PROFILE DIRECTORIES ARE TOUCHED: by default only
+       <user home>\.dsh\profiles\*; even an explicitly named -ProfileDir is
+       refused when it is a drive root, a system directory or somebody else's
+       user directory. A target that does not look like a DSH profile (no
+       package.json, or a package.json without a dsh.profile section) is
+       REFUSED.
+    2. DSH IS NEVER RESTARTED FOR YOU: the script only puts the files back.
+       A script that "rescues" you and hangs the host again is useless.
+
+  LANGUAGE: this file is pure ASCII on purpose. Windows PowerShell 5.1 reads a
+  UTF-8 file without a byte order mark as ANSI, so a single Chinese character
+  inside the script turns into mojibake and the script dies with a
+  ParserError before it does anything. The Chinese wording therefore lives in
+  scripts\rescue-strings.zh.json (UTF-8, no BOM) and is read at runtime; if
+  that file is missing or broken, every message falls back to the English text
+  below and the script says so.
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File .\restore-profile.ps1
@@ -35,35 +49,82 @@
   powershell -NoProfile -ExecutionPolicy Bypass -File .\restore-profile.ps1 -ProfileDir C:\temp\drill\profile -StateDir C:\temp\drill\state
 
 .NOTES
-  Windows PowerShell 5.1 就能跑（没有用 6.0+ 的语法），双击的 .cmd 入口也是它。
-  规则的同一份实现在 lib/rescue.js 里（node 可以直接 import 测试），
-  scripts/drill-rescue.ps1 负责证明两边行为一致。
+  Windows PowerShell 5.1 is enough (nothing from 6.0+ is used); the .cmd entry
+  point double-clicked by the user is that one too. The same rules exist in
+  lib/rescue.js (node can import and test them directly), and
+  scripts/drill-rescue.ps1 proves that both behave the same way.
 #>
 [CmdletBinding()]
 param(
-  # 只打印"将会怎么做"，不落盘。
+  # Only print what would happen, change nothing.
   [switch] $DryRun,
 
-  # 指定用哪一份快照（默认：最新的、带 manifest 的那份）。
+  # Use this snapshot (default: the newest one that carries a manifest).
   [string] $Snapshot = '',
 
-  # 要还原到哪个 profile 目录（不传就用桌面版默认那个）。
+  # The profile directory to restore into (default: the desktop one).
   [string] $ProfileDir = '',
 
-  # 插件的状态目录（默认：`<DSH_HOME>\storages\dsh-autorestart`）。
+  # The plugin state directory (default: <DSH_HOME>\storages\dsh-autorestart).
   [string] $StateDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
-# 本插件在 profile 和插件树里的名字。
+# The name of this plugin, in the profile and in the plugin tree.
 $PackageName = 'dsh-autorestart'
 
-# 放走旧 profile 之后，它留下的证据目录（失败时要报给用户，所以是全局的）。
+# Where the old profile is kept after it is moved away (the user is told
+# about it when something fails, so it lives in the script scope).
 $script:BrokenDir = ''
 
 # ---------------------------------------------------------------------------
-# 输出
+# The Chinese strings: read from rescue-strings.zh.json, fall back to English.
+# ---------------------------------------------------------------------------
+
+$script:Strings = $null
+$script:StringsError = ''
+
+function Initialize-Strings {
+  $path = Join-Path $PSScriptRoot 'rescue-strings.zh.json'
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    $script:StringsError = (T 'common.stringsMissingEn' 'the Chinese strings file is missing: {0} (falling back to English messages)') -f $path
+    return
+  }
+  try {
+    # Read as UTF-8 explicitly: Get-Content would use the console code page.
+    $text = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8)
+    $script:Strings = $text | ConvertFrom-Json
+  } catch {
+    $script:StringsError = (T 'common.stringsBrokenEn' 'the Chinese strings file could not be read: {0} (falling back to English messages)') -f $_.Exception.Message
+    $script:Strings = $null
+  }
+}
+
+# Look a string up. The English fallback is right here in the script, so a
+# missing key (or a broken strings file) never stops the rescue.
+function T {
+  param([string] $Key, [string] $Fallback)
+  if ($null -ne $script:Strings) {
+    $node = $script:Strings
+    foreach ($part in $Key.Split('.')) {
+      if ($null -eq $node) { break }
+      $property = $node.PSObject.Properties[$part]
+      if ($null -eq $property) { $node = $null; break }
+      $node = $property.Value
+    }
+    if ($null -ne $node) {
+      $text = [string] $node
+      if ($text -ne '') { return $text }
+    }
+  }
+  return $Fallback
+}
+
+Initialize-Strings
+
+# ---------------------------------------------------------------------------
+# Output
 # ---------------------------------------------------------------------------
 
 function Say {
@@ -73,19 +134,19 @@ function Say {
 
 function Fail {
   param([string] $Text)
-  Write-Host ('还原失败：' + $Text) -ForegroundColor Red
+  Write-Host ((T 'restore.failPrefix' 'restore failed: ') + $Text) -ForegroundColor Red
   if ($script:BrokenDir -ne '') {
-    Write-Host ('你原来的 profile 完整地留在这里：' + $script:BrokenDir) -ForegroundColor Yellow
-    Write-Host '（这个目录没有被动过，里面还是你出事之前的样子。）' -ForegroundColor Yellow
+    Write-Host ((T 'restore.brokenKept' 'your old profile is still here: {0}') -f $script:BrokenDir) -ForegroundColor Yellow
+    Write-Host (T 'restore.brokenUntouched' '(that directory was not touched, it still looks like it did before the failure.)') -ForegroundColor Yellow
   }
   exit 1
 }
 
 # ---------------------------------------------------------------------------
-# 路径工具
+# Path helpers
 # ---------------------------------------------------------------------------
 
-# 绝对路径，去掉末尾的分隔符（"C:\" 保留）。
+# An absolute path without the trailing separator ("C:\" keeps it).
 function Resolve-FullPath {
   param([string] $Path)
   if ($null -eq $Path) { return '' }
@@ -100,13 +161,13 @@ function Resolve-FullPath {
   return $full
 }
 
-# 两个路径是不是同一个（Windows 上不区分大小写）。
+# Are two paths the same one? Windows does not care about the case.
 function Test-SamePath {
   param([string] $A, [string] $B)
   return (Resolve-FullPath $A).ToLowerInvariant() -eq (Resolve-FullPath $B).ToLowerInvariant()
 }
 
-# $Child 在 $Parent 里面吗（不含 $Parent 自己）。
+# Is $Child inside $Parent (not counting $Parent itself)?
 function Test-IsInside {
   param([string] $Child, [string] $Parent)
   $child = (Resolve-FullPath $Child).ToLowerInvariant()
@@ -117,7 +178,7 @@ function Test-IsInside {
   return $child.StartsWith($parent)
 }
 
-# 系统目录清单：环境变量优先，系统盘兜底。
+# The system directories: the environment first, the system drive as fallback.
 function Get-SystemDirectories {
   $list = New-Object System.Collections.Generic.List[string]
   $add = {
@@ -143,28 +204,28 @@ function Get-SystemDirectories {
   return $list
 }
 
-# 这个路径为什么不能动？空字符串 = 可以动。
+# Why may this path not be touched? An empty string means: it may.
 function Get-ForbiddenReason {
   param([string] $Target, [string] $HomeDir)
   $dir = Resolve-FullPath $Target
-  if ($dir -eq '') { return '目标路径是空的' }
-  if ($dir -match '^[A-Za-z]:[\\/]?$') { return '拒绝动盘符根目录' }
+  if ($dir -eq '') { return (T 'restore.gateEmptyPath' 'the target path is empty') }
+  if ($dir -match '^[A-Za-z]:[\\/]?$') { return (T 'restore.gateDriveRoot' 'refusing to touch a drive root') }
   $fsRoot = [System.IO.Path]::GetPathRoot($dir)
-  if ($fsRoot -ne '' -and $dir.ToLowerInvariant() -eq $fsRoot.ToLowerInvariant()) { return '拒绝动文件系统根目录' }
-  # 注意：不能叫 $home —— 那是 PowerShell 的只读自动变量。
+  if ($fsRoot -ne '' -and $dir.ToLowerInvariant() -eq $fsRoot.ToLowerInvariant()) { return (T 'restore.gateFsRoot' 'refusing to touch a filesystem root') }
+  # Not $home: that one is a read-only automatic variable in PowerShell.
   $homePath = Resolve-FullPath $HomeDir
-  if ($homePath -ne '' -and (Test-SamePath $dir $homePath)) { return '拒绝动用户主目录本身' }
+  if ($homePath -ne '' -and (Test-SamePath $dir $homePath)) { return (T 'restore.gateHome' 'refusing to touch the home directory itself') }
   foreach ($system in Get-SystemDirectories) {
     if ((Test-SamePath $dir $system) -or (Test-IsInside $dir $system)) {
-      return ('拒绝动系统目录：' + $system)
+      return ((T 'restore.gateSystemDir' 'refusing to touch the system directory: {0}') -f $system)
     }
   }
-  # 别人的用户目录：<Users>\<别人>。
+  # Somebody else's user directory: <Users>\<somebody else>.
   if ($homePath -ne '') {
     $usersRoot = Resolve-FullPath (Join-Path ([System.IO.Path]::GetPathRoot($homePath)) 'Users')
     if ($usersRoot -ne '' -and (Test-IsInside $dir $usersRoot)) {
       if ((Resolve-FullPath (Split-Path -Parent $dir)).ToLowerInvariant() -eq $usersRoot.ToLowerInvariant()) {
-        return '拒绝动别人的用户目录'
+        return (T 'restore.gateOtherUser' "refusing to touch another user's profile")
       }
     }
   }
@@ -172,7 +233,7 @@ function Get-ForbiddenReason {
 }
 
 # ---------------------------------------------------------------------------
-# 目录：DSH home / profiles / state / backups
+# Directories: DSH home / profiles / state / backups
 # ---------------------------------------------------------------------------
 
 function Get-DshHome {
@@ -186,7 +247,7 @@ function Get-ProfilesRoot {
   return (Resolve-FullPath (Join-Path (Get-DshHome) 'profiles'))
 }
 
-# 快照目录。
+# The snapshot directory.
 function Get-BackupsRoot {
   param([string] $State)
   if ($State -ne '') {
@@ -195,14 +256,14 @@ function Get-BackupsRoot {
   return (Resolve-FullPath (Join-Path (Join-Path (Get-DshHome) 'storages\dsh-autorestart') 'backups'))
 }
 
-# 不传 -ProfileDir 时，桌面版 profile 在哪儿。
+# Without -ProfileDir: where is the desktop profile?
 function Get-DefaultProfileDir {
-  # 1) 宿主自己导出的环境变量。
+  # 1) The environment variable the host exports.
   if (-not [string]::IsNullOrWhiteSpace($env:DSH_PROFILE_DIR)) {
     $explicit = Resolve-FullPath $env:DSH_PROFILE_DIR
     if ($explicit -ne '' -and (Test-Path -LiteralPath $explicit -PathType Container)) { return $explicit }
   }
-  # 2) 只有一个 profile 装了本插件 —— 那就是它。
+  # 2) The only profile that has this plugin in it - that is the one.
   $root = Get-ProfilesRoot
   if (Test-Path -LiteralPath $root -PathType Container) {
     $matches = New-Object System.Collections.Generic.List[string]
@@ -221,16 +282,16 @@ function Get-DefaultProfileDir {
     }
     if ($matches.Count -eq 1) { return $matches[0] }
   }
-  # 3) 宿主指定的 profile 名。
+  # 3) The profile name the host asked for.
   if (-not [string]::IsNullOrWhiteSpace($env:DSH_PROFILE)) {
     return (Resolve-FullPath (Join-Path $root $env:DSH_PROFILE.Trim()))
   }
-  # 4) 桌面的默认名字。
+  # 4) The default name on the desktop.
   return (Resolve-FullPath (Join-Path $root 'desktop'))
 }
 
 # ---------------------------------------------------------------------------
-# profile 指纹：这个目录还像不像 DSH profile
+# The profile fingerprint: does this directory still look like a DSH profile?
 # ---------------------------------------------------------------------------
 
 function Get-ProfileFingerprint {
@@ -244,7 +305,7 @@ function Get-ProfileFingerprint {
   if (Test-Path -LiteralPath (Join-Path $base 'node_modules') -PathType Container) { $markers.Add('node_modules') }
 
   $kind = 'not-a-profile'
-  $reason = '这里没有 package.json —— 不像 DSH profile'
+  $reason = (T 'restore.fingerprintNotProfile' 'there is no package.json here - this does not look like a DSH profile')
   if ($hasPackageJson) {
     $parsed = $null
     try {
@@ -254,22 +315,22 @@ function Get-ProfileFingerprint {
     }
     if ($null -ne $parsed -and $null -ne $parsed.dsh -and $null -ne $parsed.dsh.profile) {
       $kind = 'profile'
-      $reason = 'profile 的 package.json 里有 dsh.profile'
+      $reason = (T 'restore.fingerprintProfile' 'the profile package.json carries a dsh.profile section')
     } elseif ($markers.Count -ge 2) {
       $kind = 'broken-profile'
-      $reason = 'profile 坏了（package.json 不再是 profile），但 profile 的文件还在'
+      $reason = (T 'restore.fingerprintBrokenNoDsh' 'the profile is broken (its package.json does not identify a profile), but the profile files are still there')
     } else {
-      $reason = 'package.json 里没有 dsh.profile，也没有别的东西能证明这是 profile'
+      $reason = (T 'restore.fingerprintNotDshProfile' 'the package.json does not carry a dsh.profile section, and nothing else marks this as a profile')
     }
   } elseif ($markers.Count -gt 0) {
     $kind = 'broken-profile'
-    $reason = 'profile 坏了（package.json 没了），但 profile 的文件还在'
+    $reason = (T 'restore.fingerprintBrokenNoPkg' 'the profile is broken (its package.json is missing), but the profile files are still there')
   }
   return [pscustomobject]@{ Dir = $base; Kind = $kind; Reason = $reason; Markers = @($markers) }
 }
 
 # ---------------------------------------------------------------------------
-# 快照：最新的、带 manifest 的那份
+# The snapshot: the newest one that carries a manifest
 # ---------------------------------------------------------------------------
 
 function Read-SnapshotManifest {
@@ -292,7 +353,7 @@ function Select-Snapshot {
   $root = Resolve-FullPath $BackupsDir
   $result = [pscustomobject]@{ Ok = $false; Dir = ''; Name = ''; Manifest = $null; Candidates = @(); Error = '' }
   if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-    $result.Error = ('找不到快照目录：' + $root)
+    $result.Error = ((T 'restore.snapshotDirMissing' 'the snapshot directory cannot be found: {0}') -f $root)
     return $result
   }
   $candidates = New-Object System.Collections.Generic.List[object]
@@ -307,7 +368,7 @@ function Select-Snapshot {
   }
   $result.Candidates = @($candidates | ForEach-Object { $_.Name })
   if ($candidates.Count -eq 0) {
-    $result.Error = ('这个目录里没有一份带 manifest 的快照：' + $root)
+    $result.Error = ((T 'restore.snapshotNone' 'there is no snapshot with a manifest under {0}') -f $root)
     return $result
   }
   $sorted = @($candidates | Sort-Object -Property `
@@ -321,35 +382,36 @@ function Select-Snapshot {
   return $result
 }
 
-# 这份快照里装的是不是一个真的 DSH profile（要往 profile 目录里写，就必须是）。
+# Does this snapshot hold a real DSH profile? (It has to: we write it into a
+# profile directory.)
 function Test-SnapshotProfile {
   param([string] $SnapshotDir)
   $pkgPath = Join-Path (Join-Path (Resolve-FullPath $SnapshotDir) 'config') 'package.json'
   if (-not (Test-Path -LiteralPath $pkgPath -PathType Leaf)) {
-    return [pscustomobject]@{ Ok = $false; Reason = '这份快照里没有 config\package.json' }
+    return [pscustomobject]@{ Ok = $false; Reason = (T 'restore.snapshotNoConfigPkg' 'this snapshot has no config\package.json') }
   }
   $parsed = $null
   try {
     $parsed = ([System.IO.File]::ReadAllText($pkgPath)) | ConvertFrom-Json
   } catch {
-    return [pscustomobject]@{ Ok = $false; Reason = '这份快照的 package.json 不是合法的 JSON' }
+    return [pscustomobject]@{ Ok = $false; Reason = (T 'restore.snapshotBadConfigPkg' 'the package.json of this snapshot is not valid JSON') }
   }
   if ($null -eq $parsed -or $null -eq $parsed.dsh -or $null -eq $parsed.dsh.profile) {
-    return [pscustomobject]@{ Ok = $false; Reason = '这份快照的 package.json 里没有 dsh.profile' }
+    return [pscustomobject]@{ Ok = $false; Reason = (T 'restore.snapshotNoDshProfile' 'the package.json of this snapshot has no dsh.profile section') }
   }
-  return [pscustomobject]@{ Ok = $true; Reason = '这份快照里装的是一个 DSH profile' }
+  return [pscustomobject]@{ Ok = $true; Reason = (T 'restore.snapshotIsProfile' 'this snapshot holds a DSH profile') }
 }
 
-# 快照自己说的时间（人话）。
+# The time the snapshot says it was taken (in words).
 function Get-SnapshotDisplay {
   param($Manifest)
-  $display = '时间不明'
+  $display = (T 'restore.snapshotUnknownTime' 'an unknown time')
   $includePlugins = $false
   if ($null -ne $Manifest) {
     if ($null -ne $Manifest.atLocal -and ([string] $Manifest.atLocal).Trim() -ne '') {
       $display = (([string] $Manifest.atLocal).Trim() -replace 'T', ' ').Substring(0, 16)
     } elseif ($null -ne $Manifest.at) {
-      try { $display = (Get-Date -Date ([DateTimeOffset]::FromUnixTimeMilliseconds([int64] $Manifest.at).LocalDateTime) -Format 'yyyy-MM-dd HH:mm') } catch { $display = '时间不明' }
+      try { $display = (Get-Date -Date ([DateTimeOffset]::FromUnixTimeMilliseconds([int64] $Manifest.at).LocalDateTime) -Format 'yyyy-MM-dd HH:mm') } catch { $display = (T 'restore.snapshotUnknownTime' 'an unknown time') }
     }
     $includePlugins = ($Manifest.includePlugins -eq $true)
   }
@@ -357,10 +419,14 @@ function Get-SnapshotDisplay {
 }
 
 # ---------------------------------------------------------------------------
-# 开始
+# Start
 # ---------------------------------------------------------------------------
 
-Say 'dsh-autorestart —— profile 快照还原器' 'Cyan'
+if ($script:StringsError -ne '') {
+  Write-Host ('WARNING: ' + $script:StringsError) -ForegroundColor Yellow
+}
+
+Say (T 'restore.title' 'dsh-autorestart - profile snapshot restorer') 'Cyan'
 
 $explicitProfile = ($ProfileDir -as [string]) -ne ''
 if ($explicitProfile) {
@@ -368,63 +434,63 @@ if ($explicitProfile) {
 } else {
   $targetProfile = Get-DefaultProfileDir
 }
-if ($targetProfile -eq '') { Fail '找不到要还原的 profile 目录（用 -ProfileDir 说清楚要还原哪一个）。' }
+if ($targetProfile -eq '') { Fail (T 'restore.noProfileDir' 'the profile directory to restore into cannot be found (use -ProfileDir to say which one).') }
 
-# --- 闸门 1：路径本身安不安全 ---
+# --- Gate 1: is the path itself safe? ---
 $forbidden = Get-ForbiddenReason $targetProfile $env:USERPROFILE
-if ($forbidden -ne '') { Fail ($forbidden + '（目标：' + $targetProfile + '）') }
+if ($forbidden -ne '') { Fail ($forbidden + ((T 'restore.targetSuffix' '(target: {0})') -f $targetProfile)) }
 
 if (-not $explicitProfile) {
   $profilesRoot = Get-ProfilesRoot
   if (-not (Test-IsInside $targetProfile $profilesRoot)) {
-    Fail ('只允许还原 ' + $profilesRoot + ' 里的 profile（目标：' + $targetProfile + '）')
+    Fail ((T 'restore.onlyProfiles' 'only a profile under {0} may be restored (target: {1})') -f $profilesRoot, $targetProfile)
   }
 }
-Say ('目标 profile：' + $targetProfile)
+Say ((T 'restore.target' 'target profile: {0}') -f $targetProfile)
 
-# --- 闸门 2：目标 profile 目录必须已经存在 ---
-# 还原是「把快照放回一个已经存在的 profile」，不是「凭空造一个 profile」。
-# 脚本不会为了还原去新建 profiles 目录 —— 那只会把一个打错字的目标
-# 变成一个空壳 profile。
+# --- Gate 2: the target profile directory has to exist ---
+# Restoring means putting a snapshot back into a profile that is ALREADY there,
+# not inventing one. The script never creates a profiles directory: that would
+# only turn a mistyped target into an empty shell profile.
 if (-not (Test-Path -LiteralPath $targetProfile -PathType Container)) {
-  Fail ('目标 profile 目录不存在：' + $targetProfile + '（还原需要那个目录已经在那儿；脚本不会为了还原去新建一个 profile 目录）')
+  Fail ((T 'restore.missingDir' 'the target profile directory does not exist: {0} (the restore needs that directory to be there; the script does not create a profile directory for it)') -f $targetProfile)
 }
 
-# --- 闸门 3：这个目录还像不像 DSH profile ---
+# --- Gate 3: does this directory still look like a DSH profile? ---
 $fingerprint = Get-ProfileFingerprint $targetProfile
 if ($fingerprint.Kind -eq 'not-a-profile') {
-  Fail ($fingerprint.Reason + '（目标：' + $targetProfile + '）。拒绝动手 —— 免得把不是 profile 的目录弄坏。')
+  Fail ($fingerprint.Reason + ((T 'restore.targetSuffix' '(target: {0})') -f $targetProfile) + (T 'restore.notProfileSuffix' '. Refusing to act - a directory that is not a profile must not be damaged.'))
 }
 if ($fingerprint.Kind -eq 'broken-profile') {
-  Say ('这个 profile 已经坏了：' + $fingerprint.Reason) 'Yellow'
+  Say ((T 'restore.brokenNotice' 'this profile is already broken: {0}') -f $fingerprint.Reason) 'Yellow'
 }
 
-# --- 找快照 ---
+# --- Find the snapshot ---
 if (($Snapshot -as [string]) -ne '') {
   $snapshotDir = Resolve-FullPath $Snapshot
   if (-not (Test-Path -LiteralPath $snapshotDir -PathType Container)) {
-    Fail ('找不到这份快照：' + $snapshotDir)
+    Fail ((T 'restore.snapshotMissing' 'this snapshot cannot be found: {0}') -f $snapshotDir)
   }
   $manifest = Read-SnapshotManifest $snapshotDir
-  if ($null -eq $manifest) { Fail ('这份快照没有 manifest.json，不是一份快照：' + $snapshotDir) }
+  if ($null -eq $manifest) { Fail ((T 'restore.snapshotNoManifest' 'this snapshot has no manifest.json, so it is not a snapshot: {0}') -f $snapshotDir) }
   $selected = [pscustomobject]@{ Ok = $true; Dir = $snapshotDir; Name = (Split-Path -Leaf $snapshotDir); Manifest = $manifest }
 } else {
   $backupsRoot = Get-BackupsRoot $StateDir
-  Say ('快照目录：' + $backupsRoot)
+  Say ((T 'restore.backupsDir' 'snapshot directory: {0}') -f $backupsRoot)
   $selected = Select-Snapshot $backupsRoot
   if (-not $selected.Ok) { Fail $selected.Error }
   $snapshotDir = $selected.Dir
 }
 $manifest = $selected.Manifest
 
-# --- 闸门 4：快照里装的是不是真的 profile ---
+# --- Gate 4: does the snapshot hold a real profile? ---
 $snapshotProfile = Test-SnapshotProfile $snapshotDir
-if (-not $snapshotProfile.Ok) { Fail ($snapshotProfile.Reason + '（快照：' + $snapshotDir + '）') }
+if (-not $snapshotProfile.Ok) { Fail ($snapshotProfile.Reason + ((T 'restore.snapshotSuffix' '(snapshot: {0})') -f $snapshotDir)) }
 
 $described = Get-SnapshotDisplay $manifest
-Say ('要用快照：' + $selected.Name + '（' + $described.Display + '）')
+Say ((T 'restore.usingSnapshot' 'snapshot to use: {0} ({1})') -f $selected.Name, $described.Display)
 
-# --- 算好"放走旧 profile"的证据目录名 ---
+# --- Work out the name of the evidence directory for the old profile ---
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $script:BrokenDir = $targetProfile + '.broken-' + $stamp
 $counter = 2
@@ -433,28 +499,28 @@ while (Test-Path -LiteralPath $script:BrokenDir) {
   $counter += 1
 }
 
-# --- 试运行 ---
+# --- Dry run ---
 if ($DryRun) {
-  Say ('[试运行] 会先把现在的 profile 挪到：' + $script:BrokenDir) 'Cyan'
-  Say ('[试运行] 会把 ' + $selected.Name + ' 里的配置和插件复制回：' + $targetProfile) 'Cyan'
-  Say ('[试运行] 会回读校验 package.json / dsh.profile.bundles / ' + $PackageName + ' 的版本号。') 'Cyan'
-  Say ('[试运行] 没有改动任何文件。') 'Cyan'
+  Say ((T 'restore.dryRunMove' '[dry run] the current profile would be moved to: {0}') -f $script:BrokenDir) 'Cyan'
+  Say ((T 'restore.dryRunCopy' '[dry run] the configuration and the plugins of {0} would be copied back to: {1}') -f $selected.Name, $targetProfile) 'Cyan'
+  Say ((T 'restore.dryRunVerify' '[dry run] package.json / dsh.profile.bundles / the version of {0} would be read back.') -f $PackageName) 'Cyan'
+  Say (T 'restore.dryRunNoChange' '[dry run] no file was changed.') 'Cyan'
   exit 0
 }
 
-# --- 挪走现在的 profile（不覆盖、不删除） ---
+# --- Move the current profile away (never overwrites, never deletes) ---
 if (Test-Path -LiteralPath $targetProfile) {
   try {
     Move-Item -LiteralPath $targetProfile -Destination $script:BrokenDir -ErrorAction Stop
   } catch {
-    Fail ('挪走现在的 profile 失败（没有动任何东西）：' + $_.Exception.Message)
+    Fail ((T 'restore.moveFailed' 'moving the current profile away failed (nothing was changed): {0}') -f $_.Exception.Message)
   }
-  Say ('原来那份已经挪到：' + $script:BrokenDir) 'Gray'
+  Say ((T 'restore.moved' 'the old one has been moved to: {0}') -f $script:BrokenDir) 'Gray'
 } else {
-  Say ('原来那个 profile 目录本来就不在，直接新建。') 'Gray'
+  Say (T 'restore.noProfileBefore' 'the profile directory was not there, it is created.') 'Gray'
 }
 
-# --- 复制回来 ---
+# --- Copy it back ---
 try {
   New-Item -ItemType Directory -Path $targetProfile -Force | Out-Null
   $configDir = Join-Path $snapshotDir 'config'
@@ -468,22 +534,22 @@ try {
     Copy-Item -LiteralPath $pluginsDir -Destination (Join-Path $targetProfile 'node_modules') -Recurse -Force -ErrorAction Stop
   }
 } catch {
-  Fail ('把快照复制回去失败（原来那份还在：' + $script:BrokenDir + '）：' + $_.Exception.Message)
+  Fail ((T 'restore.copyFailed' 'copying the snapshot back failed (the old one is still at {0}): {1}') -f $script:BrokenDir, $_.Exception.Message)
 }
 
-# --- 回读校验 ---
+# --- Read the result back ---
 $checks = New-Object System.Collections.Generic.List[object]
 
 $pkgPath = Join-Path $targetProfile 'package.json'
 $parsed = $null
 if (-not (Test-Path -LiteralPath $pkgPath -PathType Leaf)) {
-  $checks.Add([pscustomobject]@{ Label = 'package.json 能解析'; Status = 'failed'; Detail = 'package.json 不存在' })
+  $checks.Add([pscustomobject]@{ Label = (T 'restore.verifyPkgLabel' 'package.json can be parsed'); Status = 'failed'; Detail = (T 'restore.verifyPkgMissing' 'package.json is missing') })
 } else {
   try {
     $parsed = ([System.IO.File]::ReadAllText($pkgPath)) | ConvertFrom-Json
-    $checks.Add([pscustomobject]@{ Label = 'package.json 能解析'; Status = 'passed'; Detail = '' })
+    $checks.Add([pscustomobject]@{ Label = (T 'restore.verifyPkgLabel' 'package.json can be parsed'); Status = 'passed'; Detail = '' })
   } catch {
-    $checks.Add([pscustomobject]@{ Label = 'package.json 能解析'; Status = 'failed'; Detail = '不是合法的 JSON' })
+    $checks.Add([pscustomobject]@{ Label = (T 'restore.verifyPkgLabel' 'package.json can be parsed'); Status = 'failed'; Detail = (T 'restore.verifyPkgBad' 'not valid JSON') })
   }
 }
 
@@ -492,19 +558,22 @@ if ($null -ne $parsed -and $null -ne $parsed.dsh -and $null -ne $parsed.dsh.prof
   $bundles = @($parsed.dsh.profile.bundles)
 }
 if ($null -ne $bundles -and $bundles.Count -gt 0) {
-  $checks.Add([pscustomobject]@{ Label = 'dsh.profile.bundles 有内容'; Status = 'passed'; Detail = ($bundles.Count.ToString() + ' 个') })
+  $checks.Add([pscustomobject]@{ Label = (T 'restore.verifyBundlesLabel' 'dsh.profile.bundles has content'); Status = 'passed'; Detail = ((T 'restore.verifyBundlesCount' '{0} in total') -f $bundles.Count) })
 } else {
-  $checks.Add([pscustomobject]@{ Label = 'dsh.profile.bundles 有内容'; Status = 'failed'; Detail = '没有 dsh.profile.bundles，或者它是空的' })
+  $checks.Add([pscustomobject]@{ Label = (T 'restore.verifyBundlesLabel' 'dsh.profile.bundles has content'); Status = 'failed'; Detail = (T 'restore.verifyBundlesEmpty' 'there is no dsh.profile.bundles, or it is empty') })
 }
 
-# 插件版本：只有 profile 自己声明了要装它，才必须读到。
-# 声明了、node_modules 里却没有 —— 那是"配置说装了、实际没装"的真坏，必须失败。
+# The plugin version: only when the profile says it wants the plugin.
+# It says it, but node_modules does not have it - that is a really broken
+# profile ("the configuration says one thing, the disk another") and it has to
+# fail.
 $declaresPlugin = ($null -ne $bundles -and ($bundles -contains $PackageName))
 $pluginPkgPath = Join-Path $targetProfile ('node_modules\' + $PackageName + '\package.json')
+$pluginLabel = ((T 'restore.verifyPluginLabel' 'the version of {0} can be read') -f $PackageName)
 if (-not $declaresPlugin) {
-  $checks.Add([pscustomobject]@{ Label = $PackageName + ' 的版本号读得到'; Status = 'skipped'; Detail = '这个 profile 没有声明要装 ' + $PackageName + '（没什么可读）' })
+  $checks.Add([pscustomobject]@{ Label = $pluginLabel; Status = 'skipped'; Detail = ((T 'restore.verifyPluginNotDeclared' 'this profile does not list {0} (there is nothing to read)') -f $PackageName) })
 } elseif (-not (Test-Path -LiteralPath $pluginPkgPath -PathType Leaf)) {
-  $checks.Add([pscustomobject]@{ Label = $PackageName + ' 的版本号读得到'; Status = 'failed'; Detail = ('profile 里写着要装 ' + $PackageName + '，但 node_modules\' + $PackageName + ' 不在 —— 配置说一套、磁盘是另一套') })
+  $checks.Add([pscustomobject]@{ Label = $pluginLabel; Status = 'failed'; Detail = ((T 'restore.verifyPluginMissing' 'the profile lists {0}, but node_modules\{0} is not there - the configuration says one thing and the disk another') -f $PackageName, $PackageName) })
 } else {
   $version = ''
   try {
@@ -514,26 +583,26 @@ if (-not $declaresPlugin) {
     $version = ''
   }
   if ($version -ne '') {
-    $checks.Add([pscustomobject]@{ Label = $PackageName + ' 的版本号读得到'; Status = 'passed'; Detail = $version })
+    $checks.Add([pscustomobject]@{ Label = $pluginLabel; Status = 'passed'; Detail = $version })
   } else {
-    $checks.Add([pscustomobject]@{ Label = $PackageName + ' 的版本号读得到'; Status = 'failed'; Detail = '读不到版本号' })
+    $checks.Add([pscustomobject]@{ Label = $pluginLabel; Status = 'failed'; Detail = (T 'restore.verifyPluginNoVersion' 'the version number cannot be read') })
   }
 }
 
 foreach ($check in $checks) {
-  if ($check.Status -eq 'passed') { Say ('  [好] ' + $check.Label + ' —— ' + $check.Detail) 'Green' }
-  elseif ($check.Status -eq 'skipped') { Say ('  [跳过] ' + $check.Label + ' —— ' + $check.Detail) 'Yellow' }
-  else { Say ('  [坏] ' + $check.Label + ' —— ' + $check.Detail) 'Red' }
+  if ($check.Status -eq 'passed') { Say ((T 'restore.checkOk' '  [ok] {0} - {1}') -f $check.Label, $check.Detail) 'Green' }
+  elseif ($check.Status -eq 'skipped') { Say ((T 'restore.checkSkipped' '  [skipped] {0} - {1}') -f $check.Label, $check.Detail) 'Yellow' }
+  else { Say ((T 'restore.checkBad' '  [bad] {0} - {1}') -f $check.Label, $check.Detail) 'Red' }
 }
 
 $failed = @($checks | Where-Object { $_.Status -eq 'failed' })
 if ($failed.Count -gt 0) {
-  Fail ('还原后的 profile 没通过校验（' + (($failed | ForEach-Object { $_.Label }) -join '、') + '）。')
+  Fail ((T 'restore.verifyFailed' 'the restored profile did not pass the check ({0}).') -f (($failed | ForEach-Object { $_.Label }) -join ', '))
 }
 
-# --- 一句人话 ---
-$pluginNote = '（含插件）'
-if (-not $described.IncludePlugins) { $pluginNote = '（只有配置文件，没有插件）' }
-Say ('已还原到 ' + $described.Display + ' 的快照' + $pluginNote + '；现在可以重新打开 DSH。') 'Green'
-Say ('原来那份留在了：' + $script:BrokenDir + '（确认没问题之后可以自己删掉它）') 'Gray'
+# --- One sentence a human can act on ---
+$pluginNote = (T 'restore.noteWithPlugins' '(with the plugins)')
+if (-not $described.IncludePlugins) { $pluginNote = (T 'restore.noteNoPlugins' '(configuration files only, no plugins)') }
+Say ((T 'restore.done' 'restored to the snapshot of {0}{1}; you can open DSH again now.') -f $described.Display, $pluginNote) 'Green'
+Say ((T 'restore.brokenLeft' 'the old one was left at: {0} (delete it yourself once you are sure)') -f $script:BrokenDir) 'Gray'
 exit 0

@@ -190,6 +190,16 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 安装后行 id 为 `dsh-autorestart`。本机已经装好并处于 `active`。
 
+## 起不来怎么办（装了插件之后 DSH 打不开）
+
+**不用等 DSH 跑起来**就能把这个插件摘掉 —— 插件目录里带了一个一键开关：
+
+1. **双击 `scripts\emergency-disable.cmd`** —— 弹出的黑窗口里会写清楚做了什么，按任意键关掉；
+2. **重启 DSH**（关掉再打开）——这次没有这个插件，DSH 就起得来；
+3. 以后想再试它：在同一个目录里按住 Shift 右键 →「在终端中打开」，运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\emergency-toggle.ps1 -Action enable`，然后再重启 DSH。
+
+它只动**一个文件**里**一个数组**：profile 的 `package.json` 里的 `dsh.profile.bundles`（就是「插件启用列表」那几行）。写之前先备份成 `package.json.bak-emergency-<时间戳>`，写完重新解析一遍 JSON 校验；校验不过就用备份回滚，并如实报错。**重复运行没有副作用**：本来就没启用时只会告诉你「已经禁用」，不会失败。
+
 ## 配置
 
 所有键都有默认值，写在 `cordis.patch.yml` 的 insert 行里；要覆盖就在 profile 的

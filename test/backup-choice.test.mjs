@@ -770,15 +770,15 @@ test('the primary option is recommended and both buttons say what they do', () =
   assert.ok(primary && secondary, 'one primary and one secondary button are expected')
   assert.equal(primary.children[0], '用这个', 'the primary button must say what it does')
   assert.equal(secondary.children[0], '只备份配置', 'the secondary button must say what it does')
-  assert.equal(zh.backupChoice.pickPrimary, '用这个')
-  assert.equal(zh.backupChoice.pickSecondary, '只备份配置')
+  assert.equal(zh.backupChoicePickPrimary, '用这个')
+  assert.equal(zh.backupChoicePickSecondary, '只备份配置')
 
   // ② the "recommended" pill is on the primary option only.
   const badges = walk(tree).filter((node) => node.props && node.props.className === 'dsh-autorestart-choice__badge')
   assert.equal(badges.length, 1, 'only the recommended option carries the pill')
   assert.equal(badges[0].children[0], '推荐', 'the pill must say 推荐')
-  assert.equal(zh.backupChoice.recommended, '推荐')
-  assert.equal(en.backupChoice.recommended, 'Recommended')
+  assert.equal(zh.backupChoiceRecommended, '推荐')
+  assert.equal(en.backupChoiceRecommended, 'Recommended')
   assert.equal(mounted.dictionaries.dshAutorestart.en.backupChoiceRecommended, 'Recommended')
 
   // ③ the stylesheet carries the breathing card and the radio semantics.
@@ -801,53 +801,53 @@ test('both options share the "configuration" base and are never two parallel nou
   const dictionaries = mounted.dictionaries.dshAutorestart
 
   // ① no copy presents the plugins and the configuration as two rivals.
-  const zhCopy = [...Object.values(dictionaries.zh), ...Object.values(zh.backupChoice)]
+  const zhCopy = [...Object.values(dictionaries.zh), ...Object.entries(dictionaries.zh).filter(([key]) => key.startsWith('backupChoice')).map(([, value]) => value)]
   for (const value of zhCopy) {
     assert.doesNotMatch(value, /插件\s*(或|还是|vs\.?)\s*配置/, `parallel wording: ${value}`)
     assert.doesNotMatch(value, /备份\s*插件/, `parallel wording: ${value}`)
   }
-  const enCopy = [...Object.values(dictionaries.en), ...Object.values(en.backupChoice)]
+  const enCopy = [...Object.values(dictionaries.en), ...Object.entries(dictionaries.en).filter(([key]) => key.startsWith('backupChoice')).map(([, value]) => value)]
   for (const value of enCopy) {
     assert.doesNotMatch(value, /\bplugins?\b\s*(or|vs\.?)\s*\bconfiguration\b/i, `parallel wording: ${value}`)
   }
 
   // ② both option names carry the configuration base.
-  assert.ok(zh.backupChoice.withPlugins.includes('配置'), 'the first option must name the configuration')
-  assert.ok(zh.backupChoice.configOnly.includes('配置'), 'the second option must name the configuration')
+  assert.ok(zh.backupChoiceWithPlugins.includes('配置'), 'the first option must name the configuration')
+  assert.ok(zh.backupChoiceConfigOnly.includes('配置'), 'the second option must name the configuration')
   assert.ok(dictionaries.zh.backupChoiceWithPlugins.includes('配置'))
   assert.ok(dictionaries.zh.backupChoiceConfigOnly.includes('配置'))
-  assert.ok(en.backupChoice.withPlugins.toLowerCase().includes('configuration'))
-  assert.ok(en.backupChoice.configOnly.toLowerCase().includes('configuration'))
+  assert.ok(en.backupChoiceWithPlugins.toLowerCase().includes('configuration'))
+  assert.ok(en.backupChoiceConfigOnly.toLowerCase().includes('configuration'))
 })
 
 test('the two option texts live in the locale files and state the time cost', () => {
   const zh = JSON.parse(fs.readFileSync(new URL('../locale/zh.json', import.meta.url), 'utf8'))
   const en = JSON.parse(fs.readFileSync(new URL('../locale/en.json', import.meta.url), 'utf8'))
 
-  assert.ok(zh.backupChoice, 'locale/zh.json must carry the backupChoice texts')
-  assert.ok(en.backupChoice, 'locale/en.json must carry the backupChoice texts')
+  assert.ok(zh.backupChoiceTitle, 'locale/zh.json must carry the backupChoice texts')
+  assert.ok(en.backupChoiceTitle, 'locale/en.json must carry the backupChoice texts')
 
-  assert.match(zh.backupChoice.withPluginsHint, /3 秒/, 'the zh copy must state the extra time')
-  assert.match(zh.backupChoice.withPluginsHint, /117 MB/)
-  assert.match(zh.backupChoice.configOnlyHint, /66 KB/)
-  assert.match(zh.backupChoice.configOnlyHint, /瞬间完成/, 'the zh copy must say that the config-only backup is instant')
+  assert.match(zh.backupChoiceWithPluginsHint, /3 秒/, 'the zh copy must state the extra time')
+  assert.match(zh.backupChoiceWithPluginsHint, /117 MB/)
+  assert.match(zh.backupChoiceConfigOnlyHint, /66 KB/)
+  assert.match(zh.backupChoiceConfigOnlyHint, /瞬间完成/, 'the zh copy must say that the config-only backup is instant')
 
-  assert.match(en.backupChoice.withPluginsHint, /3 seconds/, 'the en copy must state the extra time')
-  assert.match(en.backupChoice.withPluginsHint, /117 MB/)
-  assert.match(en.backupChoice.configOnlyHint, /66 KB/)
-  assert.match(en.backupChoice.configOnlyHint, /instant/i, 'the en copy must say that the config-only backup is instant')
+  assert.match(en.backupChoiceWithPluginsHint, /3 seconds/, 'the en copy must state the extra time')
+  assert.match(en.backupChoiceWithPluginsHint, /117 MB/)
+  assert.match(en.backupChoiceConfigOnlyHint, /66 KB/)
+  assert.match(en.backupChoiceConfigOnlyHint, /instant/i, 'the en copy must say that the config-only backup is instant')
 
   // The footnote points at the settings section — the ONE place where these
   // answers can be changed (the plugin row no longer carries a form).
-  assert.match(zh.backupChoice.footnote, /自动重启与关机/, 'the zh copy must say where the answer can be changed')
-  assert.match(en.backupChoice.footnote, /Auto-restart & shut down/, 'the en copy must say where the answer can be changed')
+  assert.match(zh.backupChoiceFootnote, /自动重启与关机/, 'the zh copy must say where the answer can be changed')
+  assert.match(en.backupChoiceFootnote, /Auto-restart & shut down/, 'the en copy must say where the answer can be changed')
   assert.doesNotMatch(
-    zh.backupChoice.footnote,
+    zh.backupChoiceFootnote,
     /设置 → 插件/,
     'the footnote must not point at the old plugin row any more',
   )
   assert.doesNotMatch(
-    en.backupChoice.footnote,
+    en.backupChoiceFootnote,
     /Settings → Plugins/,
     'the footnote must not point at the old plugin row any more',
   )
@@ -856,31 +856,33 @@ test('the two option texts live in the locale files and state the time cost', ()
 test('the client renders exactly the texts of the locale files', () => {
   const zh = JSON.parse(fs.readFileSync(new URL('../locale/zh.json', import.meta.url), 'utf8'))
   const en = JSON.parse(fs.readFileSync(new URL('../locale/en.json', import.meta.url), 'utf8'))
-  const mapping = {
-    backupChoiceTitle: 'title',
-    backupChoiceBody: 'body',
-    backupChoiceWithPlugins: 'withPlugins',
-    backupChoiceWithPluginsHint: 'withPluginsHint',
-    backupChoiceConfigOnly: 'configOnly',
-    backupChoiceConfigOnlyHint: 'configOnlyHint',
-    backupChoiceFootnote: 'footnote',
-    backupChoicePickPrimary: 'pickPrimary',
-    backupChoicePickSecondary: 'pickSecondary',
-    backupChoiceRecommended: 'recommended',
-    backupChoiceDismissAria: 'dismissAria',
-  }
+  // The locale files are the MIRROR of the client dictionaries: the same key
+  // carries the same text.
+  const keys = [
+    'backupChoiceTitle',
+    'backupChoiceBody',
+    'backupChoiceWithPlugins',
+    'backupChoiceWithPluginsHint',
+    'backupChoiceConfigOnly',
+    'backupChoiceConfigOnlyHint',
+    'backupChoiceFootnote',
+    'backupChoicePickPrimary',
+    'backupChoicePickSecondary',
+    'backupChoiceRecommended',
+    'backupChoiceDismissAria',
+  ]
 
   const mounted = mountBackupChoicePanel({ storage: createStorage(), fetches: [] })
   const dictionaries = mounted.dictionaries.dshAutorestart
-  for (const [clientKey, fileKey] of Object.entries(mapping)) {
-    assert.equal(dictionaries.zh[clientKey], zh.backupChoice[fileKey], `zh.${fileKey} must match the client copy`)
-    assert.equal(dictionaries.en[clientKey], en.backupChoice[fileKey], `en.${fileKey} must match the client copy`)
+  for (const key of keys) {
+    assert.equal(dictionaries.zh[key], zh[key], `zh.${key} must match the client copy`)
+    assert.equal(dictionaries.en[key], en[key], `en.${key} must match the client copy`)
   }
 
   const tree = mounted.render()
   const text = textOf(tree)
-  assert.ok(text.includes(zh.backupChoice.withPlugins), 'the panel must show the "configuration + plugins" option')
-  assert.ok(text.includes(zh.backupChoice.configOnly), 'the panel must show the "configuration only" option')
-  assert.ok(text.includes(zh.backupChoice.withPluginsHint), 'the panel must show the time cost')
-  assert.ok(text.includes(zh.backupChoice.footnote), 'the panel must say where the answer can be changed')
+  assert.ok(text.includes(zh.backupChoiceWithPlugins), 'the panel must show the "configuration + plugins" option')
+  assert.ok(text.includes(zh.backupChoiceConfigOnly), 'the panel must show the "configuration only" option')
+  assert.ok(text.includes(zh.backupChoiceWithPluginsHint), 'the panel must show the time cost')
+  assert.ok(text.includes(zh.backupChoiceFootnote), 'the panel must say where the answer can be changed')
 })

@@ -87,8 +87,14 @@
  *   2. on the global namespace `globalThis.__dshAutorestartClient`, which
  *      exists as soon as this file is evaluated (no factory call needed).
  *
- * The copy lives in the two dictionaries below and is mirrored verbatim in
- * locale/zh.json + locale/en.json (same words, same keys).
+ * The copy lives in the two dictionaries below. They are the SOURCE: the
+ * Host registers them (`ctx.locale.register`), and locale/zh.json +
+ * locale/en.json are their MIRROR (same keys, same words — a test holds the
+ * three key sets together).
+ *
+ * The translator of this plugin NEVER shows a key name: the Host's
+ * translator answers with the KEY when it does not know one (that is what
+ * the DSH locale service does), and then the built-in dictionary answers.
  * ------------------------------------------------------------------ */
 
 // THE WHOLE FILE IS ONE IIFE.
@@ -331,6 +337,18 @@
     'settings.supervisor.technical': '技术细节',
     'settings.supervisor.technicalHint': '以下是插件实际会执行的命令',
     'settings.supervisor.previous': '撤销后会还原成',
+    'settings.supervisor.app': '桌面版自带重启',
+    'settings.supervisor.startup': '启动方式',
+    'settings.supervisor.startup.bare': '手动启动（没人管它）',
+    'settings.supervisor.startup.external': '由别的守护在管',
+    'settings.supervisor.startup.container': '容器里（由编排器管）',
+    'settings.supervisor.startup.desktop': '桌面版自带重启',
+    'settings.supervisor.startup.selfSupervised': '插件自己的守护在管',
+    'settings.supervisor.startup.unknown': '认不出是谁拉起它的',
+    'settings.supervisor.autostart': '开机自启怎么做',
+    'meta.title': 'dsh-autorestart — 重启不断线',
+    'meta.description': '让 DeepSeek Harness 重启后接着干活：落盘的检查点、启动时重新武装 goal 或给一条续接提示，以及一次等人闲下来的优雅重启。',
+    'text.missing': '（这条文案还没写）',
     'settings.backup.list': '现在备份了什么',
     'settings.backup.count': '当前 {n} 份',
     'settings.backup.keep': '最多保留 {n} 份，超出自动删最旧的那份。',
@@ -603,6 +621,18 @@
     'settings.supervisor.technical': 'Technical details',
     'settings.supervisor.technicalHint': 'What the plugin would actually run',
     'settings.supervisor.previous': 'What the undo restores',
+    'settings.supervisor.app': 'the desktop app itself',
+    'settings.supervisor.startup': 'How it was started',
+    'settings.supervisor.startup.bare': 'started by hand (nobody manages it)',
+    'settings.supervisor.startup.external': 'another supervisor is in charge',
+    'settings.supervisor.startup.container': 'in a container (the orchestrator is in charge)',
+    'settings.supervisor.startup.desktop': 'the desktop app restarts itself',
+    'settings.supervisor.startup.selfSupervised': 'the supervisor of this plugin is in charge',
+    'settings.supervisor.startup.unknown': 'it could not be established who started it',
+    'settings.supervisor.autostart': 'How "start at login" works here',
+    'meta.title': 'dsh-autorestart — restart continuation',
+    'meta.description': 'Keeps agent work alive across a DeepSeek Harness restart: a durable checkpoint, goal re-arm or a continuation message on boot, and an idle-aware graceful restart the agent can request itself.',
+    'text.missing': '(this text is missing yet)',
     'settings.backup.list': 'What is backed up right now',
     'settings.backup.count': '{n} copies right now',
     'settings.backup.keep': 'At most {n} copies are kept; the oldest one is deleted when there are more.',
@@ -690,6 +720,89 @@
   }
 
   /**
+   * THE LOCALE SERVICE of the Host (null until the plugin is applied).
+   *
+   * It knows the active language: the user picked one in the settings, or
+   * the browser's language decided. It is read at CALL time, so a language
+   * switch is followed at once.
+   */
+  let localeService = null
+
+  /**
+   * The active language of this interface: 'zh' or 'en'.
+   *
+   * The Host's locale service decides; when it is not there (a slot rendered
+   * without the locale seat, an old host), the browser's language does.
+   * `zh*` is Chinese, everything else is English — the same rule the DSH
+   * locale service uses.
+   *
+   * @returns {'zh'|'en'}
+   */
+  function currentLanguage() {
+    let raw = ''
+    try {
+      if (localeService && typeof localeService.getLocale === 'function') {
+        const snapshot = localeService.getLocale()
+        if (snapshot && typeof snapshot.locale === 'string') raw = snapshot.locale
+      }
+    } catch {
+      raw = ''
+    }
+    if (raw === '' && typeof navigator !== 'undefined' && navigator && typeof navigator.language === 'string') {
+      raw = navigator.language
+    }
+    return String(raw).toLowerCase().startsWith('zh') ? 'zh' : 'en'
+  }
+
+  /**
+   * One text out of the built-in dictionaries.
+   *
+   * The dictionary of the current language wins; the Chinese original is the
+   * second choice (a human-readable text beats a key name); the last resort
+   * is the "missing" line — NEVER the key itself.
+   *
+   * @param {string} key
+   * @param {'zh'|'en'} [language]
+   * @returns {string}
+   */
+  function dictionaryText(key, language) {
+    const lang = language === 'en' ? 'en' : 'zh'
+    const table = lang === 'en' ? EN : ZH
+    const value = table[key]
+    if (typeof value === 'string' && value !== '') return value
+    const chinese = ZH[key]
+    if (typeof chinese === 'string' && chinese !== '') return chinese
+    const missing = table['text.missing'] || ZH['text.missing'] || ''
+    return typeof missing === 'string' ? missing : ''
+  }
+
+  /**
+   * THE TRANSLATOR of this plugin.
+   *
+   * The Host's translator is used whenever it answers with a text. When it
+   * does NOT know a key it answers with THE KEY (that is what the DSH locale
+   * service does), and then the built-in dictionary takes over — so no user
+   * ever sees a key name, in any language.
+   *
+   * @param {Function|null|undefined} t the Host's translator (may be missing)
+   * @returns {(key: string) => string}
+   */
+  function makeTranslate(t) {
+    return (key) => {
+      const name = typeof key === 'string' ? key : String(key ?? '')
+      if (typeof t === 'function') {
+        try {
+          const value = t(name)
+          if (typeof value === 'string' && value !== '' && value !== name) return value
+        } catch {
+          // A broken translator must not break the surface.
+        }
+      }
+      return dictionaryText(name, currentLanguage())
+    }
+  }
+
+  /**
    * Read one translated string out of whatever the caller handed over.
    *
    * The caller may pass a translator function (the DSH locale binding), a
@@ -731,7 +844,8 @@
     }
     const chinese = ZH[key]
     if (typeof chinese === 'string' && chinese !== '') return chinese
-    return key
+    // NEVER the key itself: a key name in the interface is a bug report.
+    return dictionaryText(key, currentLanguage())
   }
 
   /**
@@ -837,7 +951,7 @@
    * @returns {string}
    */
   function formatDurationMs(ms, t) {
-    const translate = typeof t === 'function' ? t : (name) => name
+    const translate = makeTranslate(t)
     const totalSeconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000))
     if (totalSeconds < 60) return fillTemplate(translate('durationSeconds'), { n: totalSeconds })
     const minutes = Math.floor(totalSeconds / 60)
@@ -858,7 +972,7 @@
    * @returns {string}
    */
   function formatCompactDurationMs(ms, t) {
-    const translate = typeof t === 'function' ? t : (name) => name
+    const translate = makeTranslate(t)
     const totalSeconds = Math.max(0, Math.floor((Number(ms) || 0) / 1000))
     if (totalSeconds < 60) return fillTemplate(translate('durationSeconds'), { n: totalSeconds })
     const minutes = Math.floor(totalSeconds / 60)
@@ -1312,7 +1426,7 @@
    */
   function blockerGroupName(group, t, maxLength, shorten) {
     if (!group) return ''
-    const translate = typeof t === 'function' ? t : (name) => name
+    const translate = makeTranslate(t)
     if (group.kind === 'subagent') {
       // A group of MORE THAN ONE subagent is named after the session that
       // created them ("<that session> (N subagents)"); a lone subagent keeps
@@ -1348,7 +1462,7 @@
    */
   function summarizeBlockers(entries, options) {
     const opts = options && typeof options === 'object' ? options : {}
-    const translate = typeof opts.t === 'function' ? opts.t : (name) => name
+    const translate = makeTranslate(opts.t)
     const limit = Number.isFinite(opts.limit) && opts.limit > 0
       ? Math.floor(opts.limit)
       : BLOCKER_SUMMARY_LIMIT
@@ -1411,7 +1525,7 @@
    * @returns {{ note: string, full: string, pill: string, summary: string, count: number, hasLongWait: boolean }}
    */
   function formatLongWaitNoteParts(info, t) {
-    const translate = typeof t === 'function' ? t : (name) => name
+    const translate = makeTranslate(t)
     const longWait = info && typeof info === 'object' ? info.longWait : null
     if (!longWait || typeof longWait !== 'object') {
       return { note: '', full: '', pill: '', summary: '', count: 0, hasLongWait: false }
@@ -1450,7 +1564,7 @@
    * @returns {string}
    */
   function cancelFailureText(body, t) {
-    const translate = typeof t === 'function' ? t : (name) => name
+    const translate = makeTranslate(t)
     if (body && typeof body.error === 'string' && body.error.trim() !== '') return body.error.trim()
     if (body && typeof body.reason === 'string') {
       if (body.reason === 'not-a-requester') return translate('cancelNotRequester')
@@ -1514,7 +1628,7 @@
    * @returns {string}
    */
   function supervisorModeLabel(t, status) {
-    const translate = typeof t === 'function' ? t : (name) => name
+    const translate = makeTranslate(t)
     const mode = status && typeof status === 'object' ? status.mode : ''
     if (mode === 'installed') return translate('settings.supervisor.installed')
     if (mode === 'external') return translate('settings.supervisor.external')
@@ -1532,7 +1646,7 @@
    * @returns {string}
    */
   function startupModeLabel(t, startup) {
-    const translate = typeof t === 'function' ? t : (name) => name
+    const translate = makeTranslate(t)
     const mode = startup && typeof startup === 'object' ? startup.mode : ''
     if (mode === 'bare') return translate('settings.supervisor.startup.bare')
     if (mode === 'external') return translate('settings.supervisor.startup.external')
@@ -1775,6 +1889,11 @@
     startupStatusLine,
     formatBackupSize,
     formatBackupTime,
+    // The TRANSLATOR: the Host's one when it answers, the built-in dictionary
+    // when it does not (a key name is never shown).
+    makeTranslate,
+    currentLanguage,
+    dictionaryText,
     // The two dictionaries, so a test can build a translator without a Host.
     dictionaries: { zh: ZH, en: EN },
   }
@@ -2044,7 +2163,7 @@
        * @returns {string}
        */
       function blockerLine(entry) {
-        const t = translate ?? ((name) => name)
+        const t = makeTranslate(translate)
         // The SAME rule as the grouping: an entry that names a parent is a
         // subagent, whatever the Host called it.
         const kind = blockerEntryKind(entry)
@@ -2089,7 +2208,7 @@
        * @returns {string}
        */
       function blockerGroupLine(group) {
-        const t = translate ?? ((name) => name)
+        const t = makeTranslate(translate)
         if (!group) return ''
         if (group.kind === 'subagent' && group.count > 1) {
           return group.label === ''
@@ -2568,7 +2687,7 @@
         // True when the restart this session was waiting for is GONE (nobody
         // waits for it any more): the capsule has nothing left to say.
         const [gone, setGone] = useState(false)
-        const t = translate ?? ((name) => name)
+        const t = makeTranslate(translate)
 
         const pending = Boolean(info && info.pendingRestart === true)
         // The restart is imminent: the Host's idle gate is open, so the restart
@@ -3050,7 +3169,7 @@
         const waiting = waiters.some((waiter) => String(waiter) === key)
         if (!waiting) return null
 
-        const t = translate ?? ((name) => name)
+        const t = makeTranslate(translate)
         const pulsing = info.allowRestart === true && !prefersReducedMotion()
         if (pulsing) ensurePulseStyle()
 
@@ -3128,7 +3247,7 @@
         )
         const [busy, setBusy] = useState(false)
         const [error, setError] = useState('')
-        const t = translate ?? ((name) => name)
+        const t = makeTranslate(translate)
 
         /**
          * Hand the FIRST answer to the Host.
@@ -4232,9 +4351,7 @@
         // a fresh page starts closed, so nobody leaves technical text open by
         // accident.
         const [detailsOpen, setDetailsOpen] = useState(false)
-        const t = props && typeof props.t === 'function'
-          ? props.t
-          : (translate ?? ((name) => name))
+        const t = makeTranslate(props && typeof props.t === 'function' ? props.t : translate)
 
         // The current values come from the Host, so the panel always shows what
         // is really in effect.
@@ -5105,7 +5222,7 @@
         const status = useSleepStatus()
         const [arming, setArming] = useState(false)
         const [error, setError] = useState('')
-        const t = translate ?? ((name) => name)
+        const t = makeTranslate(translate)
 
         // The Host's truth decides, and an UNKNOWN truth decides NOTHING: before
         // the first poll the button renders nothing at all, so a host that has
@@ -5441,7 +5558,7 @@
         // The note of a finished rehearsal: what the host WOULD have run. It
         // folds away on its own (or when the user closes it).
         const [dryNotice, setDryNotice] = useState(null)
-        const t = translate ?? ((name) => name)
+        const t = makeTranslate(translate)
 
         const phase = status && typeof status === 'object' && typeof status.phase === 'string'
           ? status.phase
@@ -5941,7 +6058,7 @@
       function FeatureAnnouncementPanel() {
         const [state, setState] = useState({ loaded: false, pending: [], status: null, error: '' })
         const [busy, setBusy] = useState(false)
-        const t = translate ?? ((name) => name)
+        const t = makeTranslate(translate)
 
         useEffect(() => {
           let cancelled = false
@@ -6057,6 +6174,10 @@
           )
           const t = ctx.locale.bind(NS)
           translate = t
+          // The locale service knows the active language (the user picked one,
+          // or the browser decided). The fallback translator reads it at call
+          // time, so a language switch is followed at once.
+          localeService = ctx.locale
           ctx.slots.inject('conversation.input.left', () => ctx.slots.register({ name: 'conversation.input.left', id: 'autorestart-restart-pill', order: 0 }, RestartPill))
           ctx.slots.inject('sidebar.session.row.leading', () => ctx.slots.register({ name: 'sidebar.session.row.leading', id: 'autorestart-restart-dot', order: 20 }, RestartDot))
           ctx.slots.inject('conversation.input.dock', () => ctx.slots.register({ name: 'conversation.input.dock', id: 'autorestart-backup-choice', order: 7, locale: NS }, BackupChoicePanel))

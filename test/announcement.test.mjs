@@ -841,7 +841,7 @@ test('the copy of the card lives in the locale files', () => {
     'announcement.title': 'title',
     'announcement.line1': 'line1',
     'announcement.line2': 'line2',
-    'announcement.line2.generic': 'line2Generic',
+    'announcement.line2.generic': 'line2.generic',
     'announcement.line3': 'line3',
     'announcement.disabled': 'disabled',
     'announcement.button': 'button',

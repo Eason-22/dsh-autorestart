@@ -558,11 +558,14 @@ test('the copy of the panel lives in the locale files', () => {
   const en = JSON.parse(fs.readFileSync(new URL('../locale/en.json', import.meta.url), 'utf8'))
   const api = globalThis.__dshAutorestartClient
   assert.ok(api, 'the client publishes its pure helpers')
-  for (const key of Object.keys(zh.restartPanel)) {
-    assert.equal(api.dictionaries.zh[key], zh.restartPanel[key], `zh.${key} must match the client copy`)
-    assert.equal(api.dictionaries.en[key], en.restartPanel[key], `en.${key} must match the client copy`)
+  // The locale files are the MIRROR of the dictionaries: every key of the
+  // client is in the file under the same name.
+  const panelKeys = Object.keys(api.dictionaries.zh).filter((key) => key.startsWith('cancel'))
+  for (const key of panelKeys) {
+    assert.equal(api.dictionaries.zh[key], zh[key], `zh.${key} must match the client copy`)
+    assert.equal(api.dictionaries.en[key], en[key], `en.${key} must match the client copy`)
   }
-  assert.ok(Object.keys(zh.restartPanel).length >= 20, 'the panel copy is complete')
+  assert.ok(panelKeys.length >= 20, 'the panel copy is complete')
 })
 
 // ------------------------------------------------------------------ *

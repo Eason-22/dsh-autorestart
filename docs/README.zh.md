@@ -789,7 +789,7 @@ lib/lifecycle.js     纯决策：bootPlan / restartDecision / selectGoalDisarms 
 lib/restart.js       Windows 脱离重启（WMI 主、schtasks 兜底、dryRun、自定义命令）
 lib/sleep.js         收工关机：识别真宿主机（含 WSL）、关机命令、等待→倒数→关机的状态机
 lib/semver.js        版本号比较（公告去重用：只看"记录版本是否低于当前功能版本"）
-locale/{en,zh}.json  Plugin Manager 显示用标题/描述
+locale/{en,zh}.json  界面文案的镜像（与 client.js 里注册给 DSH 的两份字典同键同词；键集由一条用例钉住）
 icon.svg             插件图标
 LICENSE              MIT 许可（发布到插件市场需要）
 test/                node:test 用例（状态机 / 检查点 / 重启命令 / goal 解除 / 集成恢复 / recover_now）

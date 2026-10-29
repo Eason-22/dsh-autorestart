@@ -1,5 +1,5 @@
 /**
- * THE WATCHDOG DRILL: three real scenarios, and the tiers on a real machine.
+ * THE WATCHDOG DRILL: four real scenarios, and the tiers on a real machine.
  *
  * Nothing here touches the profile of a running DSH: the drill works in its
  * own directory under the temp directory, with a FAKE host (a small script
@@ -8,6 +8,9 @@
  *   1. the host comes up            -> the watchdog stands down, NO restore
  *   2. the host never comes up      -> restore, start again, RECOVERED
  *   3. the host stays down          -> restore ONCE, start again, FAILED
+ *   4. the host is UP but wrote NO ready marker (the 0.8.2 incident) -> the
+ *      watchdog ASKS THE HEALTH ROUTE, sees the host answer, does NOT restore,
+ *      and still deletes the pending marker AND the scheduled task.
  *
  * And then the tiers, for real:
  *
@@ -194,6 +197,133 @@ async function scenario({ name, behaviour, fixIt, expect }) {
 }
 
 /**
+ * A fake host that is UP and answers the health route -- and NEVER writes the
+ * ready marker. That is exactly the 0.8.2 incident: a healthy host with no
+ * marker, because the marker write failed and the failure was swallowed.
+ *
+ * @param {string} dir
+ */
+function fakeHealthOnlyHost(dir) {
+  const script = path.join(dir, 'fake-health-host.mjs');
+  const portFile = path.join(dir, 'health-port.txt');
+  fs.writeFileSync(script, [
+    "import fs from 'node:fs';",
+    "import http from 'node:http';",
+    "import path from 'node:path';",
+    "const dir = process.argv[2];",
+    "const server = http.createServer((req, res) => {",
+    "  res.statusCode = 200;",
+    "  res.setHeader('content-type', 'application/json');",
+    "  res.end(JSON.stringify({ ok: true }));",
+    "});",
+    "server.listen(0, '127.0.0.1', () => {",
+    "  fs.writeFileSync(path.join(dir, 'health-port.txt'), String(server.address().port));",
+    "});",
+    "setTimeout(() => process.exit(0), 90000);",
+    '',
+  ].join('\n'), 'utf8');
+  return { script, portFile };
+}
+
+/**
+ * Does the Windows task still exist?
+ *
+ * @param {string} taskName
+ * @returns {boolean}
+ */
+function taskStillExists(taskName) {
+  try {
+    execFileSync('schtasks', ['/Query', '/TN', taskName], { stdio: 'ignore', timeout: 15000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * SCENARIO 4 -- THE HOST IS UP BUT WROTE NO READY MARKER (the 0.8.2 incident).
+ *
+ * The watchdog must ask the health route itself before it restores anything.
+ * The host answers, so the snapshot is NOT restored -- and the pending marker
+ * and the real scheduled task are still cleaned up (an armed task that fires
+ * later would restore a healthy profile).
+ */
+async function scenarioHostUpWithoutMarker() {
+  const name = 'scenario-4-no-marker';
+  const dir = path.join(drillRoot, name);
+  fs.mkdirSync(dir, { recursive: true });
+  const restoreLog = path.join(dir, 'restore.log');
+  const restore = fakeRestore(dir, false);
+
+  // (1) The host: up, answering health, NO ready marker.
+  const host = fakeHealthOnlyHost(dir);
+  const child = spawn(process.execPath, [host.script, dir], { detached: true, stdio: 'ignore' });
+  child.unref();
+  const up = await waitForFile(host.portFile, 15000);
+  check(name + ': the fake host came up and answers health', up);
+  const port = up ? Number(fs.readFileSync(host.portFile, 'utf8').trim()) : 0;
+  check(name + ': the health port is known', Number.isFinite(port) && port > 0, String(port));
+
+  // (2) The instance record the real host writes at boot -- WITHOUT a boot id,
+  //     so "is an instance alive" cannot be answered from it alone: only the
+  //     direct health question can. That is the guard this scenario tests.
+  const portFile = path.join(dir, 'access.json');
+  fs.writeFileSync(portFile, JSON.stringify({ bootId: null, port: port > 0 ? port : null, at: Date.now() }), 'utf8');
+
+  // (3) A REAL scheduling item: the watchdog has to delete it, not only the
+  //     pending marker. (On a machine without the task scheduler the drill
+  //     falls back to the detached-process tier and checks the markers only.)
+  const taskName = 'dsh-autorestart-drill-' + crypto.randomUUID().slice(0, 8);
+  let registered = { ok: false, error: 'the task scheduler is not used here' };
+  if (process.platform === 'win32') {
+    registered = registerScheduledTask({
+      taskName,
+      startIso: localIso(new Date(Date.now() + 15 * 60 * 1000)),
+      endIso: localIso(new Date(Date.now() + 45 * 60 * 1000)),
+      command: 'echo fired > "' + path.join(dir, 'task-fired.txt') + '"',
+      xmlPath: path.join(dir, 'task.xml'),
+    });
+    check(name + ': the real scheduled task was registered', registered.ok === true, registered.error || '');
+  }
+
+  writePending(dir, buildPending({
+    tier: registered.ok === true ? 'scheduled-task' : 'detached-process',
+    tierReason: 'the drill arms the watchdog itself',
+    taskName: registered.ok === true ? taskName : '',
+    restoreCommand: { file: process.execPath, args: [restore, dir] },
+    healthPath: '/__dsh_autorestart/health',
+    portFile,
+    expectedBootId: 'the-boot-before-the-restart',
+    timeoutMs: 3000,
+    recheckMs: 800,
+    readyTimeoutMs: 4000,
+    now: Date.now(),
+  }));
+
+  const watchdog = spawn(process.execPath, [path.join(here, 'watchdog.mjs'), '--state-dir', dir], { stdio: 'ignore' });
+  await new Promise((resolve) => watchdog.on('exit', resolve));
+
+  const report = readReport(dir);
+  const restores = fs.existsSync(restoreLog)
+    ? fs.readFileSync(restoreLog, 'utf8').trim().split('\n').filter(Boolean).length
+    : 0;
+  check(name + ': the report says not-needed', report !== null && report.result === 'not-needed', report ? String(report.result) : 'no report');
+  check(name + ': the health route was asked and answered', report !== null && report.healthCheck === 'healthy', report ? String(report.healthCheck) : 'no report');
+  check(name + ': nothing was restored', restores === 0, restores + ' restore(s)');
+  check(name + ': the pending marker is gone', !fs.existsSync(path.join(dir, 'watchdog-pending.json')));
+  check(name + ': no task was fired', !fs.existsSync(path.join(dir, 'task-fired.txt')));
+  if (registered.ok === true) {
+    check(name + ': the scheduled task is gone', !taskStillExists(taskName), taskName);
+  }
+  try {
+    child.kill();
+  } catch {
+    // It is gone anyway (it exits by itself).
+  }
+  return report;
+}
+
+/**
  * The Windows scheduled task, for real: register it, read it back, let it
  * fire, delete it.
  */
@@ -311,10 +441,13 @@ console.log('dsh-autorestart watchdog drill');
 console.log('  workspace: ' + drillRoot);
 console.log('');
 
-console.log('--- the three scenarios ---');
+console.log('--- the four scenarios ---');
 await scenario({ name: 'scenario-1-normal', behaviour: 'up', fixIt: false, expect: 'not-needed' });
 await scenario({ name: 'scenario-2-recovered', behaviour: 'down', fixIt: true, expect: 'recovered' });
 await scenario({ name: 'scenario-3-failed', behaviour: 'down', fixIt: false, expect: 'failed' });
+// THE 0.8.2 INCIDENT: a healthy host that never wrote the ready marker. The
+// watchdog has to ask the health route instead of trusting the marker.
+await scenarioHostUpWithoutMarker();
 
 console.log('');
 console.log('--- the tiers, for real ---');

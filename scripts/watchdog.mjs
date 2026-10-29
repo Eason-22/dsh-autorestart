@@ -81,6 +81,109 @@ function healthOk(url, timeoutMs = 5000) {
 }
 
 /**
+ * Every health URL that could answer for this host, most trustworthy first.
+ *
+ * The NEW instance of the desktop app listens on a RANDOM port, so the URL the
+ * old instance knew (`pending.healthUrl`) is usually worthless after a
+ * restart. The new instance publishes its own port in the instance record
+ * (`pending.portFile`), and that record is asked REGARDLESS of its boot id: any
+ * host that answers this route is a host that must not be restored.
+ *
+ * @param {object} pending
+ * @returns {string[]}
+ */
+function healthCandidates(pending) {
+  const healthPath = pending.healthPath || '/__dsh_autorestart/health';
+  const urls = [];
+  const add = (url) => {
+    if (typeof url === 'string' && url !== '' && !urls.includes(url)) urls.push(url);
+  };
+  // (1) The port the running instance published about itself.
+  if (pending.portFile) {
+    try {
+      const record = JSON.parse(fs.readFileSync(pending.portFile, 'utf8'));
+      const port = Number(record && record.port);
+      if (Number.isFinite(port) && port > 0) add('http://127.0.0.1:' + port + healthPath);
+    } catch {
+      // No record yet: the host may not have written it.
+    }
+  }
+  // (2) A port the plugin put into the pending marker itself.
+  const own = Number(pending.port);
+  if (Number.isFinite(own) && own > 0) add('http://127.0.0.1:' + own + healthPath);
+  // (3) The URL of the instance that is being replaced (last resort: it is the
+  //     OLD port, but a host that never went down still answers on it).
+  add(pending.healthUrl);
+  return urls;
+}
+
+/**
+ * ASK THE HOST ITSELF: is it alive?
+ *
+ * This is the last question before a restore (see step 3b of
+ * lib/watchdog.js). It answers:
+ *
+ *   'healthy'   -- a health route answered `{"ok":true}`, or an instance of the
+ *                 NEW boot is clearly running: DO NOT RESTORE
+ *   'unhealthy' -- every known URL was asked and none answered, and no instance
+ *                 of the new boot is running: the restore may go ahead
+ *   'unknown'   -- there was no URL to ask at all (no instance record, no
+ *                 health URL): the caller waits one more round
+ *
+ * The instance record is checked as well as the ports, because a port in that
+ * record can be the WRONG one (it may carry the configured port instead of the
+ * one the server really listens on). The pid of the new boot is a harder fact
+ * than a failed HTTP request, and "never restore a live host" is the rule that
+ * matters here.
+ *
+ * @param {object} pending
+ * @returns {Promise<{ state: 'healthy'|'unhealthy'|'unknown', detail: string|null }>}
+ */
+async function askHealth(pending) {
+  const urls = healthCandidates(pending);
+  for (const url of urls) {
+    if (await healthOk(url)) return { state: 'healthy', detail: 'the health route answered: ' + url };
+  }
+  const record = readInstanceRecord(pending.portFile);
+  if (record && record.pid && record.bootId !== pending.expectedBootId && isAlive(record.pid)) {
+    return { state: 'healthy', detail: 'the instance of the new boot is running (pid ' + record.pid + ')' };
+  }
+  if (urls.length === 0) return { state: 'unknown', detail: null };
+  return { state: 'unhealthy', detail: 'no health route answered (' + urls.length + ' asked), no live instance' };
+}
+
+/**
+ * The instance record the plugin writes at boot (port, pid, boot id).
+ *
+ * @param {string} file
+ * @returns {object|null}
+ */
+function readInstanceRecord(file) {
+  if (!file) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is that process still there?
+ *
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Is an instance of the host alive?
  *
  * The NEW instance publishes its own port (the desktop app listens on a
@@ -181,6 +284,10 @@ const report = await runWatchdogFlow({
   stateDir,
   deps: {
     probeAlive: () => probeAlive(pending),
+    // THE LAST QUESTION BEFORE ANY RESTORE: ask the health route itself. A
+    // host that answers must never be rolled back, even when it forgot to
+    // write the ready marker.
+    askHealth: () => askHealth(pending),
     runRestore: () => (pending.restoreCommand
       ? runCommand(pending.restoreCommand)
       : restoreFromSnapshot({ snapshotDir: pending.snapshotDir, profileDir: pending.profileDir })),

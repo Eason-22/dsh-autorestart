@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.8.2 — 2026-10-29
+
+**线上缺陷修复：宿主起来之后没有撤销看门狗，会把好环境回滚掉。**
+
+### 事故现场（真机，19:19–19:21）
+
+触发重启 → `watchdog-pending.json` 写入、`dsh-autorestart-watchdog` 计划任务注册成功、报告写 `armed`；新宿主 19:20:20 起来，health 连打 3 次都是 200；**但 `watchdog-ready.json` 从头到尾没出现**，`watchdog-pending.json` 还在、计划任务还在 `Ready`。当时是人工 `Unregister-ScheduledTask` 拆掉的——没人管的话，90 秒后它会还原快照并再拉起一个实例，**把一个健康的环境回滚掉**。
+
+### 根因（已复现）
+
+health 路由里那段"写 marker + 撤看门狗"的代码读的是 `stateDirOf()`——那是 runtime 工厂内部的闭包变量，**模块级函数根本看不见它**。所以每次请求都在第一行就抛 `ReferenceError: stateDirOf is not defined`，外面那个 `catch {}` 把异常吞了：路由照样回 200，marker 没写、pending 没清、计划任务没删，任何地方都没有痕迹。
+
+- 复现方式：用测试上下文调真实的 health 路由，断言 marker 出现——旧代码失败（`ready written: false`）。
+- 同源的第二个坑：`clearPending` / `readPending` 当时也没被 import，`armWatchdog` 注册失败的回滚分支同样会抛 `ReferenceError`。
+
+### 修
+
+- **health 路由不再靠闭包**：状态目录改由 `runtime.stateDir` 提供（`runtime` 上新增 `stateDir` / `pluginVersion`）。这类"路由看不见工厂内部变量"的错误从此没机会重演。
+- **撤销拆成独立模块**（`lib/watchdog-disarm.js`），三件事分开做、都留痕：
+  1. **先写 ready marker**（同步、read-back 校验）——它是唯一能阻止回滚的东西，绝不再依赖计划任务是否删成功；
+  2. 清 `watchdog-pending.json`；
+  3. 按 pending 自己写的 tier/taskName 删调度项（不再硬编码名字），删完**回查**（`schtasks /Query`）确认真的没了。
+- **失败必须重试并留痕**：默认 3 次、退避 120ms/240ms；每次失败都带 `error.name` + `message`，写进 `watchdog-disarm.json`、health 响应、诊断文本（"报告一个问题"），不再静默。
+- **开机就撤销，不等任何人来问**：`apply()` 里注册完路由立刻跑一次 disarm。即使一次 health 都没人打，宿主起来就会把看门狗撤掉；health 路由仍是第二道保险（后台清理，不拖慢响应）。
+- **兜底（最要紧的一条）：看门狗回滚前必须自己问一次 health**。`runWatchdogFlow` 新增 3b 步：直接 HTTP 问 `127.0.0.1:<port>`（端口依次取实例记录 `access.json`、pending 里的 port、旧 `healthUrl`），**只要有一台在应答就绝不回滚**（`result: not-needed`）；一个端口都问不到时，额外再等一轮、复查 ready marker 与 pending，仍然没动静才允许回滚。
+- **顺手修掉的版本号 bug**：runtime 里那份 `pluginVersion()` 读的是 `../package.json`（插件目录的上一层），永远返回 `unknown`；health 于是把 `unknown` / 硬编码常量当版本报出来。现在统一走模块级读取，`health.version` 是真正加载的版本。
+
+### 演练
+
+`node scripts/drill-watchdog.mjs` 从三个场景扩到**四个**，新增：
+
+- **场景 ④「宿主起来了但没写 ready marker」**（就是这次事故）：假宿主只应答 health、绝不写 marker，并且**真实注册一个 Windows 计划任务**；断言 watchdog `result: not-needed`、`healthCheck: healthy`、**一次还原都没有**、pending 已消失、**计划任务真的被删掉**（`schtasks /Query` 查不到）。
+
+### 验证
+
+- 单元测试 **740 → 753 项全绿**（新增 `test/watchdog-disarm.test.mjs`：事故复现、开机自动撤销、marker 读写与 read-back、失败/重试/留痕、按 pending 选调度项、诊断文本、流程里"健康就不回滚"、问不到端口多等一轮）。
+- 演练四场景 + 三档调度真机触发全部 exit 0。
+
 ## 0.8.1 — 2026-10-29
 
 **修复打包遗漏**：0.8.0 的 npm 包按 `package.json` 的 `files` 白名单打包，而那份白名单只收了 `scripts/*.ps1` 与 `scripts/*.cmd`——**三个 POSIX 自救脚本（`restore-profile.sh` / `emergency-disable.sh` / `drill-rescue.sh`）、`scripts/README.md`、`scripts/rescue-strings.zh.json` 全都没进包**。Linux / WSL 用户装完 0.8.0 后，文档让他去双击/运行 `scripts/restore-profile.sh`，那个文件却不存在。

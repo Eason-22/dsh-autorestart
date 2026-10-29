@@ -198,7 +198,7 @@ what it adds before you install it.
 
 ## Install
 
-Current version: **0.8.1**.
+Current version: **0.8.2**.
 
 From npm — the package is published under the name `dsh-autorestart`:
 
@@ -568,11 +568,24 @@ plugin actually does.
 
 The flow is the same for every tier (`lib/watchdog.js`): wait for the new host
 to write the ready marker → ask again (a slow host is not a dead host) → is an
-instance alive? (then there is nothing to restore) → take the shared lock
-(`rollback.lock`, so exactly one of us restores) → restore the snapshot → start
-the host again → wait for the ready marker once more. At most **one** restore
-and **one** start; then the watchdog stops and writes what happened into
-`<stateDir>/last-watchdog-report.json` (which tier it used, and why).
+instance alive? (then there is nothing to restore) → **ask the health route of
+the host itself** (only a host that does not answer may be rolled back; when
+there is no port to ask, one more round is waited and the markers are looked at
+again) → take the shared lock (`rollback.lock`, so exactly one of us restores) →
+restore the snapshot → start the host again → wait for the ready marker once
+more. At most **one** restore and **one** start; then the watchdog stops and
+writes what happened into `<stateDir>/last-watchdog-report.json` (which tier it
+used, `healthCheck`, and why).
+
+**The disarming is the host's job, and it does it at boot.** As soon as this
+plugin is loaded, it writes the ready marker, removes `watchdog-pending.json` and
+deletes its own scheduling item (retried with a backoff, verified afterwards by
+asking the task scheduler, recorded in `<stateDir>/watchdog-disarm.json`). It
+does not wait for anybody to call the health route — the watchdog must be
+disarmed even when nobody opens the interface, and a disarm that fails is
+visible in `health`, in the diagnostics text and in that record instead of
+being silent. That is the fix of 0.8.2: an error swallowed by the health route
+left an armed watchdog behind a healthy host.
 
 **Only one watchdog at a time.** There is an older watcher in this plugin as
 well (it restores the snapshot but does **not** start the host again). Both take

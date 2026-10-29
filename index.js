@@ -117,13 +117,18 @@ import {
 } from './lib/watchdog-tier.js'
 import {
   buildPending,
+  clearPending,
   clearReady,
-  readReady,
+  readPending,
   readReport,
   writePending,
-  writeReady,
   writeReport,
 } from './lib/watchdog.js'
+import {
+  disarmWatchdog as runDisarmWatchdog,
+  markReady,
+  readDisarmRecord,
+} from './lib/watchdog-disarm.js'
 import {
   ARBITERS,
   planWatchdogArbiter,
@@ -374,7 +379,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.8.1'
+const PLUGIN_VERSION_FALLBACK = '0.8.2'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -1646,6 +1651,17 @@ export function createRuntime(ctx, config, options = {}) {
   let disposed = false
   let lastPersistError
   /**
+   * THE LAST DISARM of the watchdog: the record of "the host is up, so nothing
+   * may roll it back" (see lib/watchdog-disarm.js). It is kept on `runtime` so
+   * the settings page and the diagnostics can show a FAILED disarm instead of
+   * the silence that caused the 0.8.2 incident.
+   */
+  let watchdogDisarm = readDisarmRecord(path.dirname(stateFile))
+  /** The disarm that is currently running (one at a time; null when idle). */
+  let disarmInFlight = null
+  /** A disarm was asked for while one was running: run once more afterwards. */
+  let disarmPendingAgain = false
+  /**
    * The tool registrations that failed. A failed registration is recorded and
    * logged, never thrown: the plugin still loads and the other tools still work.
    */
@@ -2616,17 +2632,14 @@ const titleOfSummary = (item) => {
   /**
    * The version of THIS plugin (the one the user runs).
    *
+   * It delegates to the module-level reader ON PURPOSE: a local copy used to
+   * look for `../package.json`, which is one directory ABOVE the plugin, so
+   * every answer was `unknown` — and the health route reported that instead of
+   * the version that is really loaded.
+   *
    * @returns {string}
    */
-  const pluginVersion = () => {
-    try {
-      const raw = fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')
-      const parsed = JSON.parse(raw)
-      return typeof parsed.version === 'string' && parsed.version !== '' ? parsed.version : 'unknown'
-    } catch {
-      return 'unknown'
-    }
-  }
+  const ownVersion = () => pluginVersion()
 
   /**
    * Write (or update) the durable record of the restart.
@@ -2960,7 +2973,7 @@ const titleOfSummary = (item) => {
    * @returns {string}
    */
   const diagnosticsText = () => buildDiagnostics({
-    version: pluginVersion(),
+    version: ownVersion(),
     platform: env.platform,
     hostKind: hostKindOf().kind,
     isDesktopApp: env.isDesktopApp === true,
@@ -2970,6 +2983,9 @@ const titleOfSummary = (item) => {
     lastRestart: lastRestartVerdict(),
     stateDir: stateDirOf(),
     watchdog: watchdogInfo(),
+    // DID THE DISARM WORK? A failed disarm leaves an armed watchdog behind,
+    // and that is the first thing a bug report has to show.
+    watchdogDisarm: summarizeDisarm(watchdogDisarm),
   })
 
   /**
@@ -4058,6 +4074,125 @@ const titleOfSummary = (item) => {
     },
     get bootId() {
       return bootId
+    },
+    /**
+     * THE STATE DIRECTORY of this boot — the checkpoint, the watchdog markers
+     * and the scheduling-item leftovers all live in it.
+     *
+     * It is exposed ON PURPOSE: the health route is a module-level function
+     * and used to read the directory from a variable that only existed inside
+     * this factory. The lookup threw `ReferenceError: stateDirOf is not
+     * defined` on every request, an empty `catch {}` ate it, and a healthy
+     * host left an armed watchdog behind (the 0.8.2 incident). Anything a
+     * route needs must be reachable through `runtime`, never through a
+     * closure it cannot see.
+     */
+    get stateDir() {
+      return path.dirname(stateFile)
+    },
+    /**
+     * The version of the plugin that is actually LOADED in this process.
+     *
+     * The health route reports it so a real-machine check can tell "the new
+     * code is running" from "the old code is still loaded".
+     */
+    get pluginVersion() {
+      return ownVersion()
+    },
+    /**
+     * DISARM THE WATCHDOG: "this host is up, so nothing may roll it back".
+     *
+     * The ready marker is written on the FIRST tick of the first attempt (so a
+     * caller inside an HTTP route has it on disk before it answers), the
+     * pending marker and the scheduling item are cleaned with retries, and the
+     * record is kept on `runtime` and written next to the markers.
+     *
+     * One run at a time: a second call while one is running returns the same
+     * promise instead of starting a second `schtasks` dance.
+     *
+     * @param {string} [source] where the call came from ('boot', 'health-route', …)
+     * @returns {Promise<object>} the record
+     */
+    disarmWatchdog(source = 'boot') {
+      if (disarmInFlight !== null) {
+        // One run at a time (two `schtasks /Delete` calls fight each other),
+        // but a request that arrives DURING a run is remembered: a pending
+        // marker written in the meantime must still be cleaned, not lost.
+        disarmPendingAgain = true
+        return disarmInFlight
+      }
+      const one = (where) => {
+        const port = Number(runtime.webPort)
+        return runDisarmWatchdog({
+          stateDir: stateDirOf(),
+          bootId,
+          port: Number.isFinite(port) && port > 0 ? port : null,
+          source: where,
+          log,
+        })
+          .then((record) => {
+            watchdogDisarm = record
+            if (record.ok === true) {
+              log.info('the watchdog is disarmed (' + where + ')', {
+                attempts: record.attempts,
+                tier: record.tier,
+              })
+            }
+            return record
+          })
+          .catch((error) => {
+            // The disarm must never reject: the health route and the boot path
+            // both call it without a `catch`.
+            watchdogDisarm = {
+              at: new Date().toISOString(),
+              source: String(where),
+              bootId,
+              attempts: 0,
+              ok: false,
+              ready: false,
+              pending: null,
+              tier: null,
+              scheduleRemoved: null,
+              scheduleError: null,
+              errors: [{
+                attempt: 0,
+                step: 'disarm',
+                name: error && error.name ? String(error.name) : 'Error',
+                message: error && error.message ? String(error.message) : String(error),
+              }],
+            }
+            log.warn('the watchdog could not be disarmed:', String(error))
+            return watchdogDisarm
+          })
+      }
+      const drive = async () => {
+        let record = await one(source)
+        while (disarmPendingAgain === true) {
+          disarmPendingAgain = false
+          record = await one(String(source) + '+again')
+        }
+        return record
+      }
+      const running = drive().then(
+        (record) => {
+          disarmInFlight = null
+          disarmPendingAgain = false
+          return record
+        },
+        (error) => {
+          disarmInFlight = null
+          disarmPendingAgain = false
+          throw error
+        },
+      )
+      disarmInFlight = running
+      return running
+    },
+    /**
+     * The record of the last disarm (null when this host never disarmed one).
+     */
+    get watchdogDisarm() {
+      return watchdogDisarm
     },
     /**
      * Where the effective `backupIncludePlugins` value came from:
@@ -7377,6 +7512,39 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
 }
 
 /** Expose a tiny read-only health route for humans and verification scripts. */
+/**
+ * The disarm record, cut down to what a reader outside the process needs.
+ *
+ * The health route answers with it, so a real-machine check can tell "the
+ * watchdog was stood down" from "it is still armed" without reading a log.
+ *
+ * @param {object|null} record
+ * @returns {object|null}
+ */
+function summarizeDisarm(record) {
+  if (!record || typeof record !== 'object') return null
+  const errors = Array.isArray(record.errors) ? record.errors : []
+  return {
+    ok: record.ok === true,
+    at: typeof record.at === 'string' ? record.at : null,
+    source: typeof record.source === 'string' ? record.source : null,
+    attempts: Number.isFinite(Number(record.attempts)) ? Number(record.attempts) : 0,
+    ready: record.ready === true,
+    pending: record.pending === true,
+    tier: typeof record.tier === 'string' ? record.tier : null,
+    scheduleRemoved: record.scheduleRemoved === true ? true : (record.scheduleRemoved === false ? false : null),
+    // Only the first failure: the route answer must stay small, and one named
+    // error is what makes the failure diagnosable.
+    error: errors.length > 0
+      ? {
+        step: typeof errors[0].step === 'string' ? errors[0].step : null,
+        name: typeof errors[0].name === 'string' ? errors[0].name : null,
+        message: typeof errors[0].message === 'string' ? errors[0].message : null,
+      }
+      : null,
+  }
+}
+
 function registerHealthRoute(ctx, runtime, config, sleep) {
   const routePath = typeof config.healthPath === 'string' && config.healthPath.startsWith('/')
     ? config.healthPath
@@ -7630,20 +7798,34 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       // THE READY MARKER: this host answers its own health route, so it is
       // up. The watchdog (which waits for the relaunched host) sees the
       // marker and stands down — no rollback of a host that is fine.
+      //
+      // THE STATE DIRECTORY COMES FROM `runtime`, NEVER FROM A CLOSURE:
+      // 0.8.2 read it through a variable that only existed inside the runtime
+      // factory, so every request threw `ReferenceError: stateDirOf is not
+      // defined`, the `catch {}` swallowed it, and a healthy host left the
+      // pending marker AND the scheduled task behind (the watchdog would have
+      // rolled a healthy profile back). The failure is recorded now, and the
+      // marker is written first because the marker alone is what stops a
+      // rollback.
       try {
-        const marker = readReady(stateDirOf())
-        if (!marker || marker.bootId !== runtime.bootId) {
-          writeReady(stateDirOf(), { bootId: runtime.bootId, port: runtime.port ?? null })
-          // The host is up: the watchdog has nothing to do. Its scheduling
-          // item and its pending marker go NOW — nothing may be left behind.
-          if (readPending(stateDirOf()) !== null) {
-            clearPending(stateDirOf())
-            try {
-              removeScheduledTask({ taskName: 'dsh-autorestart-watchdog' })
-            } catch {
-              // The watchdog removes it itself when it runs.
+        const stateDir = typeof runtime.stateDir === 'string' ? runtime.stateDir : ''
+        if (stateDir !== '') {
+          const marked = markReady({
+            stateDir,
+            bootId: runtime.bootId,
+            port: runtime.webPort ?? null,
+          })
+          if (marked.ok !== true) {
+            runtime.watchdogReadyError = {
+              at: Date.now(),
+              message: marked.detail,
+              name: marked.error && marked.error.name ? String(marked.error.name) : null,
             }
           }
+          // The marker alone stands the watchdog down; the pending marker and
+          // the scheduling item are cleaned with retries in the background, so
+          // `schtasks` never delays this answer.
+          runtime.disarmWatchdog('health-route')
         }
       } catch (error) {
         // NEVER silent: a swallowed error here leaves an armed watchdog behind.
@@ -7651,12 +7833,17 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
         // page and the diagnostics can show it instead of pretending all is well.
         runtime.watchdogReadyError = {
           at: Date.now(),
+          name: error && error.name ? String(error.name) : 'Error',
           message: String(error && error.message ? error.message : error),
         }
         // One retry with the bare minimum: the marker alone is what the
         // watchdog actually waits for.
         try {
-          writeReady(stateDirOf(), { bootId: runtime.bootId, port: runtime.port ?? null })
+          markReady({
+            stateDir: typeof runtime.stateDir === 'string' ? runtime.stateDir : '',
+            bootId: runtime.bootId,
+            port: runtime.webPort ?? null,
+          })
           runtime.watchdogReadyError.retry = 'ok'
         } catch (again) {
           runtime.watchdogReadyError.retry = String(again && again.message ? again.message : again)
@@ -7665,7 +7852,10 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       const body = JSON.stringify({
         ok: true,
         plugin: name,
-        version: PLUGIN_VERSION_FALLBACK,
+        // The version of the code that is LOADED (not the fallback constant):
+        // a real-machine check can tell "the new build is running" from "the
+        // old one is still in memory".
+        version: runtime.pluginVersion ?? PLUGIN_VERSION_FALLBACK,
         bootId: runtime.bootId,
         pid: process.pid,
         phase: state.phase,
@@ -7677,6 +7867,10 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
         manualRestartBlocks: runtime.manualRestartBlocks ?? 0,
         indexTaps: runtime.indexTaps ?? 0,
         configSchema: Config !== undefined,
+        // DID THE DISARM WORK? A failed disarm means an armed watchdog is still
+        // out there; it must be visible from outside the process, not only in
+        // a log line nobody reads.
+        watchdog: summarizeDisarm(runtime.watchdogDisarm),
         schemastery: Config === undefined
           ? (schemastery === undefined ? 'unresolved' : 'construction-failed')
           : (schemasterySource === 'bare-specifier' ? 'bare' : 'asar-fallback'),
@@ -8009,6 +8203,19 @@ export function apply(ctx, rawConfig, options = {}) {
   registerManualRestartGuard(ctx, runtime, config)
   registerSystemPrompt(ctx, runtime)
   registerHealthRoute(ctx, runtime, config, sleep)
+
+  // DISARM THE WATCHDOG AT BOOT — WITHOUT WAITING FOR ANYBODY TO ASK.
+  //
+  // This is the fix of the 0.8.2 incident: the ready marker and the cleanup of
+  // the pending marker / scheduled task hung on the health route being hit.
+  // The plugin is fully loaded at this point (every route is registered, the
+  // boot recovery is scheduled), so this instance is "up" in the only sense
+  // the watchdog cares about: it must not be rolled back.
+  //
+  // The call never rejects (see runtime.disarmWatchdog) and never blocks the
+  // load: the marker is written synchronously on its first tick, the
+  // `schtasks` cleanup runs with retries behind it.
+  runtime.disarmWatchdog('boot')
 
   ctx.effect(() => () => {
     runtime.markDisposed()

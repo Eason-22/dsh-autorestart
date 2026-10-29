@@ -518,7 +518,32 @@ scripts\drill-rescue.ps1      sha256=42a414695ba202555b9a4ac416bbc224e0f78d84c3e
 `%TEMP%\dsh-rescue-drill-9de04366792240c98a460c7486f5bba3`（32 位完整 GUID —— t3 的新规矩），
 跑完**自己清掉了**。
 
-> 顺带记一笔：`drill-rescue.ps1` 现在的断言条数是 22 条。
-> 早先那个版本（t3 改之前）是 17 条，t3 加了「目标目录不存在时被拒绝」「声明了插件却没装 → 还原必须失败」
-> 「演练目录里有锁文件」等断言后变成 22 条。
-> 报告里所有引用的输出片段都来自 **t3 之后的版本**。
+### 16:28 再收一次尾（BOM 二次回归修好之后）
+
+`dev` 修完第二次 BOM 回归后，我在**当时的工作区**上又整体跑了一遍，仍然全绿：
+
+| 检查 | 结果 |
+| --- | --- |
+| `scripts\restore-profile.ps1` / `scripts\drill-rescue.ps1` 的 BOM | 都在（`EF BB BF`） |
+| 编码硬闸 `node --test test\scripts-encoding.test.mjs` | **pass 6 / fail 0**（硬闸自己又长了两条） |
+| `drill-rescue.ps1` | 退出码 **0**，**28 条 `[通过]`、0 条 `[失败]`** |
+| 我自写的更狠演练 | 退出码 **0**，**PASS=33、FAIL=0** |
+| `node --test test\rescue.test.mjs test\scripts-encoding.test.mjs` | **tests 38 / pass 38 / fail 0** |
+| 用户真实 profile 基线 | SHA256、mtime、ctime **三项仍与基线一致**，无 `broken-*` |
+
+当时工作区的脚本指纹：
+
+```
+scripts\restore-profile.ps1    sha256=05b68b499f6c64f27ea4305312fe6d4d913676732220c442c36b574641704f8a   ← 与 65a4c98 一致，没再变
+scripts\restore-profile.cmd    sha256=4c902fd65efb4c7419bf33b9398cf0cf26b7b59286a9754dc83435dd36d7694a   ← 同上
+scripts\drill-rescue.ps1       sha256=db36bb6282f0cfaa2171277883c8233d268afd51f20698572388c0f994c77ef4   ← t3 后续又改过
+test\scripts-encoding.test.mjs sha256=c981c816911c72bf0020146fa66c77ccd97cd7999dae20a5d8bf73a7e275c12d   ← 同上
+```
+
+> **关于断言条数**：`drill-rescue.ps1` 的条数随 t3 的推进一路在长 ——
+> t1 原始交付 **17 条** → t3 补完并发与编码 **22 条** → 再补 **28 条**。
+> 报告正文里所有引用的输出片段来自 **22 条那一版**（与提交 `65a4c98` 逐字节一致）；
+> 第十六节表格里的最终数字来自 **28 条那一版**。两版都全绿，结论不变。
+>
+> **`restore-profile.ps1` 和 `restore-profile.cmd` 自始至终没有再变过字节** ——
+> 本次演练的核心结论（能救回来、会拒绝、-DryRun 不落盘）在这两个文件的每一个版本上都是一样的。

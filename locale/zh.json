@@ -270,7 +270,28 @@
       "issueTitle": "重启 / 开机自启相关的问题",
       "issueBody": "请把刚才复制的诊断信息粘贴到下面。\n\n## 发生了什么\n\n\n## 期望什么\n\n\n## 怎么复现\n"
     },
-    "error": "没能保存设置：{message}"
+    "error": "没能保存设置：{message}",
+    "autostartKind": {
+      "other": "其他方式",
+      "windows-task": "Windows 计划任务",
+      "windows-startup": "Windows 启动文件夹",
+      "systemd-user": "systemd 用户服务",
+      "systemd-system": "systemd 系统服务",
+      "wsl-systemd": "WSL 里的 systemd",
+      "wsl-no-systemd": "WSL（没有 systemd）",
+      "container": "容器",
+      "desktop": "桌面版自带重启",
+      "unknown": "认不出",
+      "pm2": "pm2（进程守护工具）"
+    },
+    "startupWhy": {
+      "desktop": "这个进程就是桌面客户端本体，它自己会重启自己",
+      "bare": "它是被人在终端里手动起的，没人管它",
+      "external": "它是由另一个守护进程拉起来的",
+      "container": "它跑在容器里，由编排器负责",
+      "unknown": "看不出它是怎么被拉起来的",
+      "self-supervised": "它由本插件自己的守护在管"
+    }
   },
   "meta": {
     "title": "dsh-autorestart — 重启不断线",

@@ -345,6 +345,23 @@
     'settings.supervisor.startup.desktop': '桌面版自带重启',
     'settings.supervisor.startup.selfSupervised': '插件自己的守护在管',
     'settings.supervisor.startup.unknown': '认不出是谁拉起它的',
+  'settings.autostartKind.other': '其他方式',
+  'settings.autostartKind.windows-task': 'Windows 计划任务',
+  'settings.autostartKind.windows-startup': 'Windows 启动文件夹',
+  'settings.autostartKind.systemd-user': 'systemd 用户服务',
+  'settings.autostartKind.systemd-system': 'systemd 系统服务',
+  'settings.autostartKind.wsl-systemd': 'WSL 里的 systemd',
+  'settings.autostartKind.wsl-no-systemd': 'WSL（没有 systemd）',
+  'settings.autostartKind.container': '容器',
+  'settings.autostartKind.desktop': '桌面版自带重启',
+  'settings.autostartKind.unknown': '认不出',
+  'settings.autostartKind.pm2': 'pm2（进程守护工具）',
+  'settings.startupWhy.desktop': '这个进程就是桌面客户端本体，它自己会重启自己',
+  'settings.startupWhy.bare': '它是被人在终端里手动起的，没人管它',
+  'settings.startupWhy.external': '它是由另一个守护进程拉起来的',
+  'settings.startupWhy.container': '它跑在容器里，由编排器负责',
+  'settings.startupWhy.unknown': '看不出它是怎么被拉起来的',
+  'settings.startupWhy.self-supervised': '它由本插件自己的守护在管',
     'settings.supervisor.autostart': '开机自启怎么做',
     'meta.title': 'dsh-autorestart — 重启不断线',
     'meta.description': '让 DeepSeek Harness 重启后接着干活：落盘的检查点、启动时重新武装 goal 或给一条续接提示，以及一次等人闲下来的优雅重启。',
@@ -626,6 +643,23 @@
     'settings.supervisor.startup.desktop': 'the desktop app restarts itself',
     'settings.supervisor.startup.selfSupervised': 'the supervisor of this plugin is in charge',
     'settings.supervisor.startup.unknown': 'it could not be established who started it',
+  'settings.autostartKind.other': 'something else',
+  'settings.autostartKind.windows-task': 'Windows scheduled task',
+  'settings.autostartKind.windows-startup': 'Windows startup folder',
+  'settings.autostartKind.systemd-user': 'systemd user service',
+  'settings.autostartKind.systemd-system': 'systemd system service',
+  'settings.autostartKind.wsl-systemd': 'systemd inside WSL',
+  'settings.autostartKind.wsl-no-systemd': 'WSL without systemd',
+  'settings.autostartKind.container': 'a container',
+  'settings.autostartKind.desktop': 'the desktop app itself',
+  'settings.autostartKind.unknown': 'cannot tell',
+  'settings.autostartKind.pm2': 'pm2 (a process manager)',
+  'settings.startupWhy.desktop': 'this process is the desktop client itself — it relaunches itself',
+  'settings.startupWhy.bare': 'it was started by hand in a terminal; nobody manages it',
+  'settings.startupWhy.external': 'another supervisor started it',
+  'settings.startupWhy.container': 'it runs in a container; the orchestrator is in charge',
+  'settings.startupWhy.unknown': 'it could not be established how it was started',
+  'settings.startupWhy.self-supervised': 'the supervisor of this plugin started it',
     'settings.supervisor.autostart': 'How "start at login" works here',
     'meta.title': 'dsh-autorestart — restart continuation',
     'meta.description': 'Keeps agent work alive across a DeepSeek Harness restart: a durable checkpoint, goal re-arm or a continuation message on boot, and an idle-aware graceful restart the agent can request itself.',
@@ -1621,6 +1655,35 @@
    * @param {any} status the supervisor status of the Host
    * @returns {string}
    */
+  /** Strip the little markdown the host-side advice may carry (bold, code). */
+  function stripMarkdown(value) {
+    if (typeof value !== 'string') return ''
+    return value.replace(/\*\*/g, '').replace(/`/g, '').trim()
+  }
+
+  /** A human label for an autostart kind — the raw code never reaches the user. */
+  function humanKind(translate, kind) {
+    const raw = typeof kind === 'string' ? kind.trim() : ''
+    if (raw !== '') {
+      const key = 'settings.autostartKind.' + raw
+      const text = translate(key)
+      if (typeof text === 'string' && text !== '' && text !== key) return text
+    }
+    return translate('settings.autostartKind.other')
+  }
+
+  /** One localised sentence saying WHY this startup mode was detected. */
+  function startupWhy(translate, startup) {
+    if (!startup || typeof startup !== 'object') return ''
+    const mode = typeof startup.mode === 'string' ? startup.mode.trim() : ''
+    if (mode !== '') {
+      const key = 'settings.startupWhy.' + mode
+      const text = translate(key)
+      if (typeof text === 'string' && text !== '' && text !== key) return text
+    }
+    return stripMarkdown(typeof startup.evidence === 'string' ? startup.evidence : '')
+  }
+
   function supervisorModeLabel(t, status) {
     const translate = makeTranslate(t)
     const mode = status && typeof status === 'object' ? status.mode : ''
@@ -1858,6 +1921,9 @@
     countSubagentTasks,
     resolveAccessRedirect,
     supervisorModeLabel,
+    stripMarkdown,
+    humanKind,
+    startupWhy,
     startupModeLabel,
     canOfferSupervisorInstall,
     // "Report a problem": the URL builders and the clipboard with its fallback.
@@ -4854,7 +4920,7 @@
                   h(
                     'span',
                     { className: 'dsh-autorestart-settings__hint' },
-                    supervisorStartup.evidence + (supervisorStartup.suggestion !== '' ? ' — ' + supervisorStartup.suggestion : ''),
+                    startupWhy(t, supervisorStartup),
                   ),
                 )
               : null,
@@ -4870,12 +4936,12 @@
                   h(
                     'span',
                     { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'autostart' },
-                    supervisorAutostart.kind,
+                    humanKind(t, supervisorAutostart.kind),
                   ),
                   h(
                     'span',
                     { className: 'dsh-autorestart-settings__hint' },
-                    supervisorAutostart.reason,
+                    stripMarkdown(supervisorAutostart.reason),
                   ),
                   supervisorAutostart.commands.length > 0
                     ? h(

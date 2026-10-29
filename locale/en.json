@@ -270,7 +270,28 @@
       "issueTitle": "A problem with the restart / start at login",
       "issueBody": "Please paste the diagnostics you just copied below.\n\n## What happened\n\n\n## What you expected\n\n\n## How to reproduce\n"
     },
-    "error": "Could not save the settings: {message}"
+    "error": "Could not save the settings: {message}",
+    "autostartKind": {
+      "other": "something else",
+      "windows-task": "Windows scheduled task",
+      "windows-startup": "Windows startup folder",
+      "systemd-user": "systemd user service",
+      "systemd-system": "systemd system service",
+      "wsl-systemd": "systemd inside WSL",
+      "wsl-no-systemd": "WSL without systemd",
+      "container": "a container",
+      "desktop": "the desktop app itself",
+      "unknown": "cannot tell",
+      "pm2": "pm2 (a process manager)"
+    },
+    "startupWhy": {
+      "desktop": "this process is the desktop client itself — it relaunches itself",
+      "bare": "it was started by hand in a terminal; nobody manages it",
+      "external": "another supervisor started it",
+      "container": "it runs in a container; the orchestrator is in charge",
+      "unknown": "it could not be established how it was started",
+      "self-supervised": "the supervisor of this plugin started it"
+    }
   },
   "meta": {
     "title": "dsh-autorestart — restart continuation",

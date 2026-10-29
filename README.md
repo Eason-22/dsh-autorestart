@@ -51,6 +51,76 @@ Two safety gates protect the restart. The host checks that no conversation is bu
 helper checks the same gate over loopback immediately before it kills the process, so a turn that
 starts in between is never killed.
 
+## The whole thing in one page (ordinary users can stop here)
+
+### Why a restart does not lose your work
+
+The plugin turns a restart into a **resumable** event, and the order never changes:
+
+1. **The session state is written to disk first** — what every conversation was doing and which
+   goals were still armed goes into a checkpoint on disk;
+2. **It queues until every conversation is idle** — whoever is still running is waited for;
+3. **The process is replaced** — the old one exits, a new one comes up (the desktop app relaunches
+   itself; the hosted web client is covered below);
+4. **The new process checks itself** — four things: is the port up, are the routes there, did the
+   plugin load, did the sessions resume;
+5. **If it did not come up, it rolls back** — the pre-restart snapshot (configuration + installed
+   plugins) is put back, and the verdict of that restart is written down honestly.
+
+So "the restart lost my work" becomes "the restart carried on": you do not have to type "continue".
+
+### Two shapes of DSH, each minding its own business
+
+| | Desktop client | Hosted web client (`dsh web`) |
+|---|---|---|
+| Who brings it back | **the app itself** (it closes itself and opens itself again) | it first asks "who started me?" |
+| Should a system service be installed | **no** — installing one makes it start **twice**: one more DSH at every login | only when *nobody* manages it |
+| Somebody else already manages it (a supervisor script / systemd / a container / pm2 / a Windows scheduled task…) | n/a | **it only exits gracefully** and lets that supervisor bring it back (it does not start a second one) |
+| It cannot tell who started it | n/a | **it does nothing and guesses no command** — "I cannot tell" beats starting a second copy next to the first |
+
+### "Start at login": the plugin gives advice, it does not change your system
+
+The plugin **never** changes your system configuration and **never** registers a startup entry for
+you. It explains in the settings page how "start at login" works on *this* machine; the commands can
+be copied, and whether you use them is your call.
+
+| Your situation | What it recommends | Note |
+|---|---|---|
+| `dsh web` on Windows | start at login: a scheduled task first (no administrator rights); if this machine refuses that, a `.cmd` in the startup folder | the record runs a **real node** + the supervisor script, not the DSH client itself (that would open a second DSH at every login) |
+| Linux (not WSL) | a systemd user service | that is **start after login**; **start at boot** (without a login) needs the linger enabled once |
+| WSL with systemd | the same: a systemd user unit + the linger | same |
+| WSL without systemd | there is no "start at login" at all. Two ways out: ① turn systemd on inside WSL (change the distribution's configuration and restart the subsystem); ② let the Windows side start the distribution with a scheduled task or a startup-folder entry (much closer to a real boot autostart) | the plugin **never** changes your distribution's configuration for you, and it never recommends a container-orchestration setup inside WSL (the orchestrator of WSL is Windows itself) |
+| container / k8s | the orchestrator does it (`restart: always` and friends) | there is no "start at login" inside a container |
+
+**"Start after login" and "start at boot" are not the same thing**: the first waits for you to log
+in, the second happens when the machine comes up (and needs the linger enabled once). The plugin
+writes that sentence and the matching command into the settings page.
+
+### If DSH does not come up
+
+Double-click `scripts/emergency-disable.cmd` in the plugin directory — it takes this plugin out
+safely and keeps a backup — then open DSH again.
+
+### What has really been tested
+
+| How it was started | Tested on a real machine? | Evidence |
+| --- | --- | --- |
+| a shell supervisor script (`supervise-*.sh` and friends) | **yes** | recognised on a real machine as "somebody else manages it" → graceful exit only |
+| started by hand in a terminal (foreground) | **yes** | the whole flow ran on a real machine (install, run, uninstall) |
+| started in the background (`nohup` / `setsid`) | **yes** | on a real machine the re-launch command was confirmed to outlive its shell |
+| WSL with systemd | **yes** | really installed and really removed |
+| a Windows login task | **yes** | really created and really deleted at the system level (including the fallback into the startup folder) |
+| pm2 / forever | no, unit tests only | the recognition and the behaviour are pinned by unit tests |
+| container / compose | no, unit tests only | same |
+| `npx` / `pnpm dlx` wrapper | no, unit tests only | same |
+| started by another DSH plugin | no, unit tests only | same |
+| tmux / screen / an SSH session | no, unit tests only | same |
+| WSL started by a Windows-side process | no, unit tests only | same (it is recognised as "cannot tell", so nothing happens) |
+
+**Not tested on a real machine does not mean unsupported**: those paths are pinned by unit tests. If
+your environment is recognised wrongly, please send us the "startup mode + the evidence" block from
+the settings page.
+
 ## What it occupies in DSH
 
 Nothing here is hidden: this is the complete list of where the plugin attaches itself, so you can see
@@ -421,7 +491,7 @@ it is gone.
   | **Windows** | a scheduled task (`/SC ONLOGON /RL LIMITED`, no administrator); when the machine refuses it, a `.cmd` in the startup folder. The command names a **real node** + `supervisor.js` — never the application executable. |
   | **Linux** | a systemd **user** service — plus the `loginctl enable-linger <user>` hint, because without the linger it only starts *after* a login, not at boot. |
   | **WSL with systemd** | the same user unit, plus the linger hint. |
-  | **WSL without systemd** | no "at login" at all: two ways out — ① turn systemd on inside WSL (`/etc/wsl.conf` → `[boot] systemd=true` + `wsl --shutdown`; **a system configuration change**) or ② let Windows start the distribution (`wsl.exe -d <distro> -e <command>`; **needs a Windows-side action, but it is much closer to a real boot autostart**). Inside WSL the plugin **never** suggests Docker/Compose — the orchestrator of WSL is Windows. |
+  | **WSL without systemd** | no "at login" at all: two ways out — ① turn systemd on inside WSL (`/etc/wsl.conf` → `[boot] systemd=true` + `wsl --shutdown`; **a system configuration change**) or ② let Windows start the distribution (`wsl.exe -d <distro> -e <command>`; **needs a Windows-side action, but it is much closer to a real boot autostart**). Inside WSL the plugin **never** recommends a container-orchestration setup — the orchestrator of WSL is Windows. |
   | **container / k8s** | no promise at all: the orchestrator brings it back (`restart: always`). |
   | **unknown** | nothing is installed and nothing is guessed: the plugin says why and asks the user to choose. |
 
@@ -475,7 +545,7 @@ chain, the environment markers, the container markers and the platform, and answ
 | pm2 / forever | `external` | graceful exit only |
 | docker / compose / kubernetes | `container` | no "at login" at all: the compose fragment (`restart: always`) is the answer, and no supervisor is installed inside a container |
 | a Windows scheduled task / an NSSM service | `external` | graceful exit only |
-| WSL, started by a Windows process | `unknown` | nothing is written: the parent is invisible in WSL — pick the plain terminal (install your own supervisor) or configure the command yourself |
+| WSL, started by a Windows process | `unknown` | nothing is written: the parent is invisible in WSL — pick the plain terminal (install your own supervisor) or write your own start command (optional) |
 | `npx` / `pnpm dlx` | `bare` (usable) or `unknown` | usable when the resolved script path is in `argv[1]`; otherwise nothing is guessed |
 | another DSH plugin spawned it | `external` | graceful exit only — never a second host |
 | tmux / screen / an SSH session | `bare` | the command is replayed, but **detached from the session** (a graceful exit would break the session) |

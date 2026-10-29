@@ -286,7 +286,10 @@
       "shortcutDone": "已在桌面",
       "noDesktop": "这台机器上没有桌面目录，所以放不了快捷方式（脚本的路径在上面，可以手动复制过去）。",
       "shortcutFailed": "快捷方式没放成：{message}",
-      "revealFailed": "文件夹没打开：{message}"
+      "revealFailed": "文件夹没打开：{message}",
+      "rollbackOk": "自动回滚：可用（重启后起不来会自动回到上一个好状态）",
+      "rollbackBlocked": "自动回滚：**不可用** —— 这台电脑不允许创建计划任务。**会丢失：重启后 DSH 起不来时不会自动恢复**；出问题时请双击「出事了怎么办」里的还原脚本。",
+      "rollbackUnknown": "自动回滚：还不知道（这台机器的能力还没检查过）"
     },
     "error": "没能保存设置：{message}",
     "autostartKind": {

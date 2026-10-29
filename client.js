@@ -388,6 +388,9 @@
     'settings.rescue.reveal': '打开所在文件夹',
     'settings.rescue.which': '怎么选：整个环境坏了（改了配置、装了别的插件、升级崩了）→ 用「回到上一次好状态」；只怀疑这个插件 → 用「只把这个插件摘掉」。',
     'settings.rescue.warning': '重要：这两个脚本是在 DSH 打不开的时候用的。DSH 正开着的时候用「回到上一次好状态」，会把你现在正在用的配置覆盖掉。',
+    'settings.rescue.rollbackOk': '自动回滚：可用（重启后起不来会自动回到上一个好状态）',
+    'settings.rescue.rollbackBlocked': '自动回滚：**不可用** —— 这台电脑不允许创建计划任务。**会丢失：重启后 DSH 起不来时不会自动恢复**；出问题时请双击「出事了怎么办」里的还原脚本。',
+    'settings.rescue.rollbackUnknown': '自动回滚：还不知道（这台机器的能力还没检查过）',
     'settings.rescue.shortcut': '在桌面放一个快捷方式',
     'settings.rescue.shortcutDone': '已在桌面',
     'settings.rescue.noDesktop': '这台机器上没有桌面目录，所以放不了快捷方式（脚本的路径在上面，可以手动复制过去）。',
@@ -702,6 +705,9 @@
     'settings.rescue.reveal': 'Open the folder',
     'settings.rescue.which': 'Which one: the whole environment is broken (a changed configuration, another plugin, a bad upgrade) → "Back to the last good state"; only this plugin is suspect → "Take this plugin out only".',
     'settings.rescue.warning': 'Important: these two scripts are for when DSH does not come up. Using "Back to the last good state" while DSH is running overwrites the configuration you are working with right now.',
+    'settings.rescue.rollbackOk': 'Automatic rollback: available (a host that does not come up after a restart goes back to the last good state)',
+    'settings.rescue.rollbackBlocked': 'Automatic rollback: **not available** — this computer does not allow creating scheduled tasks. **What you lose: DSH will NOT recover by itself when it does not come up after a restart**; when it breaks, double-click the restore script in "If DSH will not start".',
+    'settings.rescue.rollbackUnknown': 'Automatic rollback: not known yet (this machine has not been checked)',
     'settings.rescue.shortcut': 'Put a shortcut on the desktop',
     'settings.rescue.shortcutDone': 'It is on the desktop',
     'settings.rescue.noDesktop': 'This machine has no desktop directory, so no shortcut can be placed (the paths are above — copy them by hand).',
@@ -1851,6 +1857,22 @@
   }
 
   /**
+   * Must the warning about the missing automatic rollback be shown now?
+   *
+   * The warning belongs to ONE moment: the transition into "blocked". A user
+   * who has seen it (the Host recorded `warnedAt`) is not asked again, and a
+   * machine that was never checked has nothing to say yet.
+   *
+   * @param {object|null} capabilities
+   * @returns {boolean}
+   */
+  function schedulerNoticeFor(capabilities) {
+    if (!capabilities || typeof capabilities !== 'object') return false
+    if (capabilities.scheduler !== 'blocked') return false
+    return typeof capabilities.warnedAt !== 'number'
+  }
+
+  /**
    * The two rescue scripts, as the Host reported them.
    *
    * The paths come from the Host (it resolved the plugin directory for
@@ -2000,6 +2022,9 @@
     // route that writes the desktop shortcut and opens the folder.
     rescuePathsFor,
     rescueUrlFor,
+    // The automatic rollback: what this machine can do, and whether the
+    // one-time warning about it is still waiting to be shown.
+    schedulerNoticeFor,
     // The startup block: whether it may be shown, the one line that says what
     // the plugin remembers, and the formatters of the backup list.
     shouldShowStartupBlock,
@@ -4562,6 +4587,33 @@
         const rescueDesktop = typeof rescueKit.desktopDir === 'string' ? rescueKit.desktopDir.trim() : ''
         // Whether it is already there (then the button says so).
         const rescueShortcutExists = rescueKit.shortcutExists === true
+        // WHAT THIS MACHINE CAN DO: the automatic rollback needs a one-off
+        // scheduled task. When the machine refuses one, the user has to be
+        // told what they lose — once.
+        const capabilities = info && typeof info === 'object' && info.capabilities && typeof info.capabilities === 'object'
+          ? info.capabilities
+          : {}
+        const schedulerState = typeof capabilities.scheduler === 'string' ? capabilities.scheduler : 'unknown'
+        const schedulerWarnedAt = typeof capabilities.warnedAt === 'number' ? capabilities.warnedAt : null
+        // The notice is for the TRANSITION: a user who has seen it is not
+        // asked again.
+        const schedulerNotice = schedulerNoticeFor(capabilities)
+        const schedulerText = schedulerState === 'ok'
+          ? t('settings.rescue.rollbackOk')
+          : schedulerState === 'blocked'
+            ? t('settings.rescue.rollbackBlocked')
+            : t('settings.rescue.rollbackUnknown')
+        useEffect(() => {
+          if (!schedulerNotice) return
+          // The user has read it: the Host remembers that and stops asking.
+          void fetch(rescueUrlFor(info), {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ action: 'ack-scheduler' }),
+          }).catch(() => {
+            // The Host will ask again next time — no harm.
+          })
+        }, [schedulerNotice])
         const supervisorPending = supervisorStatus !== null
           && supervisorStatus.detail !== null
           && typeof supervisorStatus.detail === 'object'
@@ -5385,6 +5437,30 @@
                 t('settings.rescue.warning'),
               ),
             ),
+            // WHAT THIS MACHINE CAN DO: the automatic rollback (and what is
+            // lost when the machine refuses a scheduled task).
+            h(
+              'div',
+              { className: 'dsh-autorestart-settings__field', 'data-dsh-autorestart-rescue': 'rollback' },
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-rescue': 'rollback-state' },
+                schedulerText,
+              ),
+            ),
+            // The notice is shown ONCE: the Host remembers that the user has
+            // read it.
+            schedulerNotice
+              ? h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__field' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__label', 'data-dsh-autorestart-rescue': 'rollback-notice' },
+                    t('settings.rescue.rollbackBlocked'),
+                  ),
+                )
+              : null,
             // The desktop shortcut is a BUTTON, never a side effect: loading
             // this page writes nothing to the desktop.
             rescueDesktop === ''

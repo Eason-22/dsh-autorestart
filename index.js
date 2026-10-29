@@ -101,6 +101,14 @@ import {
   rescueInfo,
   rescueScriptPaths,
 } from './lib/rescue-paths.js'
+import {
+  emptyCapabilities,
+  isCapabilities,
+  markSchedulerWarned,
+  probeSchedulerCapability,
+  SCHEDULER_UNKNOWN,
+  shouldWarnScheduler,
+} from './lib/scheduler-capability.js'
 import { detectHostKind } from './lib/host-kind.js'
 import { planAutostartAdvice } from './lib/autostart-advice.js'
 import { buildDiagnostics, ISSUE_URL_BASE, SUPPORT_EMAIL } from './lib/diagnostics.js'
@@ -2695,6 +2703,58 @@ const titleOfSummary = (item) => {
   })
 
   /**
+   * THE CAPABILITIES of this machine: can it create a one-off scheduled
+   * task?
+   *
+   * The automatic rollback hangs on that answer: the host is restarted and a
+   * task that fires a minute later brings it back if it did not come up. On a
+   * machine where such a task cannot be created the safety net is silently
+   * missing — so the user is told what they lose.
+   *
+   * The answer is checked ONCE — the first time the plugin runs here — and
+   * then kept in a file of its own next to the state. It is NOT checked when
+   * the settings page opens: that would register a task every time somebody
+   * looks at the page.
+   *
+   * A failure of the probe is NEVER a failure of the plugin: the plugin
+   * works, only the safety net may be missing.
+   *
+   * @returns {object} the capabilities record
+   */
+  const capabilitiesInfo = () => {
+    const file = path.join(stateDirOf(), 'capabilities.json')
+    const stored = readCapabilitiesRecord(file)
+    if (stored) return stored
+    let checked
+    try {
+      checked = probeSchedulerCapability({ platform: env.platform })
+    } catch (error) {
+      checked = { scheduler: SCHEDULER_UNKNOWN, checkedAt: Date.now(), evidence: { error: String(error) } }
+    }
+    const record = { ...emptyCapabilities(), ...checked }
+    // The warning is only for the TRANSITION into blocked: a machine that was
+    // blocked and stays blocked does not nag.
+    if (shouldWarnScheduler(emptyCapabilities(), record)) {
+      runtime.log.warn('this machine refuses one-off scheduled tasks: the automatic rollback is not available')
+    }
+    writeCapabilitiesRecord(file, record)
+    return record
+  }
+
+  /**
+   * The capabilities with the warning marked as seen (the user read it).
+   *
+   * @returns {object}
+   */
+  const acknowledgeSchedulerWarning = () => {
+    const file = path.join(stateDirOf(), 'capabilities.json')
+    const stored = readCapabilitiesRecord(file) || { ...emptyCapabilities() }
+    const marked = markSchedulerWarned(stored)
+    writeCapabilitiesRecord(file, marked)
+    return marked
+  }
+
+  /**
    * THE DIAGNOSTICS of "report a problem".
    *
    * One generator, on the host: the browser copies the text it gets, so the
@@ -3785,6 +3845,10 @@ const titleOfSummary = (item) => {
     backupsInfo,
     // Where the rescue scripts are, and whether the desktop shortcut exists.
     rescueKitInfo,
+    // What this machine can do: can it create a one-off scheduled task? (The
+    // automatic rollback hangs on that answer.)
+    capabilitiesInfo,
+    acknowledgeSchedulerWarning,
     /**
      * THE DIAGNOSTICS of "report a problem" (the text the user copies).
      */
@@ -6263,6 +6327,49 @@ function buildChoiceRoute(ctx, runtime, config) {
  * @returns {object} the route
  */
 /**
+ * Read the capabilities record of this machine.
+ *
+ * It lives in a file of its own next to the state: the checkpoint has a
+ * versioned shape, and a capability that is checked once does not belong in
+ * the record of the running sessions.
+ *
+ * @param {string} file
+ * @returns {object|null}
+ */
+function readCapabilitiesRecord(file) {
+  try {
+    const raw = fs.readFileSync(file, 'utf8')
+    const parsed = JSON.parse(raw)
+    if (!isCapabilities(parsed)) return null
+    return {
+      scheduler: parsed.scheduler,
+      checkedAt: typeof parsed.checkedAt === 'number' ? parsed.checkedAt : null,
+      evidence: parsed.evidence && typeof parsed.evidence === 'object' ? parsed.evidence : null,
+      warnedAt: typeof parsed.warnedAt === 'number' ? parsed.warnedAt : null,
+    }
+  } catch {
+    // A record that cannot be read is a record that does not exist yet.
+    return null
+  }
+}
+
+/**
+ * Write the capabilities record of this machine.
+ *
+ * @param {string} file
+ * @param {object} record
+ */
+function writeCapabilitiesRecord(file, record) {
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(record, null, 2), 'utf8')
+  } catch {
+    // A capability that cannot be written is a capability that is checked
+    // again next time — not a reason to break the plugin.
+  }
+}
+
+/**
  * Resolve the rescue-route path: a sibling of the health route, under the same
  * prefix.
  *
@@ -6342,6 +6449,16 @@ function buildRescueRoute(ctx, runtime, config) {
             error: written.error ?? null,
             rescue: runtime.rescueKitInfo(),
           }))
+          return
+        }
+        if (action === 'ack-scheduler') {
+          // The user has read the warning about the missing automatic
+          // rollback: it is not shown again.
+          const marked = runtime.acknowledgeSchedulerWarning()
+          res.statusCode = 200
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({ ok: true, action, capabilities: marked }))
           return
         }
         if (action === 'reveal') {
@@ -7126,6 +7243,10 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // they cannot open a README.
             rescue: runtime.rescueKitInfo(),
             rescueUrl: resolveRescuePath(config),
+            // What this machine can do (the automatic rollback needs a
+            // one-off scheduled task; when that is refused the user is told
+            // what they lose).
+            capabilities: runtime.capabilitiesInfo(),
             // THE RESTART COMMAND that is in effect: what is written, and what
             // an undo would restore. The settings page shows it in a folded
             // "for a technical colleague" section.

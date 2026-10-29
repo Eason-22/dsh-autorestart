@@ -506,6 +506,34 @@ own health route. A slow start inside `rollbackTimeoutMs` is never treated as a 
 healthy host is never touched. The restore itself is bounded as well: every copy step gives up after
 `rollbackCopyTimeoutMs` (default `120000`) and says so in the report.
 
+### When the machine refuses a scheduled task (the automatic rollback is gone)
+
+The safety net above hangs on a **one-off scheduled task**: the helper that brings the host back
+after a restart is a task that fires a minute later. On a machine where such a task cannot be
+created (a corporate policy, a locked-down account, a machine without the rights) the net is
+silently missing.
+
+So the plugin **checks the machine once** — the first time it runs there — and tells the truth in
+the settings page:
+
+- `Automatic rollback: available` — the net is there.
+- `Automatic rollback: **not available**` — and exactly what is lost: *DSH will not recover by
+  itself when it does not come up after a restart*. The line points at the restore script in
+  "If DSH will not start", which is the way out.
+
+**What this deliberately does NOT do:**
+
+- **No fallback chain.** There is no "use the startup folder instead", no "use a systemd timer
+  instead", no second mechanism that is tried when the first one is refused.
+- **No bypassing the policy.** The plugin does not look for a way around a machine that says no.
+  If the machine refuses, the answer is "not available" — and only that is reported.
+
+A refused check is **never** a failed installation: the plugin works exactly as before, only the
+safety net is missing. The check itself is harmless by construction — it registers a task that
+fires in two minutes and does nothing (`cmd /c exit 0`), reads it back, deletes it, and reads it
+back once more to prove that it is gone. It runs **once**, not on every visit of the settings page,
+and it never leaves a task behind (not even when a step of it fails).
+
 ### The access link after a restart
 
 The boot token of `dsh web` is created **per process**, so the link the browser holds answers `401`

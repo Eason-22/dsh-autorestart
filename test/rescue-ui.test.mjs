@@ -279,3 +279,38 @@ test('the warning says the scripts are for a host that does not come up', () => 
   assert.match(zh, /覆盖/)
   assert.match(en, /overwrites/)
 })
+
+// ---------------------------------------------------------------------------
+// The automatic rollback: what this machine can do
+// ---------------------------------------------------------------------------
+
+test('the settings line says what the automatic rollback does — and what is lost', () => {
+  const zh = loadClient({ language: 'zh-CN' }).makeTranslate(null)
+  const en = loadClient({ language: 'en-US' }).makeTranslate(null)
+  // Available.
+  assert.match(zh('settings.rescue.rollbackOk'), /自动回滚：可用/)
+  assert.match(en('settings.rescue.rollbackOk'), /Automatic rollback: available/)
+  // Not available: the line must say what is LOST and where to go.
+  assert.match(zh('settings.rescue.rollbackBlocked'), /不可用/)
+  assert.match(zh('settings.rescue.rollbackBlocked'), /会丢失/)
+  assert.match(zh('settings.rescue.rollbackBlocked'), /还原脚本/)
+  assert.match(en('settings.rescue.rollbackBlocked'), /not available/)
+  assert.match(en('settings.rescue.rollbackBlocked'), /What you lose/)
+  assert.match(en('settings.rescue.rollbackBlocked'), /restore script/)
+  // Not checked yet.
+  assert.match(zh('settings.rescue.rollbackUnknown'), /还不知道/)
+  assert.match(en('settings.rescue.rollbackUnknown'), /not known yet/)
+})
+
+test('the warning about the missing rollback waits for the user once', () => {
+  const api = loadClient()
+  // Blocked and never shown: the warning is waiting.
+  assert.equal(api.schedulerNoticeFor({ scheduler: 'blocked' }), true)
+  // Shown already: no nagging.
+  assert.equal(api.schedulerNoticeFor({ scheduler: 'blocked', warnedAt: 12345 }), false)
+  // Nothing to say.
+  assert.equal(api.schedulerNoticeFor({ scheduler: 'ok' }), false)
+  assert.equal(api.schedulerNoticeFor({ scheduler: 'unknown' }), false)
+  assert.equal(api.schedulerNoticeFor(null), false)
+  assert.equal(api.schedulerNoticeFor({}), false)
+})

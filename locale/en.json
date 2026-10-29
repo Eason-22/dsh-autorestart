@@ -286,7 +286,10 @@
       "shortcutDone": "It is on the desktop",
       "noDesktop": "This machine has no desktop directory, so no shortcut can be placed (the paths are above — copy them by hand).",
       "shortcutFailed": "The shortcut was not placed: {message}",
-      "revealFailed": "The folder did not open: {message}"
+      "revealFailed": "The folder did not open: {message}",
+      "rollbackOk": "Automatic rollback: available (a host that does not come up after a restart goes back to the last good state)",
+      "rollbackBlocked": "Automatic rollback: **not available** — this computer does not allow creating scheduled tasks. **What you lose: DSH will NOT recover by itself when it does not come up after a restart**; when it breaks, double-click the restore script in \"If DSH will not start\".",
+      "rollbackUnknown": "Automatic rollback: not known yet (this machine has not been checked)"
     },
     "error": "Could not save the settings: {message}",
     "autostartKind": {

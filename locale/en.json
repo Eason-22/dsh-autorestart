@@ -174,7 +174,8 @@
       "restart": "Restart settings",
       "shutdown": "Shutdown settings",
       "supervisor": "Start at login",
-      "report": "Report a problem"
+      "report": "Report a problem",
+      "rescue": "If DSH will not start"
     },
     "seconds": {
       "label": "Shutdown countdown seconds",
@@ -269,6 +270,23 @@
       "copyFailed": "The copy failed — please copy this by hand",
       "issueTitle": "A problem with the restart / start at login",
       "issueBody": "Please paste the diagnostics you just copied below.\n\n## What happened\n\n\n## What you expected\n\n\n## How to reproduce\n"
+    },
+    "rescue": {
+      "hint": "When DSH does not come up, these two scripts rescue it for you (neither of them needs DSH running).",
+      "restoreProfile": "Back to the last good state",
+      "emergencyDisable": "Take this plugin out only",
+      "path": "Path",
+      "copyPath": "Copy the path",
+      "copied": "The path is on the clipboard",
+      "copyFailed": "The copy failed — please select the path above by hand",
+      "reveal": "Open the folder",
+      "which": "Which one: the whole environment is broken (a changed configuration, another plugin, a bad upgrade) → \"Back to the last good state\"; only this plugin is suspect → \"Take this plugin out only\".",
+      "warning": "Important: these two scripts are for when DSH does not come up. Using \"Back to the last good state\" while DSH is running overwrites the configuration you are working with right now.",
+      "shortcut": "Put a shortcut on the desktop",
+      "shortcutDone": "It is on the desktop",
+      "noDesktop": "This machine has no desktop directory, so no shortcut can be placed (the paths are above — copy them by hand).",
+      "shortcutFailed": "The shortcut was not placed: {message}",
+      "revealFailed": "The folder did not open: {message}"
     },
     "error": "Could not save the settings: {message}",
     "autostartKind": {

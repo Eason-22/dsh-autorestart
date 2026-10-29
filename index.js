@@ -19,9 +19,11 @@
  */
 
 import crypto from 'node:crypto'
+import { spawn } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   armSleep,
@@ -93,6 +95,12 @@ import {
 } from './lib/supervisor.js'
 import { composeFragment, detectInitSystems } from './lib/supervisor-install.js'
 import { classifyStartup } from './lib/startup-mode.js'
+import {
+  createDesktopShortcut,
+  desktopDir,
+  rescueInfo,
+  rescueScriptPaths,
+} from './lib/rescue-paths.js'
 import { detectHostKind } from './lib/host-kind.js'
 import { planAutostartAdvice } from './lib/autostart-advice.js'
 import { buildDiagnostics, ISSUE_URL_BASE, SUPPORT_EMAIL } from './lib/diagnostics.js'
@@ -145,6 +153,16 @@ import {
   runShutdown,
   snapCountdownChoice,
 } from './lib/sleep.js'
+
+/**
+ * THE PLUGIN DIRECTORY — where this very file lives.
+ *
+ * The rescue scripts (restore-profile.cmd, emergency-disable.cmd) sit next to
+ * it. The settings page shows the user that REAL path, so the path is taken
+ * from here and never guessed: nothing assumes `node_modules/dsh-autorestart`
+ * and nothing assumes a profile layout.
+ */
+const PLUGIN_DIR = path.dirname(fileURLToPath(import.meta.url))
 
 /**
  * The RESTART reserve: how long the host waits after the LAST conversation
@@ -2659,6 +2677,24 @@ const titleOfSummary = (item) => {
   }
 
   /**
+   * WHERE THE RESCUE SCRIPTS ARE.
+   *
+   * The rescue kit is for everybody who installed the plugin: when DSH does
+   * not come up, the user cannot read a README — they need the path, and they
+   * need to be able to copy it. The browser cannot read the disk, so the Host
+   * resolves it: the plugin directory is where THIS file lives, and the
+   * scripts sit next to it.
+   *
+   * @returns {object}
+   */
+  const rescueKitInfo = () => rescueInfo({
+    pluginDir: PLUGIN_DIR,
+    env: process.env,
+    platform: env.platform,
+    exists: (target) => fs.existsSync(target),
+  })
+
+  /**
    * THE DIAGNOSTICS of "report a problem".
    *
    * One generator, on the host: the browser copies the text it gets, so the
@@ -3747,6 +3783,8 @@ const titleOfSummary = (item) => {
      * WHAT IS ON DISK RIGHT NOW: the backups of this host.
      */
     backupsInfo,
+    // Where the rescue scripts are, and whether the desktop shortcut exists.
+    rescueKitInfo,
     /**
      * THE DIAGNOSTICS of "report a problem" (the text the user copies).
      */
@@ -6224,6 +6262,121 @@ function buildChoiceRoute(ctx, runtime, config) {
  * @param {object} config the normalized config
  * @returns {object} the route
  */
+/**
+ * Resolve the rescue-route path: a sibling of the health route, under the same
+ * prefix.
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveRescuePath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/rescue`
+}
+
+/**
+ * The rescue route: the two scripts, and the desktop shortcut.
+ *
+ * It does three things, all of them on behalf of the USER:
+ *
+ *   - `status`   : where the scripts are (the paths and the state of the
+ *                  desktop shortcut) — nothing is written;
+ *   - `shortcut` : write the desktop shortcut. This happens ONLY because the
+ *                  user pressed the button: loading the settings page never
+ *                  writes anything to the desktop;
+ *   - `reveal`   : open the folder of a script in the file manager.
+ *
+ * Like every other route of this plugin it only answers the loopback.
+ *
+ * @param {object} ctx
+ * @param {object} runtime
+ * @param {object} config
+ * @returns {{ kind: string, path: string, handler: Function }}
+ */
+function buildRescueRoute(ctx, runtime, config) {
+  const routePath = resolveRescuePath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      if (!req || req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then((payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const action = typeof body.action === 'string' ? body.action.trim() : 'status'
+        const info = runtime.rescueKitInfo()
+        if (action === 'shortcut') {
+          // The user pressed the button: NOW the shortcut may be written.
+          const written = createDesktopShortcut({
+            desktop: info.desktopDir,
+            restoreProfilePath: info.restoreProfile,
+            home: os.homedir(),
+            writeFile: (target, content) => fs.writeFileSync(target, content, 'ascii'),
+            exists: (target) => fs.existsSync(target),
+          })
+          res.statusCode = written.ok ? 200 : 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: written.ok,
+            action,
+            path: written.path,
+            error: written.error ?? null,
+            rescue: runtime.rescueKitInfo(),
+          }))
+          return
+        }
+        if (action === 'reveal') {
+          const wanted = typeof body.path === 'string' ? body.path.trim() : ''
+          // Only a directory of the plugin may be opened — never anything the
+          // caller names.
+          const allowed = [info.scriptsDir].filter((entry) => entry !== '')
+          const folder = allowed.includes(wanted) ? wanted : info.scriptsDir
+          let opened = false
+          try {
+            const child = spawn(process.platform === 'win32' ? 'explorer.exe' : 'xdg-open', [folder], {
+              detached: true,
+              stdio: 'ignore',
+              windowsHide: true,
+            })
+            child.unref()
+            opened = true
+          } catch (error) {
+            opened = false
+          }
+          res.statusCode = opened ? 200 : 500
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({ ok: opened, action, path: folder, error: opened ? null : 'the file manager could not be opened' }))
+          return
+        }
+        res.statusCode = 200
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({ ok: true, action, rescue: info }))
+      })
+    },
+  }
+}
+
 function buildSupervisorRoute(ctx, runtime, config) {
   const routePath = resolveSupervisorPath(config)
   return {
@@ -6968,6 +7121,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // where it lives). The browser cannot read the disk, so the Host
             // reads it — only the directory, never the contents.
             backups: runtime.backupsInfo(),
+            // THE RESCUE KIT: where the two scripts are, so a user whose DSH
+            // does not come up can find them (and copy the path) even though
+            // they cannot open a README.
+            rescue: runtime.rescueKitInfo(),
+            rescueUrl: resolveRescuePath(config),
             // THE RESTART COMMAND that is in effect: what is written, and what
             // an undo would restore. The settings page shows it in a folded
             // "for a technical colleague" section.
@@ -7104,6 +7262,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
     const cancelRoute = buildCancelRoute(ctx, runtime, config)
     const announcementsRoute = buildAnnouncementsRoute(ctx, runtime, config)
     const supervisorRoute = buildSupervisorRoute(ctx, runtime, config)
+    const rescueRoute = buildRescueRoute(ctx, runtime, config)
     const sleepRoute = sleep ? buildSleepRoute(ctx, runtime, config, sleep) : null
     try {
       const origin = typeof webServer.getOrigin === 'function' ? String(webServer.getOrigin()) : ''
@@ -7129,6 +7288,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       { name: 'cancel', route: cancelRoute },
       { name: 'announcements', route: announcementsRoute },
       { name: 'supervisor', route: supervisorRoute },
+      { name: 'rescue', route: rescueRoute },
     ]
     if (sleepRoute !== null) routes.push({ name: 'sleep', route: sleepRoute })
     for (const entry of routes) {

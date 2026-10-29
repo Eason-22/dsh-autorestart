@@ -377,6 +377,22 @@
     'settings.backup.withPlugins': '含已装插件',
     'settings.backup.withoutPlugins': '只有配置',
     'settings.groups.report': '报告问题',
+    'settings.groups.rescue': '出事了怎么办',
+    'settings.rescue.hint': 'DSH 打不开的时候，用下面这两个脚本救自己（都不用 DSH 跑起来）。',
+    'settings.rescue.restoreProfile': '回到上一次好状态',
+    'settings.rescue.emergencyDisable': '只把这个插件摘掉',
+    'settings.rescue.path': '路径',
+    'settings.rescue.copyPath': '复制路径',
+    'settings.rescue.copied': '路径已复制',
+    'settings.rescue.copyFailed': '复制失败，请手动选中上面的路径',
+    'settings.rescue.reveal': '打开所在文件夹',
+    'settings.rescue.which': '怎么选：整个环境坏了（改了配置、装了别的插件、升级崩了）→ 用「回到上一次好状态」；只怀疑这个插件 → 用「只把这个插件摘掉」。',
+    'settings.rescue.warning': '重要：这两个脚本是在 DSH 打不开的时候用的。DSH 正开着的时候用「回到上一次好状态」，会把你现在正在用的配置覆盖掉。',
+    'settings.rescue.shortcut': '在桌面放一个快捷方式',
+    'settings.rescue.shortcutDone': '已在桌面',
+    'settings.rescue.noDesktop': '这台机器上没有桌面目录，所以放不了快捷方式（脚本的路径在上面，可以手动复制过去）。',
+    'settings.rescue.shortcutFailed': '快捷方式没放成：{message}',
+    'settings.rescue.revealFailed': '文件夹没打开：{message}',
     'settings.report.label': '遇到问题了？',
     'settings.report.github': '复制诊断信息并去 GitHub 提问题',
     'settings.report.hint': '诊断信息里没有你的访问令牌，也没有任何密钥；把它贴进 issue，我们就能看出问题出在哪。',
@@ -675,6 +691,22 @@
     'settings.backup.withPlugins': 'includes the installed plugins',
     'settings.backup.withoutPlugins': 'configuration only',
     'settings.groups.report': 'Report a problem',
+    'settings.groups.rescue': 'If DSH will not start',
+    'settings.rescue.hint': 'When DSH does not come up, these two scripts rescue it for you (neither of them needs DSH running).',
+    'settings.rescue.restoreProfile': 'Back to the last good state',
+    'settings.rescue.emergencyDisable': 'Take this plugin out only',
+    'settings.rescue.path': 'Path',
+    'settings.rescue.copyPath': 'Copy the path',
+    'settings.rescue.copied': 'The path is on the clipboard',
+    'settings.rescue.copyFailed': 'The copy failed — please select the path above by hand',
+    'settings.rescue.reveal': 'Open the folder',
+    'settings.rescue.which': 'Which one: the whole environment is broken (a changed configuration, another plugin, a bad upgrade) → "Back to the last good state"; only this plugin is suspect → "Take this plugin out only".',
+    'settings.rescue.warning': 'Important: these two scripts are for when DSH does not come up. Using "Back to the last good state" while DSH is running overwrites the configuration you are working with right now.',
+    'settings.rescue.shortcut': 'Put a shortcut on the desktop',
+    'settings.rescue.shortcutDone': 'It is on the desktop',
+    'settings.rescue.noDesktop': 'This machine has no desktop directory, so no shortcut can be placed (the paths are above — copy them by hand).',
+    'settings.rescue.shortcutFailed': 'The shortcut was not placed: {message}',
+    'settings.rescue.revealFailed': 'The folder did not open: {message}',
     'settings.report.label': 'Something wrong?',
     'settings.report.github': 'Copy the diagnostics and open a GitHub issue',
     'settings.report.hint': 'The diagnostics carry no access token and no secrets — paste them into the issue and we can see what went wrong.',
@@ -1819,6 +1851,41 @@
   }
 
   /**
+   * The two rescue scripts, as the Host reported them.
+   *
+   * The paths come from the Host (it resolved the plugin directory for
+   * itself) — the browser never guesses them. A path that is not there is not
+   * shown: an empty path would be a dead end for the user.
+   *
+   * @param {object} info the Host's state payload
+   * @returns {Array<{ key: string, path: string }>}
+   */
+  function rescuePathsFor(info) {
+    const rescue = info && typeof info === 'object' && info.rescue && typeof info.rescue === 'object'
+      ? info.rescue
+      : null
+    if (!rescue) return []
+    const out = []
+    const restore = typeof rescue.restoreProfile === 'string' ? rescue.restoreProfile.trim() : ''
+    if (restore !== '') out.push({ key: 'restoreProfile', path: restore })
+    const disable = typeof rescue.emergencyDisable === 'string' ? rescue.emergencyDisable.trim() : ''
+    if (disable !== '') out.push({ key: 'emergencyDisable', path: disable })
+    return out
+  }
+
+  /**
+   * The route that writes the desktop shortcut and opens the folder.
+   *
+   * @param {object} info the Host's state payload
+   * @returns {string}
+   */
+  function rescueUrlFor(info) {
+    const sent = info && typeof info === 'object' && typeof info.rescueUrl === 'string' ? info.rescueUrl.trim() : ''
+    if (sent.startsWith('/')) return sent
+    return '/__dsh_autorestart/rescue'
+  }
+
+  /**
    * Whether the "how was this host started" block may be shown at all.
    *
    * The desktop client brings ITSELF back up: it has no restart command to
@@ -1929,6 +1996,10 @@
     // "Report a problem": the URL builders and the clipboard with its fallback.
     buildIssueUrl,
     copyReportText,
+    // The rescue kit: the two script paths as the Host resolved them, and the
+    // route that writes the desktop shortcut and opens the folder.
+    rescuePathsFor,
+    rescueUrlFor,
     // The startup block: whether it may be shown, the one line that says what
     // the plugin remembers, and the formatters of the backup list.
     shouldShowStartupBlock,
@@ -4393,6 +4464,8 @@
         const [reportFallback, setReportFallback] = useState('')
         // The note under the backup path: copied, or "copy it by hand".
         const [pathNote, setPathNote] = useState('')
+        // The note under the rescue paths: copied, or "copy it by hand".
+        const [rescueNote, setRescueNote] = useState('')
         // Whether the "technical details" fold is open. It is NOT persisted:
         // a fresh page starts closed, so nobody leaves technical text open by
         // accident.
@@ -4479,6 +4552,16 @@
           ? info.backups
           : { dir: '', max: 0, count: 0, items: [] }
         const backupItems = Array.isArray(backupsInfo.items) ? backupsInfo.items : []
+        // THE RESCUE KIT: the two scripts and where they are, as the Host
+        // resolved them. The browser never guesses a path.
+        const rescuePaths = rescuePathsFor(info)
+        const rescueKit = info && typeof info === 'object' && info.rescue && typeof info.rescue === 'object'
+          ? info.rescue
+          : {}
+        // Where a desktop shortcut could go ('' = there is no desktop here).
+        const rescueDesktop = typeof rescueKit.desktopDir === 'string' ? rescueKit.desktopDir.trim() : ''
+        // Whether it is already there (then the button says so).
+        const rescueShortcutExists = rescueKit.shortcutExists === true
         const supervisorPending = supervisorStatus !== null
           && supervisorStatus.detail !== null
           && typeof supervisorStatus.detail === 'object'
@@ -4641,6 +4724,73 @@
         const copyBackupPath = async () => {
           const copied = await copyReportText(backupsInfo.dir)
           setPathNote(copied.fallback ? t('settings.backup.copyFailed') : t('settings.backup.copied'))
+        }
+
+        /**
+         * Copy the path of a rescue script.
+         *
+         * The path is on screen anyway (selectable), so a refused clipboard
+         * only costs a hint — the same fallback the diagnostics use.
+         */
+        const copyRescuePath = async (target) => {
+          const copied = await copyReportText(target)
+          setRescueNote(copied.fallback ? t('settings.rescue.copyFailed') : t('settings.rescue.copied'))
+        }
+
+        /**
+         * Put the desktop shortcut there.
+         *
+         * ONLY because the user pressed the button: the settings page never
+         * writes anything to the desktop by itself.
+         */
+        const createRescueShortcut = async () => {
+          if (busy) return
+          setBusy(true)
+          setRescueNote('')
+          try {
+            const response = await fetch(rescueUrlFor(info), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ action: 'shortcut' }),
+            })
+            const body = await response.json().catch(() => null)
+            if (!response.ok) {
+              const message = body && typeof body === 'object' && body.error ? body.error : String(response.status)
+              setRescueNote(fill(t('settings.rescue.shortcutFailed'), { message }))
+              return
+            }
+            setRescueNote(t('settings.rescue.shortcutDone'))
+          } catch (failure) {
+            setRescueNote(fill(t('settings.rescue.shortcutFailed'), { message: describeError(failure) }))
+          } finally {
+            setBusy(false)
+          }
+        }
+
+        /**
+         * Open the folder of the scripts in the file manager.
+         */
+        const revealRescueFolder = async () => {
+          if (busy) return
+          setBusy(true)
+          setRescueNote('')
+          try {
+            const response = await fetch(rescueUrlFor(info), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ action: 'reveal' }),
+            })
+            const body = await response.json().catch(() => null)
+            if (!response.ok) {
+              const message = body && typeof body === 'object' && body.error ? body.error : String(response.status)
+              setRescueNote(fill(t('settings.rescue.revealFailed'), { message }))
+              return
+            }
+          } catch (failure) {
+            setRescueNote(fill(t('settings.rescue.revealFailed'), { message: describeError(failure) }))
+          } finally {
+            setBusy(false)
+          }
         }
 
         return h(
@@ -5153,6 +5303,122 @@
                     : null,
                 )
               : null,
+          ),
+          // "IF DSH WILL NOT START": the two rescue scripts, where they are, and
+          // the way to get them onto the desktop. A user whose host is down
+          // cannot open a README — they need the path, and they need to be
+          // able to copy it.
+          h(
+            'div',
+            {
+              className: 'dsh-autorestart-settings__group',
+              'data-dsh-autorestart-group': 'rescue',
+            },
+            h(
+              'div',
+              { className: 'dsh-autorestart-settings__group-title' },
+              t('settings.groups.rescue'),
+            ),
+            h(
+              'div',
+              { className: 'dsh-autorestart-settings__field' },
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__hint' },
+                t('settings.rescue.hint'),
+              ),
+            ),
+            rescuePaths.map((entry) => h(
+              'div',
+              {
+                className: 'dsh-autorestart-settings__field',
+                'data-dsh-autorestart-rescue': entry.key,
+              },
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__label' },
+                t(entry.key === 'restoreProfile' ? 'settings.rescue.restoreProfile' : 'settings.rescue.emergencyDisable'),
+              ),
+              h(
+                'code',
+                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-rescue': 'path' },
+                entry.path,
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-autorestart-settings__button',
+                  disabled: busy,
+                  'data-dsh-autorestart-rescue': 'copy-path',
+                  onClick: () => void copyRescuePath(entry.path),
+                },
+                t('settings.rescue.copyPath'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-autorestart-settings__button',
+                  disabled: busy,
+                  'data-dsh-autorestart-rescue': 'reveal',
+                  onClick: () => void revealRescueFolder(),
+                },
+                t('settings.rescue.reveal'),
+              ),
+            )),
+            h(
+              'div',
+              { className: 'dsh-autorestart-settings__field' },
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-rescue': 'which' },
+                t('settings.rescue.which'),
+              ),
+            ),
+            h(
+              'div',
+              { className: 'dsh-autorestart-settings__field' },
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-rescue': 'warning' },
+                t('settings.rescue.warning'),
+              ),
+            ),
+            // The desktop shortcut is a BUTTON, never a side effect: loading
+            // this page writes nothing to the desktop.
+            rescueDesktop === ''
+              ? h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__field' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-rescue': 'no-desktop' },
+                    t('settings.rescue.noDesktop'),
+                  ),
+                )
+              : h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__field' },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-autorestart-settings__button',
+                      disabled: busy,
+                      'data-dsh-autorestart-rescue': 'shortcut',
+                      onClick: () => void createRescueShortcut(),
+                    },
+                    rescueShortcutExists ? t('settings.rescue.shortcutDone') : t('settings.rescue.shortcut'),
+                  ),
+                  rescueNote === ''
+                    ? null
+                    : h(
+                        'span',
+                        { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-rescue': 'note' },
+                        rescueNote,
+                      ),
+                ),
           ),
           // "REPORT A PROBLEM": copy the diagnostics and open a pre-filled
           // issue page. The email is the way out when there is no GitHub

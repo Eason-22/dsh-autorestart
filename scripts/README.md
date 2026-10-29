@@ -3,6 +3,7 @@
 DSH 起不来的时候，这个文件夹里的东西**不用 DSH 自己**就能救自己。
 
 - **双击哪个**：DSH 起不来（插件升级把 profile 弄坏了）→ 双击 `restore-profile.cmd`；只是想把本插件摘掉 → 双击 `emergency-disable.cmd`。
+- **找不到它们？**：设置页里有一组「出事了怎么办」，上面写着这两个脚本的**绝对路径**（可以一键复制、可以一键打开所在文件夹，还能放一个桌面快捷方式）—— DSH 真打不开、连 README 都打不开的时候，那一栏就是给你指路的。
 - **它会做什么**：`restore-profile.cmd` 把最新的那份快照（`<stateDir>\backups\` 里带 manifest 的）放回 profile —— 先把现在的 profile 整份挪到 `<profile>.broken-<时间戳>`，再复制快照里的配置和插件树，最后回读校验（package.json 能解析、`dsh.profile.bundles` 有内容、插件版本号读得到）；校验不过就如实报错，并告诉你原来那份还在哪个目录。**它不会替你重启 DSH**（重启由你自己来，免得"救一次挂一次"）。
 - **会留下什么**：一个 `<profile>.broken-<yyyyMMdd-HHmmss>` 目录（出事之前的那份 profile 原封不动地留着，确认没问题后可以自己删掉），加上最后一行"已还原到 …… 现在可以重新打开 DSH"的结论。
 

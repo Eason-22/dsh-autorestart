@@ -639,20 +639,22 @@ test('the settings section offers the restart wait and the shutdown countdown', 
   assert.ok(panel, 'the settings section must be rendered')
 
   // The groups, in this order: the restart settings come first, the shutdown
-  // settings after them, then the supervisor (the self-start record) and
-  // finally the "report a problem" group.
+  // settings after them, then the supervisor (the self-start record), then
+  // the rescue kit (the scripts for a host that does not come up) and finally
+  // the "report a problem" group.
   const groups = walk(panel).filter(
     (node) => node.type === 'div' && typeof node.props['data-dsh-autorestart-group'] === 'string',
   )
   assert.deepEqual(
     groups.map((node) => node.props['data-dsh-autorestart-group']),
-    ['restart', 'shutdown', 'supervisor', 'report'],
+    ['restart', 'shutdown', 'supervisor', 'rescue', 'report'],
     'the restart group must come before the shutdown group',
   )
   assert.equal(textOf(groups[0].children[0]), '重启相关设置', 'the restart group has a visible title')
   assert.equal(textOf(groups[1].children[0]), '关机相关设置', 'the shutdown group has a visible title')
   assert.equal(textOf(groups[2].children[0]), '开机自启', 'the supervisor group has a visible title')
-  assert.equal(textOf(groups[3].children[0]), '报告问题', 'the report group has a visible title')
+  assert.equal(textOf(groups[3].children[0]), '出事了怎么办', 'the rescue group has a visible title')
+  assert.equal(textOf(groups[4].children[0]), '报告问题', 'the report group has a visible title')
 
   // The restart group carries three controls, the shutdown group exactly one.
   const restartControls = walk(groups[0]).filter((node) => node.type === 'select' || node.type === 'input')

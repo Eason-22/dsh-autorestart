@@ -5044,9 +5044,14 @@
        *
        * A setting is written the moment the user picks it ("change it and it
        * is in effect"), which left the user unable to tell whether it was
-       * really stored. This is the missing half: ONE line at the top of the
-       * window that says "Saved 21:40:12" once the HOST answered `ok: true`,
-       * or "Not saved — <the reason>" in red when it refused.
+       * really stored. This is the missing half: ONE `sticky` line at the TOP
+       * OF THE SETTINGS PANEL that says "Saved 21:40:12" once the HOST
+       * answered `ok: true`, or "Not saved — <the reason>" in red when it
+       * refused.
+       *
+       * It is drawn INSIDE the panel (a child of the panel's own tree), never
+       * on the window: a window overlay put it on top of the conversation
+       * area, outside the dialog it belongs to.
        *
        * The rules it keeps:
        *
@@ -5055,7 +5060,9 @@
        *   - a failure is never swallowed and never fades: it stays until the
        *     next change succeeds or the user closes it;
        *   - a success fades out on its own after a moment, and three changes
-       *     in a row update the SAME line instead of stacking new ones.
+       *     in a row update the SAME line instead of stacking new ones;
+       *   - the line lives exactly as long as the panel does (closing the
+       *     settings throws it away).
        * ---------------------------------------------------------------- */
 
       /** The id of the one stylesheet of the receipt line. */
@@ -5064,8 +5071,8 @@
       const SAVE_NOTICE_HIDE_MS = 3000
 
       /**
-       * The receipt on screen right now (one for the whole window: two
-       * changes never produce two lines).
+       * The receipt on screen right now (one for the whole panel: two changes
+       * never produce two lines).
        *
        * `notice` is `null` until a save came back from the Host, and it is
        * `{ kind: 'ok' | 'failed', at, atText, reason }` afterwards.
@@ -5170,54 +5177,66 @@
         return notice
       }
 
-      // The line hangs at the top CENTRE of the WINDOW: it is `fixed`, so it
-      // stays where it is while the settings page scrolls and while a
-      // dropdown is open. It starts below the frame chrome (the buttons of
-      // the top bar stay reachable and uncovered) and it lets every click
-      // through — only its close button takes one.
+      // THE RECEIPT OF A SETTINGS CHANGE IS A STRIP OF THE SETTINGS PANEL.
+      //
+      // It used to be a WINDOW overlay (`shell.overlay`), and that was wrong:
+      // the user saw it floating over the conversation area — outside the
+      // dialog it belonged to. It is a child of the panel itself now: a
+      // `sticky` strip at the top of the panel, so it stays visible while the
+      // settings are scrolled and it can never leave the dialog.
+      //
+      // The strip COVERS the first line of the panel for its 30px (the wrapper
+      // is sticky with height 0) instead of pushing the form down, so nothing
+      // jumps when it appears or fades.
       const SAVE_NOTICE_CSS = [
         '.dsh-autorestart-save-notice{',
-        '  position:fixed;',
-        '  top:calc(var(--dsh-frame-chrome-top,0px) + 8px);',
-        '  left:50%;',
-        '  transform:translateX(-50%);',
-        '  z-index:9999;',
+        '  position:sticky;',
+        '  top:0;',
+        '  z-index:5;',
+        '  height:0;',
+        '  pointer-events:none;',
+        '}',
+        '.dsh-autorestart-save-notice__bar{',
         '  display:flex;',
         '  align-items:center;',
         '  gap:8px;',
         '  box-sizing:border-box;',
-        '  max-width:min(560px,calc(100vw - 32px));',
-        '  padding:5px 6px 5px 12px;',
-        '  border:1px solid var(--dsw-alias-border-l1);',
-        '  border-radius:10px;',
-        '  background:var(--dsw-alias-bg-layer-1);',
-        '  box-shadow:0 8px 24px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 18%, transparent);',
-        '  color:var(--dsw-alias-label-primary);',
+        '  height:30px;',
+        '  max-width:100%;',
+        '  padding:0 4px 0 10px;',
+        '  border:1px solid transparent;',
+        '  border-radius:8px;',
         '  font-size:13px;',
         '  line-height:18px;',
         '  white-space:nowrap;',
-        '  pointer-events:none;',
+        '  pointer-events:auto;',
+        '  box-shadow:0 2px 8px color-mix(in srgb, var(--dsw-alias-bg-mask-3) 14%, transparent);',
         '}',
-        // The green receipt: "Saved 21:40:12".
-        '.dsh-autorestart-save-notice--ok{',
-        '  border-color:color-mix(in srgb, var(--dsw-alias-state-success,#1a7f37) 45%, var(--dsw-alias-border-l1));',
+        // The green strip: a light green ground with green text.
+        '.dsh-autorestart-save-notice--ok .dsh-autorestart-save-notice__bar{',
+        '  border-color:color-mix(in srgb, var(--dsw-alias-state-success,#1a7f37) 38%, transparent);',
+        '  background:color-mix(in srgb, var(--dsw-alias-state-success,#1a7f37) 12%, var(--dsw-alias-bg-layer-1));',
         '  color:var(--dsw-alias-state-success-fg,var(--dsw-alias-state-success,#1a7f37));',
         '}',
-        // The red one: "Not saved — <the reason>". It does not fade.
-        '.dsh-autorestart-save-notice--failed{',
-        '  border-color:color-mix(in srgb, var(--dsw-alias-danger,#d14343) 45%, var(--dsw-alias-border-l1));',
+        // The red one: a light red ground with red text. It does not fade.
+        '.dsh-autorestart-save-notice--failed .dsh-autorestart-save-notice__bar{',
+        '  border-color:color-mix(in srgb, var(--dsw-alias-danger,#d14343) 38%, transparent);',
+        '  background:color-mix(in srgb, var(--dsw-alias-danger,#d14343) 12%, var(--dsw-alias-bg-layer-1));',
         '  color:var(--dsw-alias-danger,#d14343);',
         '}',
         '.dsh-autorestart-save-notice__title{flex:none;font-weight:600;}',
+        // The clock time sits at the RIGHT of the strip, in small type.
         '.dsh-autorestart-save-notice__time{',
         '  flex:none;',
+        '  margin-left:auto;',
         '  font-size:11.5px;',
-        '  color:var(--dsw-alias-label-tertiary,var(--dsw-alias-label-secondary));',
+        '  opacity:.75;',
         '  font-variant-numeric:tabular-nums;',
         '}',
         // The reason is the only text that may be cut, and even then the whole
-        // text is in the tooltip: the short line itself is never cut.
+        // text is in the tooltip: the short copy itself is never cut.
         '.dsh-autorestart-save-notice__reason{',
+        '  flex:0 1 auto;',
         '  min-width:0;',
         '  overflow:hidden;',
         '  text-overflow:ellipsis;',
@@ -5235,22 +5254,19 @@
         '  font-size:14px;',
         '  line-height:18px;',
         '  cursor:pointer;',
-        '  pointer-events:auto;',
         '}',
-        '.dsh-autorestart-save-notice__close:hover{',
-        '  background:var(--dsw-alias-bg-layer-2,color-mix(in srgb, var(--dsw-alias-label-primary) 8%, transparent));',
-        '}',
+        '.dsh-autorestart-save-notice__close:hover{background:color-mix(in srgb, currentColor 14%, transparent);}',
         '.dsh-autorestart-save-notice__close:focus-visible{',
         '  outline:2px solid var(--dsw-alias-state-business-primary,var(--dsw-alias-brand-primary,#4d6bfe));',
         '  outline-offset:2px;',
         '}',
         // The fade is decoration: a system that asks for less motion gets none.
         '@media (prefers-reduced-motion: no-preference){',
-        '  .dsh-autorestart-save-notice{animation:dsh-autorestart-save-notice-in .18s ease-out;}',
+        '  .dsh-autorestart-save-notice__bar{animation:dsh-autorestart-save-notice-in .16s ease-out;}',
         '}',
         '@keyframes dsh-autorestart-save-notice-in{',
-        '  from{opacity:0;transform:translate(-50%,-4px);}',
-        '  to{opacity:1;transform:translate(-50%,0);}',
+        '  from{opacity:0;transform:translateY(-3px);}',
+        '  to{opacity:1;transform:translateY(0);}',
         '}',
       ].join('\n')
 
@@ -5269,19 +5285,22 @@
       }
 
       /**
-       * THE RECEIPT LINE: a fixed strip at the top of the window.
+       * THE RECEIPT OF A SETTINGS CHANGE, drawn INSIDE the settings panel.
        *
-       * It is registered on `shell.overlay` (the frame-wide floating layer),
-       * so it sits above every column and is not clipped by the settings
-       * column it was triggered from. It renders NOTHING until a save came
-       * back from the Host — the first render and every poll are silent.
+       * It is a child of the panel itself (never a window overlay): the DOM
+       * ancestor of this strip IS the settings section, so it can not float
+       * over the conversation area. `SAVE_NOTICE_CSS` makes it a `sticky`
+       * strip at the top of the panel, so it stays visible while the settings
+       * are scrolled, and it covers the first line instead of pushing the
+       * form down.
        *
-       * @param {object} props the Host's props: `t` (the translator of the
-       *   registered locale, handed to a slot entry that declares `locale`)
+       * It renders NOTHING until a save came back from the Host — the first
+       * render and every poll are silent.
+       *
+       * @param {(key: string) => string} t the translator of the panel
+       * @param {object|null} notice the receipt on screen (`null` = none)
        */
-      function SaveNoticeOverlay(props) {
-        const t = makeTranslate(props && typeof props.t === 'function' ? props.t : translate)
-        const notice = useSaveNotice()
+      function saveNoticeBar(t, notice) {
         if (!notice) return null
         ensureSaveNoticeStyle()
         const saved = notice.kind === 'ok'
@@ -5294,40 +5313,43 @@
             'aria-live': saved ? 'polite' : 'assertive',
             'data-dsh-autorestart-save-notice': saved ? 'ok' : 'failed',
             'data-dsh-autorestart-save-notice-at': notice.atText,
-            // The strip never eats a click (the top bar stays usable); only
-            // the close button below does.
-            style: { pointerEvents: 'none' },
           },
           h(
-            'span',
-            { className: 'dsh-autorestart-save-notice__title' },
-            saved ? t('settings.saveNotice.saved') : t('settings.saveNotice.failed'),
-          ),
-          h('span', { className: 'dsh-autorestart-save-notice__time' }, notice.atText),
-          saved || notice.reason === ''
-            ? null
-            : h(
+            'div',
+            { className: 'dsh-autorestart-save-notice__bar' },
+            // LEFT: the short copy ("已生效" / "Saved").
+            h(
               'span',
-              {
-                className: 'dsh-autorestart-save-notice__reason',
-                'data-dsh-autorestart-save-notice-reason': 'true',
-                // A reason can be long: the tooltip carries all of it.
-                title: notice.reason,
-              },
-              notice.reason,
+              { className: 'dsh-autorestart-save-notice__title' },
+              saved ? t('settings.saveNotice.saved') : t('settings.saveNotice.failed'),
             ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'dsh-autorestart-save-notice__close',
-              'data-dsh-autorestart-save-notice-close': 'true',
-              onClick: clearSaveNotice,
-              title: t('settings.saveNotice.dismiss'),
-              'aria-label': t('settings.saveNotice.dismiss'),
-              style: { pointerEvents: 'auto' },
-            },
-            '×',
+            // The reason of a failure (the only text that may be cut, and the
+            // tooltip carries all of it).
+            saved || notice.reason === ''
+              ? null
+              : h(
+                'span',
+                {
+                  className: 'dsh-autorestart-save-notice__reason',
+                  'data-dsh-autorestart-save-notice-reason': 'true',
+                  title: notice.reason,
+                },
+                notice.reason,
+              ),
+            // RIGHT: the small clock time, then the close button.
+            h('span', { className: 'dsh-autorestart-save-notice__time' }, notice.atText),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-autorestart-save-notice__close',
+                'data-dsh-autorestart-save-notice-close': 'true',
+                onClick: clearSaveNotice,
+                title: t('settings.saveNotice.dismiss'),
+                'aria-label': t('settings.saveNotice.dismiss'),
+              },
+              '×',
+            ),
           ),
         )
       }
@@ -5351,6 +5373,19 @@
         // accident.
         const [detailsOpen, setDetailsOpen] = useState(false)
         const t = makeTranslate(props && typeof props.t === 'function' ? props.t : translate)
+        // THE RECEIPT OF A SETTINGS CHANGE, on screen right now. It belongs to
+        // THIS panel (it is not a window overlay), so it is read here and
+        // drawn here.
+        const saveNotice = useSaveNotice()
+
+        // The receipt lives exactly as long as this panel is on screen: a page
+        // that is closed (or reopened) never shows a "Saved" of an earlier
+        // visit. The mount clearing also covers a Host that keeps the section
+        // mounted while it is hidden.
+        useEffect(() => {
+          clearSaveNotice()
+          return () => { clearSaveNotice() }
+        }, [])
 
         // The current values come from the Host, so the panel always shows what
         // is really in effect.
@@ -5731,6 +5766,11 @@
         return h(
           'div',
           { className: 'dsh-autorestart-settings' },
+          // THE RECEIPT: a `sticky` strip at the TOP of this panel. It is a
+          // child of the panel (the DOM ancestor of the message IS the
+          // settings section), so it can not float over the conversation area
+          // again — and it stays visible while the settings are scrolled.
+          saveNoticeBar(t, saveNotice),
           // The panel is split into two titled groups: the RESTART settings
           // come first, the SHUTDOWN settings after them. The two situations
           // are different, so they do not share one flat list.
@@ -7517,11 +7557,10 @@
           // back) in the middle of the interface, so the composer row can stay
           // one short clipped line. It draws NOTHING when no restart is staged.
           ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-restart-overlay', order: 55, locale: NS }, RestartOverlay))
-          // The receipt of a settings change: ONE fixed line at the top of the
-          // WINDOW, so the user sees "Saved" (or the reason it was not saved)
-          // while the settings page is scrolled and while a dropdown is open.
-          // It is a frame-wide overlay, so no column can clip it.
-          ctx.slots.inject('shell.overlay', () => ctx.slots.register({ name: 'shell.overlay', id: 'autorestart-save-notice', order: 65, locale: NS }, SaveNoticeOverlay))
+          // NOTE: the receipt of a settings change is NOT registered here. It
+          // is a `sticky` strip INSIDE the settings panel (see
+          // `saveNoticeBar`), because a window overlay put it on top of the
+          // conversation area instead of inside the dialog it belongs to.
         },
         // The named exports of this module (the client module system hands
         // `factory(require) -> exports` to every importer).

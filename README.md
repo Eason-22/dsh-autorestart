@@ -407,6 +407,42 @@ hold the restart back:
 - **Where to look:** `GET /health?state=1`, `GET /health?gate=1` and `continuum_status` all report
   `queuedGraceMs`.
 
+### The four stages of a restart (what you see between the click and the comeback)
+
+A restart is not instant, and for a while it used to look like nothing at all: the click was
+accepted, then the host spent ten-odd seconds writing a pre-restart snapshot (a desktop profile
+with its plugins is ~150 MB). The button looked dead. It is not — and now it says so:
+
+| Stage | What the interface shows | Where the data comes from |
+|---|---|---|
+| `waiting` | "Waiting for every conversation to be idle…" (+ how many are busy) | the idle gate's blockers |
+| `snapshotting` | "Backing up the configuration and the plugins (about 12s left, 78 MB done)…" | the REAL copy loop: files and bytes written, measured total |
+| `restarting` | "Restarting; the work continues by itself in a moment…" | the host is on its way out |
+| `back` | "Back — carrying on where we left off" | the new host, once it boots |
+
+Three things make this honest rather than decorative:
+
+1. **The first stage is written by the click itself** and persisted at once, so the pill (which
+   polls the `state=1` route every 2 s, and immediately after a click) has something true to show
+   well inside the first second.
+2. **The progress is measured, never animated.** The copy reports the files and bytes that really
+   landed, against a total measured before it started; the estimate only appears once there is a
+   real speed to divide. When there is no measurement yet, the text claims no number at all.
+3. **A slow copy is announced** — after five minutes, or when the byte counter has not moved for a
+   minute, the line becomes "The backup is slower than expected (the disk may be busy); it is still
+   running…". That is the opposite of a progress bar that pretends.
+
+**Cancelling.** While the host is still waiting or copying, cancelling stops the copy between two
+files, deletes the half-written snapshot (no fake backup is left behind), withdraws the request and
+the host keeps running. Once the stage is `restarting` a cancel is refused (HTTP 409 with the
+reason) and the button is greyed out: the host is already on its way out, and a cancel there would
+be a promise this plugin cannot keep.
+
+Both `…/health` and `…/health?state=1` carry `restartPhase` (stage, bilingual text, `cancellable`,
+`slow`) and `progress` (files, bytes, total, percent, age), and the settings page keeps one status
+line next to the restart settings — the pill is only there while a restart is pending, the settings
+line is always there.
+
 ### What you see while the restart waits a long time
 
 When the hard deadline (`deferHardMs`) is over and a conversation is still running, the plugin does

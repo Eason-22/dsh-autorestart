@@ -33,9 +33,21 @@ health 路由里那段"写 marker + 撤看门狗"的代码读的是 `stateDirOf(
 
 - **场景 ④「宿主起来了但没写 ready marker」**（就是这次事故）：假宿主只应答 health、绝不写 marker，并且**真实注册一个 Windows 计划任务**；断言 watchdog `result: not-needed`、`healthCheck: healthy`、**一次还原都没有**、pending 已消失、**计划任务真的被删掉**（`schtasks /Query` 查不到）。
 
+### 重启阶段化 UI（同版发布：点下去 1 秒内就有反馈，备份有真实进度）
+
+用户反馈："点『0 秒后重启』之后十几秒什么都不动，其实在备份 156MB，我会以为按钮没反应 / 0 秒是假的 / 有 bug。"
+
+- **四个阶段立刻可见**：`waiting`「正在等待所有会话空闲…」→ `snapshotting`「正在备份配置和插件（预计 X 秒，已完成 Y MB）…」→ `restarting`「正在重启，稍后自动继续…」→ `back`「已回来，接着干」。阶段写在 checkpoint（`restartPhase`）里，点击的**同一次调用**就把 `waiting` 落盘并 persist，界面下一次轮询（2 秒一次，且点击后立即再拉一次）就能看到。
+- **备份进度是真的**：`createBackup` 改成**文件级拷贝循环**（原来是 `fs.cpSync` 一次性拷完，既没进度也不能取消），边拷边报 `{ files, bytes, total }`，`total` 是拷之前量出来的真实总量；拷贝过程**每 120ms / 每 40 个文件让出一次事件循环**，所以取消请求能在拷贝途中被服务，进度也能在拷贝途中到界面。
+- **备份阶段可取消**：取消后拷贝在下一个文件处停下，**半成品快照目录被删掉**（不留一个看着能还原的假备份），请求被撤回、宿主不重启；**进入 `restarting` 后取消被拒绝**（HTTP 409 + `reason: not-cancellable` + 原因），界面按钮置灰并说明"正在重启，已经不能取消了"。
+- **两处都能读到**：`/__dsh_autorestart/health?state=1` 与 `/health` 都带 `restartPhase`（阶段、双语文字、可取消性、`slow`）和 `progress`（files/bytes/total/percent/ageMs）。
+- **慢就明说**：备份超过 300 秒，或字节数 60 秒没动 → 显示「备份比预期慢（可能磁盘很忙），还在继续…」，绝不假装正常进度。
+- **界面**：composer 那颗 pill 多一行阶段文字（含进度），设置页「重启设置」组标题下常驻一行同样的状态（pill 只在有待办重启时出现，设置页那行一直都在）。
+
 ### 验证
 
 - 单元测试 **740 → 753 项全绿**（新增 `test/watchdog-disarm.test.mjs`：事故复现、开机自动撤销、marker 读写与 read-back、失败/重试/留痕、按 pending 选调度项、诊断文本、流程里"健康就不回滚"、问不到端口多等一轮）。
+- 阶段化 UI 再加 **`test/restart-phase.test.mjs`（6 项，累计 760 项全绿）**：①点击后 1 秒内可读到 `phase='waiting'`（含 state 文件与 state 路由两处）②备份中 `progress.bytes` 单调增长且等于最终写入量 ③备份中取消 → 半成品目录消失、宿主没重启、请求被撤回 ④`restarting` 阶段取消被 409 拒绝并给出原因 ⑤慢拷贝两种文案 ⑥里程碑：健康拷贝报真实 MB 与预计秒数、没有测量前不报任何数字。
 - 演练四场景 + 三档调度真机触发全部 exit 0。
 
 ## 0.8.1 — 2026-10-29

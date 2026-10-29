@@ -39,9 +39,9 @@ function fixture(t) {
   return { base, profile, storage, backups: backupsRoot(storage) };
 }
 
-test('a backup copies the configuration files and the plugin tree', (t) => {
+test('a backup copies the configuration files and the plugin tree', async (t) => {
   const { profile, storage, backups } = fixture(t);
-  const first = createBackup({ profileDir: profile, backupsDir: backups, includePlugins: true, now: 1_000 });
+  const first = await createBackup({ profileDir: profile, backupsDir: backups, includePlugins: true, now: 1_000 });
 
   assert.equal(first.ok, true);
   assert.equal(first.includePlugins, true);
@@ -60,9 +60,9 @@ test('a backup copies the configuration files and the plugin tree', (t) => {
   assert.ok(fs.existsSync(path.join(storage, 'backups', first.stamp, MANIFEST_NAME)));
 });
 
-test('includePlugins=false keeps the backup to the configuration files', (t) => {
+test('includePlugins=false keeps the backup to the configuration files', async (t) => {
   const { profile, backups } = fixture(t);
-  const backup = createBackup({ profileDir: profile, backupsDir: backups, includePlugins: false, now: 2_000 });
+  const backup = await createBackup({ profileDir: profile, backupsDir: backups, includePlugins: false, now: 2_000 });
 
   assert.equal(backup.ok, true);
   assert.equal(backup.includePlugins, false);
@@ -71,11 +71,11 @@ test('includePlugins=false keeps the backup to the configuration files', (t) => 
   assert.equal(readManifest(backup.dir).includePlugins, false);
 });
 
-test('only the newest maxBackups snapshots are kept', (t) => {
+test('only the newest maxBackups snapshots are kept', async (t) => {
   const { profile, backups } = fixture(t);
   const stamps = [3_000, 4_000, 5_000, 6_000];
   for (const now of stamps) {
-    const backup = createBackup({ profileDir: profile, backupsDir: backups, includePlugins: false, maxBackups: 2, now });
+    const backup = await createBackup({ profileDir: profile, backupsDir: backups, includePlugins: false, maxBackups: 2, now });
     assert.equal(backup.ok, true);
   }
 
@@ -101,9 +101,9 @@ test('pruneBackups removes only what exceeds the limit', (t) => {
   ]);
 });
 
-test('restoreBackup puts the snapshot back over the live profile', (t) => {
+test('restoreBackup puts the snapshot back over the live profile', async (t) => {
   const { profile, backups } = fixture(t);
-  const backup = createBackup({ profileDir: profile, backupsDir: backups, includePlugins: true, now: 7_000 });
+  const backup = await createBackup({ profileDir: profile, backupsDir: backups, includePlugins: true, now: 7_000 });
   assert.equal(backup.ok, true);
 
   // Break the live profile the way a bad edit would.
@@ -117,8 +117,8 @@ test('restoreBackup puts the snapshot back over the live profile', (t) => {
   assert.ok(fs.existsSync(path.join(profile, 'node_modules', 'demo-plugin', 'lib', 'index.js')));
 });
 
-test('createBackup reports a missing profile instead of throwing', () => {
-  const result = createBackup({ profileDir: path.join(os.tmpdir(), 'dsh-ar-does-not-exist-xyz'), backupsDir: path.join(os.tmpdir(), 'dsh-ar-b') });
+test('createBackup reports a missing profile instead of throwing', async () => {
+  const result = await createBackup({ profileDir: path.join(os.tmpdir(), 'dsh-ar-does-not-exist-xyz'), backupsDir: path.join(os.tmpdir(), 'dsh-ar-b') });
   assert.equal(result.ok, false);
   assert.match(String(result.error), /does not exist/);
 });

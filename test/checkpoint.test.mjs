@@ -44,6 +44,8 @@ test('createEmptyState has the documented defaults', () => {
     bootStartedAt: null,
     generation: 0,
     phase: 'idle',
+    // Which stage of a restart is on screen (null: none under way).
+    restartPhase: null,
     restart: null,
     sessions: {},
     seenFeatureVersions: {},

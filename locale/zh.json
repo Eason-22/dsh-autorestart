@@ -54,6 +54,7 @@
   "cancelPanelAria": "待重启详情",
   "cancelButton": "取消我的这次重启",
   "cancelButtonAria": "取消我的这次重启",
+  "cancelLocked": "正在重启，已经不能取消了",
   "cancelConfirmTitle": "取消你的这次重启？",
   "cancelConfirmOnlyMe": "取消后这次重启就不会发生了。",
   "cancelConfirmOthers": "还有 {n} 个会话也在等这次重启——取消只影响你自己，他们仍会重启。",

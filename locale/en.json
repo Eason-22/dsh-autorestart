@@ -54,6 +54,7 @@
   "cancelPanelAria": "Pending restart details",
   "cancelButton": "Cancel my restart",
   "cancelButtonAria": "Cancel my restart",
+  "cancelLocked": "Restarting — this can no longer be cancelled",
   "cancelConfirmTitle": "Cancel your restart?",
   "cancelConfirmOnlyMe": "After this, the restart will not happen.",
   "cancelConfirmOthers": "{n} other session(s) are waiting for this restart too — cancelling only affects you; they will still restart.",

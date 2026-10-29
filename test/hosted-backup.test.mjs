@@ -291,7 +291,7 @@ test('a failed snapshot does not block the restart command', async (t) => {
   assert.equal(fs.existsSync(path.join(state.dir, 'backups')), false)
 })
 
-test('the shared snapshot entry keeps the reason of a failed backup and never throws', (t) => {
+test('the shared snapshot entry keeps the reason of a failed backup and never throws', async (t) => {
   const { base, profile } = fixture(t, 'entry')
   const state = stateDir(base, 'entry')
   const warnings = []
@@ -301,7 +301,7 @@ test('the shared snapshot entry keeps the reason of a failed backup and never th
     },
   }
 
-  const failed = takePreRestartSnapshot({
+  const failed = await takePreRestartSnapshot({
     config: { backupOnRestart: true, backupIncludePlugins: true, maxBackups: 2 },
     stateDir: state.dir,
     log,
@@ -316,7 +316,7 @@ test('the shared snapshot entry keeps the reason of a failed backup and never th
   )
 
   // A backup writer that throws must not take the restart down with it.
-  const thrown = takePreRestartSnapshot({
+  const thrown = await takePreRestartSnapshot({
     config: { backupOnRestart: true, backupIncludePlugins: true, maxBackups: 2 },
     stateDir: state.dir,
     log,
@@ -329,9 +329,9 @@ test('the shared snapshot entry keeps the reason of a failed backup and never th
   assert.match(String(thrown.backup.error), /the backup writer exploded/)
 })
 
-test('the shared snapshot entry writes nothing when backupOnRestart is false', () => {
+test('the shared snapshot entry writes nothing when backupOnRestart is false', async () => {
   let called = 0
-  const result = takePreRestartSnapshot({
+  const result = await takePreRestartSnapshot({
     config: { backupOnRestart: false },
     stateDir: path.join(os.tmpdir(), 'dsh-ar-hosted-no-backup'),
     log: { warn: () => {} },

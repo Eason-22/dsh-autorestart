@@ -225,6 +225,7 @@
     cancelPanelAria: '待重启详情',
     cancelButton: '取消我的这次重启',
     cancelButtonAria: '取消我的这次重启',
+    cancelLocked: '正在重启，已经不能取消了',
     cancelConfirmTitle: '取消你的这次重启？',
     cancelConfirmOnlyMe: '取消后这次重启就不会发生了。',
     cancelConfirmOthers: '还有 {n} 个会话也在等这次重启——取消只影响你自己，他们仍会重启。',
@@ -548,6 +549,7 @@
     cancelPanelAria: 'Pending restart details',
     cancelButton: 'Cancel my restart',
     cancelButtonAria: 'Cancel my restart',
+    cancelLocked: 'Restarting — this can no longer be cancelled',
     cancelConfirmTitle: 'Cancel your restart?',
     cancelConfirmOnlyMe: 'After this, the restart will not happen.',
     cancelConfirmOthers: '{n} other session(s) are waiting for this restart too — cancelling only affects you; they will still restart.',
@@ -2135,6 +2137,44 @@
       let translate = null
 
       /**
+       * THE STAGE LINE of a running restart, in the reader's language.
+       *
+       * The Host sends BOTH languages (`text: { zh, en }`) with every stage, so
+       * the pill and the settings page need no locale key that an older Host
+       * might not ship — and there is exactly ONE sentence per stage instead of
+       * two that could drift apart.
+       *
+       * @param {object|null} stage the `restartPhase` of the state payload
+       * @returns {string} the sentence, or '' when there is no restart
+       */
+      function restartStageText(stage) {
+        if (!stage || typeof stage !== 'object') return ''
+        const text = stage.text && typeof stage.text === 'object' ? stage.text : null
+        if (!text) return ''
+        const lang = typeof document !== 'undefined' && document.documentElement && document.documentElement.lang
+          ? String(document.documentElement.lang)
+          : (typeof navigator !== 'undefined' && navigator.language ? String(navigator.language) : 'en')
+        const zh = lang.toLowerCase().indexOf('zh') === 0
+        const picked = zh ? (text.zh || text.en) : (text.en || text.zh)
+        return typeof picked === 'string' ? picked : ''
+      }
+
+      /**
+       * May this restart still be called off?
+       *
+       * It is the HOST that decides (`cancellable`): once the host is on its
+       * way out, a cancel button would be a promise the plugin cannot keep, so
+       * it is shown disabled together with the reason.
+       *
+       * @param {object|null} stage
+       * @returns {boolean}
+       */
+      function restartStageLocked(stage) {
+        if (!stage || typeof stage !== 'object') return false
+        return stage.cancellable === false
+      }
+
+      /**
        * ONE shared poller, shared by every surface that shows the pending
        * restart state (the composer pill and the sidebar session-row dot).
        *
@@ -2613,10 +2653,14 @@
         cursor: 'pointer',
       }
 
-      // The park button lives inside the pill and reuses the pill's own button
-      // look (same tokens, same border, same radius), only smaller so the pill
-      // stays a one-line chip. It is inline (no absolute/fixed positioning, no
-      // negative margins) and never becomes a second element in the slot.
+      // The same button, greyed out: used while the host is already restarting,
+      // when a cancel can no longer be honoured.
+      const PANEL_BUTTON_DISABLED_STYLE = {
+        ...PANEL_BUTTON_STYLE,
+        cursor: 'not-allowed',
+        opacity: 0.55,
+      }
+
       const PARK_BUTTON_STYLE = {
         ...PILL_STYLE,
         height: 18,
@@ -2916,6 +2960,12 @@
         if (!waiting && !withdrawn) return null
 
         const blockedBy = Array.isArray(info.blockedBy) ? info.blockedBy : []
+        // WHICH STAGE THE RESTART IS IN (waiting / backing up / restarting) and
+        // whether a cancel is still honest. Both come from the Host: the pill
+        // never guesses the stage and never invents progress.
+        const stage = info && info.restartPhase && typeof info.restartPhase === 'object' ? info.restartPhase : null
+        const stageText = restartStageText(stage)
+        const cancelLocked = restartStageLocked(stage)
         // The TASK of every blocker: a session and its own subagents are ONE
         // task (the sidebar counts them once). The keys are aligned with the
         // list, so the filter below can ask "is this MY task?".
@@ -3233,16 +3283,22 @@
                 'button',
                 {
                   type: 'button',
-                  style: PANEL_BUTTON_STYLE,
-                  title: t('cancelButtonAria'),
-                  'aria-label': t('cancelButtonAria'),
-                  disabled: cancelling,
+                  style: cancelLocked ? PANEL_BUTTON_DISABLED_STYLE : PANEL_BUTTON_STYLE,
+                  // A cancel once the host is restarting would be a promise the
+                  // plugin cannot keep: the button is greyed out and the reason
+                  // is in its tooltip.
+                  title: cancelLocked
+                    ? t('cancelLocked') + (stage && stage.cancelReason ? ' · ' + stage.cancelReason : '')
+                    : t('cancelButtonAria'),
+                  'aria-label': cancelLocked ? t('cancelLocked') : t('cancelButtonAria'),
+                  'aria-disabled': cancelLocked ? 'true' : 'false',
+                  disabled: cancelling || cancelLocked,
                   onClick: (event) => {
                     if (event && typeof event.stopPropagation === 'function') event.stopPropagation()
                     setConfirmOpen(true)
                   },
                 },
-                t('cancelButton'),
+                cancelLocked ? t('cancelLocked') : t('cancelButton'),
               ),
           )
           : null
@@ -3271,6 +3327,21 @@
             },
             h('span', { style: dotStyle(DOT_STYLE, pulsing), 'aria-hidden': 'true' }),
             h('span', { style: TEXT_STYLE }, h('b', null, t('label')), status),
+            // ONE MORE LINE: WHICH STAGE THE RESTART IS IN, with the real
+            // progress of the backup. It is the answer to "I clicked restart
+            // and nothing happened" — the pill says "waiting", then "backing up
+            // 120 MB of 156 MB", then "restarting".
+            stageText === ''
+              ? null
+              : h(
+                'span',
+                {
+                  style: LONG_WAIT_STYLE,
+                  'data-dsh-autorestart-stage': String(stage && stage.phase ? stage.phase : ''),
+                  title: stageText,
+                },
+                stageText,
+              ),
             // One more line for the long wait: how long the restart has been
             // waiting and how many tasks are running. It is only there when the
             // Host says so. The line carries NO name at all — it is one
@@ -4897,6 +4968,28 @@
               { className: 'dsh-autorestart-settings__group-title' },
               t('settings.groups.restart'),
             ),
+            // THE STATUS LINE: what the restart is doing right now, next to the
+            // settings that control it. It lives here (the pill only exists
+            // while a restart is pending), so a slow backup, "restarting" and
+            // "back — carrying on" are visible where the user went looking.
+            restartStageText(info && info.restartPhase) === ''
+              ? null
+              : h(
+                'div',
+                {
+                  className: 'dsh-autorestart-settings__status',
+                  'data-dsh-autorestart-stage': String(
+                    info && info.restartPhase && info.restartPhase.phase ? info.restartPhase.phase : '',
+                  ),
+                  style: {
+                    margin: '2px 0 8px',
+                    fontSize: 12,
+                    lineHeight: '16px',
+                    color: 'var(--dsw-alias-label-secondary, inherit)',
+                  },
+                },
+                restartStageText(info && info.restartPhase),
+              ),
             h(
               'label',
               { className: 'dsh-autorestart-settings__field' },

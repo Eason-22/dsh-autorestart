@@ -49,9 +49,17 @@ import {
   setHandoff,
   setRecoveryOutcome,
   setPhase,
+  setRestartPhase,
+  setRestartProgress,
+  clearRestartPhase,
   stampResumedGoal,
   writeState,
 } from './lib/checkpoint.js'
+import {
+  cancelRefusalReason,
+  describeRestartPhase,
+  RESTART_PHASES,
+} from './lib/restart-phase.js'
 import {
   bootPlan,
   composeHandoff,
@@ -1403,12 +1411,16 @@ function backupsDirFor(dir) {
  *   error: string|null,
  * }}
  */
-export function takePreRestartSnapshot({
+export async function takePreRestartSnapshot({
   config = {},
   stateDir = '',
   log = console,
   profile = null,
   createBackup: createBackupFn = createBackup,
+  // The REAL progress of the copy, and the way out of it: both are handed to
+  // the backup itself, so the numbers on screen are the numbers on disk.
+  onProgress = null,
+  shouldCancel = null,
 } = {}) {
   const startedAt = Date.now()
   const info = profile && typeof profile === 'object'
@@ -1432,17 +1444,33 @@ export function takePreRestartSnapshot({
   }
   let backup = null
   try {
-    backup = createBackupFn({
+    backup = await createBackupFn({
       profileDir,
       backupsDir: backupsDirFor(stateDir),
       includePlugins: config.backupIncludePlugins !== false,
       maxBackups: config.maxBackups,
+      onProgress: typeof onProgress === 'function' ? onProgress : null,
+      shouldCancel: typeof shouldCancel === 'function' ? shouldCancel : null,
     })
   } catch (error) {
     // A backup that throws must not take the restart down with it.
     backup = { ok: false, error: String(error) }
   }
   const durationMs = Math.max(0, Date.now() - startedAt)
+  if (backup && backup.cancelled === true) {
+    // The user called it off: the half-written snapshot was already removed by
+    // the copy loop, and there is nothing to report as a rollback point.
+    log.warn('the pre-restart backup was cancelled by the user', { durationMs })
+    return {
+      backup,
+      profileDir,
+      profile: info,
+      requested: true,
+      durationMs,
+      cancelled: true,
+      error: null,
+    }
+  }
   if (backup && backup.ok === true) {
     log.warn('pre-restart backup written', {
       dir: backup.dir,
@@ -2622,6 +2650,93 @@ const titleOfSummary = (item) => {
   const stateDirOf = () => path.dirname(stateFile)
 
   /**
+   * THE STAGE LINE of a restart ("waiting / backing up / restarting / back").
+   *
+   * It is written ONCE per stage change and persisted IMMEDIATELY, because the
+   * whole point of it is the first second after the click: a stage that reaches
+   * the interface only after the 156 MB snapshot would tell the user nothing
+   * about the ten seconds they spent wondering whether the button worked.
+   *
+   * @param {string} phase one of RESTART_PHASES
+   * @param {{ blocked?: number, now?: number }} [options]
+   * @returns {object|null} the recorded stage
+   */
+  const markRestartStage = (phase, { blocked = 0, now = Date.now() } = {}) => {
+    if (!RESTART_PHASES.includes(phase)) return null
+    const record = setRestartPhase(state, { phase, blocked, now })
+    persist()
+    return record
+  }
+
+  /**
+   * Record the REAL progress of the running snapshot (files and bytes).
+   *
+   * The copy loop calls this between files; the checkpoint is written with a
+   * small throttle, because a state write per copied file would slow the copy
+   * down for no gain. The in-memory record is always current, so a `state=1`
+   * poll that arrives between two writes still sees the newest numbers.
+   *
+   * @param {{ files?: number, bytes?: number, total?: number, filesTotal?: number, now?: number }} progress
+   */
+  let lastProgressPersist = 0
+  const recordSnapshotProgress = (progress) => {
+    const now = Date.now()
+    const record = setRestartProgress(state, { ...progress, now })
+    if (now - lastProgressPersist >= 250) {
+      lastProgressPersist = now
+      persist()
+    }
+    return record
+  }
+
+  /** Forget the stage (cancel, or a restart that could not be started). */
+  const clearRestartStage = () => {
+    if (clearRestartPhase(state)) persist()
+  }
+
+  /**
+   * The stage as every surface shows it (state route, health route, client).
+   *
+   * @returns {object} the described stage (always an object, never null)
+   */
+  const restartStageInfo = () => {
+    const record = state.restartPhase
+    const blocked = (() => {
+      try {
+        return countBlockerTasks(gate().blockedBy)
+      } catch {
+        return 0
+      }
+    })()
+    return describeRestartPhase({
+      phase: record && typeof record === 'object' ? record.phase : 'idle',
+      startedAt: record && typeof record === 'object' ? record.startedAt : null,
+      at: record && typeof record === 'object' ? record.at : null,
+      progress: record && typeof record === 'object' ? record.progress : null,
+      blocking: record && typeof record === 'object' && Number.isFinite(record.blocked) ? record.blocked : blocked,
+      now: Date.now(),
+    })
+  }
+
+  /**
+   * A cancel request that arrived while the snapshot was being written.
+   *
+   * The backup loop asks this between files: the copy stops, its half-written
+   * directory is removed, and the host never restarts. A flag (not a thrown
+   * error) because the loop is synchronous and must finish its bookkeeping.
+   */
+  let snapshotCancelRequested = false
+  const requestSnapshotCancel = () => {
+    snapshotCancelRequested = true
+    return true
+  }
+  const snapshotCancelled = () => snapshotCancelRequested === true
+  const resetSnapshotCancel = () => {
+    snapshotCancelRequested = false
+  }
+
+
+  /**
    * The durable record of the last restart: the snapshot that was taken, the
    * verdict of the new instance and its four boot checks.
    *
@@ -3556,13 +3671,50 @@ const titleOfSummary = (item) => {
       // app relaunch and the custom restart command share this single entry, so
       // a hosted host that is restarted by a command is just as recoverable as
       // the desktop app.
+      //
+      // THE STAGE IS ON SCREEN BEFORE THE COPY STARTS, and the copy reports the
+      // files and bytes it really writes. That is the fix of "I clicked restart
+      // and nothing happened for ten seconds": the ten seconds ARE the snapshot,
+      // and now they say so.
       const stateDir = path.dirname(stateFile)
-      const snapshot = snapshotFn({
-        config,
-        stateDir,
-        log,
-        profile: resolveProfileDirDetailed(),
-      })
+      resetSnapshotCancel()
+      markRestartStage('snapshotting')
+      let cancelled = false
+      let snapshot
+      try {
+        snapshot = await snapshotFn({
+          config,
+          stateDir,
+          log,
+          profile: resolveProfileDirDetailed(),
+          onProgress: (progress) => {
+            recordSnapshotProgress(progress)
+          },
+          shouldCancel: () => snapshotCancelled(),
+        })
+      } finally {
+        // The flag belongs to ONE snapshot; a stale `true` would cancel the
+        // next restart before it began.
+        const wasCancelled = snapshotCancelled()
+        resetSnapshotCancel()
+        // Two ways a copy can be called off: the flag this process set (the
+        // cancel route) or the snapshot reporting it itself. Both mean the same
+        // thing, and both must stop the restart.
+        cancelled = wasCancelled || (snapshot !== null && typeof snapshot === 'object' && snapshot.cancelled === true)
+      }
+      if (cancelled) {
+        // The user called it off while the files were being copied: the
+        // half-written snapshot is already gone (createBackup removes it), the
+        // host does not restart, and the request is WITHDRAWN — a restart the
+        // user cancelled must not be retried five seconds later.
+        log.warn('the restart was cancelled while the snapshot was being written')
+        clearRestartStage()
+        releaseRequesters()
+        cancelRestart(state, { now: Date.now() })
+        persist()
+        stopPolling()
+        return
+      }
       // The snapshot is the rollback point of BOTH branches.
       const backup = snapshot && snapshot.backup ? snapshot.backup : null
       const profileDir = snapshot && snapshot.profileDir ? snapshot.profileDir : null
@@ -3693,6 +3845,10 @@ const titleOfSummary = (item) => {
           // looked at "the spawn did not throw", so a command that does not
           // exist or that exits with an error was reported as a successful
           // restart.
+          //
+          // FROM HERE ON THE RESTART CANNOT BE CANCELLED, and the interface says
+          // so: the host is on its way out.
+          markRestartStage('restarting')
           const outcome = await runCommandFn({
             command,
             timeoutMs: config.restartCommandTimeoutMs,
@@ -3830,8 +3986,15 @@ const titleOfSummary = (item) => {
           watchScript,
         })
         log.warn('scheduled detached restart:', result)
-        if (!result || result.ok !== true) rollbackRestart((result && result.error) || 'detached restart refused')
-        else armGateWatchdog()
+        if (!result || result.ok !== true) {
+          markRestartStage('waiting', { blocked: 0 })
+          rollbackRestart((result && result.error) || 'detached restart refused')
+        } else {
+          // The helper is scheduled: the host is going down, and from here on a
+          // cancel would be a promise this plugin cannot keep.
+          markRestartStage('restarting')
+          armGateWatchdog()
+        }
       }
     } catch (error) {
       rollbackRestart(String(error))
@@ -4193,6 +4356,38 @@ const titleOfSummary = (item) => {
      */
     get watchdogDisarm() {
       return watchdogDisarm
+    },
+    // THE STAGE OF A RESTART, as every surface reads it. `markRestartStage`
+    // writes it and persists immediately (that is what makes the first stage
+    // appear within the first second after the click), `recordSnapshotProgress`
+    // carries the REAL bytes of the running copy, and `restartStageInfo` is the
+    // single description (text included) that the state route, the health route
+    // and the settings page share.
+    markRestartStage,
+    recordSnapshotProgress,
+    clearRestartStage,
+    restartStageInfo,
+    requestSnapshotCancel,
+    snapshotCancelled,
+    resetSnapshotCancel,
+    /**
+     * The stage of a restart, cut down for the health route (no long texts).
+     *
+     * @returns {object} `{ phase, at, progress, slow, cancellable }`
+     */
+    restartStageBrief() {
+      const info = restartStageInfo()
+      return {
+        phase: info.phase,
+        at: info.at,
+        elapsedMs: info.elapsedMs,
+        progress: info.progress === null
+          ? null
+          : { files: info.progress.files, bytes: info.progress.bytes, total: info.progress.total, percent: info.progress.percent, ageMs: info.progress.ageMs },
+        slow: info.slow,
+        cancellable: info.cancellable,
+        cancelReason: info.cancelReason,
+      }
     },
     /**
      * Where the effective `backupIncludePlugins` value came from:
@@ -5284,6 +5479,10 @@ function registerTools(ctx, runtime, config) {
       if (typeof args.defer_seconds === 'number' && Number.isFinite(args.defer_seconds) && args.defer_seconds > 0) {
         state.restart.requestedAt = now + Math.min(args.defer_seconds, 3600) * 1000
       }
+      // THE FIRST STAGE, RIGHT NOW — not when the backup starts. The interface
+      // polls this out of the state route, so the click produces a visible
+      // answer in well under a second.
+      runtime.markRestartStage('waiting', { blocked: countBlockerTasks(runtime.gate().blockedBy) })
       runtime.persist()
       runtime.startPolling()
       log.info('restart requested', { generation: state.generation, sessionId, resume, parkGoals })
@@ -6212,6 +6411,9 @@ function buildParkRoute(ctx, runtime, config) {
             resume: true,
             now: Date.now(),
           })
+          // The first stage, in the same breath as the request: the answer to
+          // this POST is already "waiting for the sessions", never silence.
+          runtime.markRestartStage('waiting', { blocked: blockingSessionIds(runtime).length })
           runtime.persist()
           runtime.startPolling()
         }
@@ -6307,6 +6509,28 @@ function buildCancelRoute(ctx, runtime, config) {
           })
           return
         }
+        // THE STAGE DECIDES WHETHER A CANCEL IS HONEST.
+        //
+        // While the snapshot is being written the copy is stopped between two
+        // files and its half-written directory is removed — the host never
+        // restarts. Once the host is on its way out (`restarting`) a cancel
+        // would be a promise this plugin cannot keep, so it is REFUSED with the
+        // reason, and the button is greyed out on the same answer.
+        const stage = runtime.restartStageInfo()
+        if (stage.cancellable !== true) {
+          const reason = cancelRefusalReason(stage.phase) || 'the host is already restarting'
+          runtime.log.warn(`the cancel route refused the request of session ${sessionId}: ${reason}`)
+          answer(409, {
+            ok: false,
+            cancelled: false,
+            reason: 'not-cancellable',
+            stage: stage.phase,
+            error: reason,
+            remainingRequesters: 0,
+            sessionId,
+          })
+          return
+        }
         const outcome = cancelOwnRestart(runtime.state, { sessionId, now: Date.now() })
         if (!outcome.removed) {
           // Nothing was changed: the caller is not a requester (or the
@@ -6329,7 +6553,14 @@ function buildCancelRoute(ctx, runtime, config) {
         }
         // Release ONLY this session's continuation request.
         runtime.releaseRequesters([sessionId])
-        if (outcome.cancelled) runtime.stopPolling()
+        if (outcome.cancelled) {
+          // The whole restart is off. If the snapshot is being written right
+          // now, the copy stops at the next file and removes its half-written
+          // directory (the host never restarts); otherwise the stage just goes.
+          if (stage.phase === 'snapshotting') runtime.requestSnapshotCancel()
+          runtime.clearRestartStage()
+          runtime.stopPolling()
+        }
         runtime.persist()
         runtime.log.info(
           outcome.cancelled
@@ -7639,6 +7870,10 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             }
           }
           const verdict = runtime.gate()
+          // The restart stage (waiting / snapshotting / restarting / back), the
+          // real snapshot progress and the "is a cancel still honest" answer —
+          // computed ONCE per answer so every field of the payload agrees.
+          const stage = runtime.restartStageInfo()
           // Best effort: label the blocking sessions with their titles when the
           // session controller knows them. The title is optional, so an entry
           // without one is sent exactly as the gate produced it. The goal
@@ -7674,6 +7909,14 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // long the restart has been waiting, why, and who holds it — the
             // request itself is never dropped.
             longWait: runtime.longWaitInfo(),
+            // THE STAGE OF THE RESTART, for the pill and the settings page:
+            // which of the four stages is on screen, the real copy progress of
+            // the snapshot, whether it is going slower than expected, and
+            // whether a cancel would still be honest (`cancellable`).
+            restartPhase: stage,
+            // The copy progress on its own as well, so a client that only wants
+            // the numbers does not have to walk the stage object.
+            progress: stage.progress,
             updatedAt: live.updatedAt,
             // The park route, so the client never has to guess the prefix, and
             // the goals this plugin already disarmed (they are re-armed after
@@ -7871,6 +8114,11 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
         // out there; it must be visible from outside the process, not only in
         // a log line nobody reads.
         watchdog: summarizeDisarm(runtime.watchdogDisarm),
+        // THE RESTART STAGE, read from the health route as well: a script (or a
+        // user watching the console) can tell "waiting" from "backing up 120 MB
+        // of 156 MB" without opening the interface.
+        restartPhase: runtime.restartStageBrief(),
+        progress: runtime.restartStageBrief().progress,
         schemastery: Config === undefined
           ? (schemastery === undefined ? 'unresolved' : 'construction-failed')
           : (schemasterySource === 'bare-specifier' ? 'bare' : 'asar-fallback'),
@@ -8147,6 +8395,12 @@ export function apply(ctx, rawConfig, options = {}) {
   // Record this boot in the checkpoint even when there is nothing to recover.
   persistSafely(runtime)
 
+  // THE LAST STAGE OF THE RESTART: this host IS the new one, so the interface
+  // says "back — carrying on". Written here (not after the recovery) so a boot
+  // that finds nothing to resume still shows the end of the story instead of a
+  // spinner left over from the old process.
+  if (runtime.isNewBoot) runtime.markRestartStage('back')
+
   trackAgents(ctx, runtime, config)
 
   // The boot recovery pass is the plugin's primary boot duty, so it is scheduled
@@ -8164,8 +8418,7 @@ export function apply(ctx, rawConfig, options = {}) {
     })
     sleep.restore()
   }
-  if (runtime.isNewBoot && config.resumeOnBoot) {
-    runtime.recoverTimer = ctx.timeout(() => {
+  if (runtime.isNewBoot && config.resumeOnBoot) {    runtime.recoverTimer = ctx.timeout(() => {
       recoverAfterRestart(ctx, runtime, config)
         .then(() => {
           runtime.recovery = { ran: true, ok: true, detail: 'the boot recovery finished' }

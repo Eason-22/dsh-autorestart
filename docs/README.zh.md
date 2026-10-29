@@ -133,7 +133,7 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 | --- | --- |
 | Agent 工具（6 个） | `continuum_restart`、`continuum_status`、`continuum_cancel_restart`、`continuum_park_goal`、`continuum_recover_now`、`continuum_handoff` |
 | HTTP 路由（7 条） | `<healthPath>`（默认 `/__dsh_autorestart`）下的 `GET /health`（另有 `?state=1`、`?gate=1`、`?probeIndex=1`）、`POST /park`、`POST /recover`、`POST /handoff`、`GET /sleep`、`POST /sleep`（收工关机——桌面端和 web 端走的是同一条路由）、`GET /announcements`、`POST /announcements`（一次性新功能公告）；只接受本机回环或已认证的浏览器 |
-| 前端槽位（6 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`）、`conversation.input.dock`（一次性安装提问，id `autorestart-backup-choice`；一次性新功能公告，id `autorestart-feature-announcement`）、`sidebar.footer.action`（收工关机的月亮按钮，id `autorestart-sleep-button`）、`shell.overlay`（倒数浮动卡片）、`settings.section`（设置页里的「自动重启与关机」分区，id `dsh-autorestart`） |
+| 前端槽位（6 个） | `conversation.input.left`（待重启小胶囊，id `autorestart-restart-pill`）、`sidebar.session.row.leading`（侧栏状态圆点，id `autorestart-restart-dot`）、`conversation.input.dock`（一次性安装提问，id `autorestart-backup-choice`；一次性新功能公告，id `autorestart-feature-announcement`）、`sidebar.footer.action`（收工关机的月亮按钮，id `autorestart-sleep-button`）、`shell.overlay`（倒数浮动卡片，以及**主界面居中的重启阶段浮层**：`autorestart-sleep-overlay`、`autorestart-restart-overlay`）、`settings.section`（设置页里的「自动重启与关机」分区，id `dsh-autorestart`；保存回执也渲染在这个面板**内部**，不占窗口级浮层） |
 | 系统提示词 | 一段「重启政策」说明，告诉 agent 怎么请求重启、插件会做什么 |
 | 宿主事件 | `agent/status`（跟踪哪些会话在忙）、`tools/pre-execute`（拦下"手动杀/重启 DSH"的 shell 命令）、启动时的恢复流程 |
 | profile 行 | 一条 bundle 行：`dsh-autorestart` |
@@ -330,7 +330,7 @@ agent/status(running) ──► 写 checkpoint（<DSH_HOME>\storages\dsh-autores
 
 ## 安装
 
-当前版本：**0.8.3**。
+当前版本：**0.8.4**。
 
 ```powershell
 # 在 dsh 里（或对 Agent 说）：把工作区里的这个包安装为 profile bundle
@@ -364,9 +364,17 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 ## 配置
 
-设置页里关于「备份」和「启动方式」的两块，先说清楚它们看的是什么：
+设置页里关于「备份」「回执」和「启动方式」的几块，先说清楚它们看的是什么：
 
-- **现在备份了什么**（在两个备份勾选的下面）：宿主真的去读 `<DSH_HOME>/storages/dsh-autorestart/backups/`，所以份数、每份的**本地时间**、大小（MB）、有没有含已装插件、以及存放路径都是真的。只有目录元信息被读，备份里的内容**不遍历**（一份就可能 150 MB）。没有备份时写的是「还没有备份；每次重启前会自动生成一份」。
+- **现在备份了什么**（在两个备份勾选的下面）：宿主真的去读 `<DSH_HOME>/storages/dsh-autorestart/backups/`，所以份数、每份的**本地时间**、大小、有没有含已装插件、以及存放路径都是真的。只有目录元信息被读，备份里的内容**不遍历**（一份就可能 150 MB）。没有备份时写的是「还没有备份；每次重启前会自动生成一份」。每份备份是**两行带标签的写法**，不再挤成一句：
+
+  ```
+  备份时间 2026-10-29 22:08
+  备份大小 156 MB（含已装插件）
+  ```
+
+  时间就是拍快照那台机器的本地时间，**精确到分、不带时区偏移**（`+08:00` 只会添乱——看的人本来就看自己的钟）。大小自动选单位（`92 KB` / `156 MB`），只在有意义时保留一位小数（`117.7 MB`，永远不写 `156.0 MB`）；「（含已装插件）」紧跟在大小后面，因为它正是这份备份为什么这么大。两份备份就是两组，组与组之间留空隙。
+- **设置改动有回执**：每个开关/下拉都是改了就写，所以面板必须说清写没写进去——宿主回 `ok: true` 之后，**设置面板内部顶部**（面板自己的 `sticky` 条，往下滚动也一直可见）出现绿色**「已生效」** + 小字时间（`已生效 21:40:12`），3 秒后淡出；被拒绝时是红色**「没保存成功」** + 宿主给的原因，不自动消失，直到下一次改动成功或你自己点 × 关掉。**宿主没回话之前一律不显示**：首次渲染、轮询刷新、点控件都不会亮。
 - **启动方式**（Web 托管端才有）：默认只给**一行大白话**（例如「我记下的启动方式：由你的脚本拉起（重启交给它，我不插手）」）加两个小动作（重新检测 / 撤销）；命令原文收在**「技术细节」**折叠里，默认收起，展开才出现。**桌面客户端这一整块不渲染** —— 它自己拉起自己，也不该写 `restartCommand`。宿主说不清是哪一端时，宁可整块不显示。
 
 所有键都有默认值，写在 `cordis.patch.yml` 的 insert 行里；要覆盖就在 profile 的
@@ -529,8 +537,7 @@ restart gate: action=wait reason=agents-busy-within-soft-window busyCount=1 quie
 
 ### 小胶囊：点它看详情，也从这儿自己撤掉
 
-输入框那排的小胶囊只有 22px 高、一行宽，所以它**只放数字**（`待重启 · 已等 16 分钟 · 3 项任务在跑`）——
-不放名字，也不放任何"双击可以取消"之类的提示（没地方放）。**单击**它（或聚焦后按 Enter / 空格）会在上方
+输入框那排的小胶囊只有 22px 高、一行宽，所以它**只放一句短话**（`待重启 · 空闲后自动重启` / `待重启 · 等待 2 个会话`，≤12 字）——不放名字，也不放「双击可以取消」之类的提示（没地方放）。细节都下沉一层：长句只做 tooltip，**阶段**（备份中 / 重启中 / 已回来）显示在**主界面居中的浮层卡片**上，数量和「怎么撤」在点开的小面板里。**单击**它（或聚焦后按 Enter / 空格）会在上方
 弹出一个小面板：
 
 - 这次重启还在等几个会话；

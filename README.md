@@ -36,11 +36,13 @@ round starts, so the session goes idle and the restart can proceed. The goal is 
 restart and continues.
 
 The browser shows the state: a compact "pending restart" pill on the left side of the input toolbar
-and a small dot next to the session title in the sidebar. The pill's text reports how many
-**conversations** are still in the way (`待重启 · 等待 2 个会话` / `pending restart · waiting for 2
-session(s)`) — a conversation and its own subagents count as one, and the tooltip explains that
-queued-but-not-started work counts too; it does not open a details panel. The
-dot breathes when the restart is about to fire.
+and a small dot next to the session title in the sidebar. The pill carries ONE short line (12
+characters at most: `待重启 · 等待 2 个会话` / `pending restart · waiting for 2 session(s)`) — a
+conversation and its own subagents count as one. Everything else lives one layer deeper: the long
+sentence is the tooltip, the count and the way out are in the floating panel the pill opens, and the
+**stage** of a real restart (backing up / restarting / back) is shown on a **centered overlay card in
+the middle of the shell** — never in the composer row, where a longer sentence used to be cut off.
+The dot breathes when the restart is about to fire.
 
 Every blocker says **what it is**: a conversation is named by its own title, and a **subagent** is
 named after the conversation that created it ("Subagent of *that* conversation"). A raw session id is
@@ -183,7 +185,7 @@ what it adds before you install it.
 | --- | --- |
 | Agent tools (6) | `continuum_restart`, `continuum_status`, `continuum_cancel_restart`, `continuum_park_goal`, `continuum_recover_now`, `continuum_handoff` |
 | HTTP routes (7) | Under `<healthPath>` (default `/__dsh_autorestart`): `GET /health` (also `?state=1`, `?gate=1`, `?probeIndex=1`), `POST /park`, `POST /recover`, `POST /handoff`, `GET /sleep` and `POST /sleep` (the graceful shutdown — the desktop client and the hosted web client drive the very same route), `GET /announcements` and `POST /announcements` (the one-time new-feature announcement). Loopback or an authenticated browser only |
-| Client slots (6) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`); `conversation.input.dock` — the one-time install question (`autorestart-backup-choice`) and the one-time new-feature announcement (`autorestart-feature-announcement`); `sidebar.footer.action` — the moon button of the graceful shutdown (`autorestart-sleep-button`); `shell.overlay` — its countdown card; `settings.section` — the section "Auto-restart & shut down" in the settings page (`dsh-autorestart`) |
+| Client slots (6) | `conversation.input.left` — the pending-restart pill (`autorestart-restart-pill`); `sidebar.session.row.leading` — the session status dot (`autorestart-restart-dot`); `conversation.input.dock` — the one-time install question (`autorestart-backup-choice`) and the one-time new-feature announcement (`autorestart-feature-announcement`); `sidebar.footer.action` — the moon button of the graceful shutdown (`autorestart-sleep-button`); `shell.overlay` — the shutdown countdown card and the **centered restart-stage overlay** (`autorestart-sleep-overlay`, `autorestart-restart-overlay`); `settings.section` — the section "Auto-restart & shut down" in the settings page (`dsh-autorestart`), which also carries the save receipt inside the panel itself (no overlay slot of its own) |
 | System prompt | One "Restart policy" section that tells the agent how to ask for a restart and what the plugin will do |
 | Harness hooks | `agent/status` (tracks which conversations are busy), `tools/pre-execute` (blocks a shell command that would kill or relaunch DSH by hand), and the boot pass that resumes interrupted sessions |
 | Profile row | One bundle row, `dsh-autorestart` |
@@ -199,7 +201,7 @@ what it adds before you install it.
 
 ## Install
 
-Current version: **0.8.3**.
+Current version: **0.8.4**.
 
 From npm — the package is published under the name `dsh-autorestart`:
 
@@ -268,9 +270,12 @@ The tool reports what happened: `cancelled` (whether the restart request itself 
 
 ### The capsule: click it for the details and for the way out
 
-The capsule in the composer row is 22px high and ONE line wide, so it carries numbers only
-(`待重启 · 已等 16 分钟 · 3 项任务在跑`) — never a name and never a hint. Clicking it (or pressing
-Enter/Space on it) opens a small panel above it:
+The capsule in the composer row is 22px high and ONE line wide, so it carries ONE short line and
+nothing else (`待重启 · 空闲后自动重启` / `待重启 · 等待 2 个会话`, 12 characters at most — never a
+name and never a long sentence, because that is exactly what got cut off before). The details live
+one layer down: the long sentence is the tooltip, the **stage** (backing up / restarting / back) is on
+the **centered overlay card in the middle of the shell**, and the count with the way out is in the
+panel below. Clicking it (or pressing Enter/Space on it) opens a small panel above it:
 
 - how many conversations the restart is waiting for (the same number the capsule shows);
 - how many OTHER sessions wait for the same restart;
@@ -292,9 +297,28 @@ Two blocks of the settings page are worth a word, because they show facts instea
 
 - **What is backed up right now** (right under the two backup switches): the HOST reads
   `<DSH_HOME>/storages/dsh-autorestart/backups/`, so the number of copies, the **local time** of each
-  one, its size (MB), whether the installed plugins are in it and where it lives are all real. Only
+  one, its size, whether the installed plugins are in it and where it lives are all real. Only
   the directory metadata is read — the contents are never walked (one copy can be 150 MB). With no
   backup at all it says: "No backup yet; one is written before every restart."
+  Every copy is **two labelled rows**, so nothing runs into anything else:
+
+  ```
+  Backup time 2026-10-29 22:08
+  Backup size 156 MB (plugins included)
+  ```
+
+  The time is the local clock of the machine that took the copy, **to the minute and with no
+  timezone offset** (a `+08:00` only adds noise — the reader is looking at their own clock). The
+  size picks its own unit (`92 KB` / `156 MB`), keeps the tenth only when it says something
+  (`117.7 MB`, never `156.0 MB`), and the plugin scope sits in brackets right after it, because it
+  is the reason the copy is that big. Two copies are two groups with air between them.
+- **A setting that was saved says so.** Every control writes itself the moment it is changed, so the
+  panel has to say whether the write landed: once the HOST answers `ok: true`, a green strip at the
+  **top of the settings panel itself** (inside the panel — a `sticky` row, so it stays visible while
+  the page scrolls) says **`已生效` / `Saved`** with the time (`Saved 21:40:12`) and fades after 3
+  seconds. A refused write says **`没保存成功` / `Not saved`** in red, with the reason the Host gave,
+  and it stays until the next change works or you close it. Nothing is ever announced before the
+  Host's answer arrived — rendering the page, polling it and clicking a control stay silent.
 - **How this host was started** (hosted web only): one plain line ("How I remember you were started:
   by your own script (the restart is its job — I stay out of it)") plus two small actions (detect
   again / undo); the command itself is folded away under **"Technical details"** and stays closed
@@ -416,10 +440,10 @@ with its plugins is ~150 MB). The button looked dead. It is not — and now it s
 
 | Stage | What the interface shows | Where the data comes from |
 |---|---|---|
-| `waiting` | "Waiting for every conversation to be idle…" (+ how many are busy) | the idle gate's blockers |
-| `snapshotting` | The centred card: "Backing up before DSH restart" + a real progress bar, "12.3 MB / 40 MB" and a percentage; the settings page and the tooltip keep the long line, in the same words ("Backing up before DSH restart (about 12s, 78 MB done)…"). The card has NO minimum shown time: it lives exactly as long as the Host reports the stage (a 92 KB copy is gone in about 5 ms, a slow one stays as long as it runs); the size picks its own unit (KB or MB) so a small backup never reads "0 MB" | the REAL copy loop: files and bytes written, measured total |
+| `waiting` | Nothing on the overlay — the **centered overlay card does not appear at all** while the gate only waits (no backup is running, nothing happens but waiting). The capsule says it in one short line ("pending restart · waiting for N sessions"). | the idle gate's blockers |
+| `snapshotting` | The **centered overlay card in the middle of the shell**: "Backing up before DSH restart" + a real progress bar, "12.3 MB / 40 MB" and a percentage; the settings page and the tooltip keep the long line, in the same words ("Backing up before DSH restart (about 12s, 78 MB done)…"). The card has NO minimum shown time: it lives exactly as long as the Host reports the stage (a 92 KB copy is gone in about 5 ms, a slow one stays as long as it runs); the size picks its own unit (`92 KB` / `156 MB`) so a small backup never reads "0 MB" | the REAL copy loop: files and bytes written, measured total |
 | `restarting` | "Restarting; the work continues by itself in a moment…" | the host is on its way out |
-| `back` | "Back — carrying on where we left off" | the new host, once it boots |
+| `back` | "Back — carrying on where we left off", for **1.5 seconds**, then the card is gone | the new host, once it boots |
 
 Three things make this honest rather than decorative:
 

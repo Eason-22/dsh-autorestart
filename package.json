@@ -2,7 +2,7 @@
   "name": "dsh-autorestart",
   "version": "0.8.5",
   "type": "module",
-  "description": "DeepSeek Harness plugin: restart without losing work. Waits until every conversation is idle, restarts the host, then automatically resumes the interrupted sessions. AI-generated, not human-reviewed: use with caution.",
+  "description": "DeepSeek Harness plugin: idle-aware restart with session resume, a snapshot before every restart that is restored automatically if the host fails to come back, and a countdown shutdown; works on the Windows desktop client and on hosted dsh web (Windows, WSL, Linux). AI-generated, not human-reviewed: use with caution.",
   "license": "MIT",
   "keywords": [
     "dsh",

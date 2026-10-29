@@ -445,6 +445,11 @@ with its plugins is ~150 MB). The button looked dead. It is not — and now it s
 | `restarting` | "Restarting; the work continues by itself in a moment…" | the host is on its way out |
 | `back` | "Back — carrying on where we left off", for **1.5 seconds**, then the card is gone | the new host, once it boots |
 
+**The overlay never hangs.** When a restart is postponed back to waiting, the stage is reset and the
+overlay disappears at once; and a stage that has not been updated for more than **15 seconds** is
+treated as stale and is not drawn at all (the capsule keeps showing the waiting count). A stale stage
+can therefore never sit on top of the interface.
+
 Three things make this honest rather than decorative:
 
 1. **The first stage is written by the click itself** and persisted at once, so the pill (which

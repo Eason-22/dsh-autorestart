@@ -105,6 +105,11 @@ writes that sentence and the matching command into the settings page.
 
 ### If DSH does not come up
 
+**First work out which situation you are in**: if the whole environment is broken (a changed
+configuration, another plugin, a bad upgrade) → double-click `scripts/restore-profile.cmd` to go back
+to the last good state; if **only this plugin** is suspect → take this plugin out instead, which is
+what `scripts/emergency-disable.cmd` is for.
+
 Two double-clickable scripts in `scripts/`, and they do different jobs:
 
 - **`scripts/restore-profile.cmd` — back to the last good state.** It puts the newest snapshot that

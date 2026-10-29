@@ -306,6 +306,8 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 
 ## 起不来怎么办（装了插件之后 DSH 打不开）
 
+**先分清是哪种情况**：整个环境坏了（改了配置、装了别的插件、升级崩了）→ 先双击 `scripts\restore-profile.cmd` 回到上一次好状态；**只有这个插件可疑** → 直接走下面三步，把这个插件摘掉就够了。（两个脚本各自的边界见 [`scripts/README.md`](../scripts/README.md)。）
+
 **不用等 DSH 跑起来**就能把这个插件摘掉 —— 插件目录里带了一个一键开关：
 
 1. **双击 `scripts\emergency-disable.cmd`** —— 弹出的黑窗口里会写清楚做了什么，按任意键关掉；

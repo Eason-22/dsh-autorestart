@@ -60,6 +60,13 @@
         backupIncludePlugins: true
         # Keep at most this many snapshots; older ones are deleted automatically.
         maxBackups: 2
+        # The WATCHDOG: the process that waits for the relaunched host and
+        # puts the snapshot back when it never answers. It has to be triggered
+        # LATER, and the machine decides how (a one-off Windows scheduled task,
+        # a systemd user timer, or a detached process of our own). Set this to
+        # false to switch the automatic rollback off entirely; the settings
+        # page then says that there is no automatic rollback.
+        watchdogEnabled: true
         # How long the detached watcher waits for the relaunched host (ms) before
         # it restores the snapshot. The watcher NEVER launches a second copy of
         # the host: it restores the files and writes the report.

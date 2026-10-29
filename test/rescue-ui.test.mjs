@@ -305,12 +305,24 @@ test('the settings line says what the automatic rollback does — and what is lo
 test('the warning about the missing rollback waits for the user once', () => {
   const api = loadClient()
   // Blocked and never shown: the warning is waiting.
-  assert.equal(api.schedulerNoticeFor({ scheduler: 'blocked' }), true)
+  assert.equal(api.watchdogNoticeFor({ tier: 'none' }), true)
   // Shown already: no nagging.
-  assert.equal(api.schedulerNoticeFor({ scheduler: 'blocked', warnedAt: 12345 }), false)
-  // Nothing to say.
-  assert.equal(api.schedulerNoticeFor({ scheduler: 'ok' }), false)
-  assert.equal(api.schedulerNoticeFor({ scheduler: 'unknown' }), false)
-  assert.equal(api.schedulerNoticeFor(null), false)
-  assert.equal(api.schedulerNoticeFor({}), false)
+  assert.equal(api.watchdogNoticeFor({ tier: 'none', warnedAt: 12345 }), false)
+  // A machine that CAN run the watchdog: nothing to say.
+  assert.equal(api.watchdogNoticeFor({ tier: 'scheduled-task' }), false)
+  assert.equal(api.watchdogNoticeFor({ tier: 'systemd-run' }), false)
+  assert.equal(api.watchdogNoticeFor({ tier: 'detached-process' }), false)
+  assert.equal(api.watchdogNoticeFor(null), false)
+  assert.equal(api.watchdogNoticeFor({}), false)
+})
+
+test('the tier is named in the language of the user', () => {
+  const api = loadClient()
+  const zh = api.makeTranslate(null)
+  const en = loadClient({ language: 'en-US' }).makeTranslate(null)
+  assert.match(zh('settings.rescue.tierScheduledTask'), /计划任务/)
+  assert.match(en('settings.rescue.tierScheduledTask'), /scheduled task/)
+  assert.match(zh('settings.rescue.tierSystemdRun'), /systemd/)
+  assert.match(zh('settings.rescue.tierDetachedProcess'), /后台进程/)
+  assert.match(en('settings.rescue.tierNone'), /no way/)
 })

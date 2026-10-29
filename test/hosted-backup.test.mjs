@@ -12,6 +12,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -390,4 +391,13 @@ test('the desktop app still falls back to the app relaunch when the command is e
   assert.deepEqual(commands, [], 'the empty command was not run')
   assert.equal(scheduled.length, 1, 'the desktop app was relaunched instead')
   assert.equal(fs.existsSync(path.join(state.dir, 'backups')), true, 'the relaunch is snapshotted')
+
+  // The restart arms the WATCHDOG (a real one-off scheduled task on this
+  // machine). The test does not let it wait for its trigger: it removes it
+  // right away, so the test leaves nothing behind.
+  try {
+    execFileSync('schtasks', ['/Delete', '/TN', 'dsh-autorestart-watchdog', '/F'], { stdio: 'ignore' })
+  } catch {
+    // There was nothing to remove (a machine without scheduled tasks).
+  }
 })

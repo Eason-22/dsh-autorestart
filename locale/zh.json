@@ -289,7 +289,13 @@
       "revealFailed": "文件夹没打开：{message}",
       "rollbackOk": "自动回滚：可用（重启后起不来会自动回到上一个好状态）",
       "rollbackBlocked": "自动回滚：**不可用** —— 这台电脑不允许创建计划任务。**会丢失：重启后 DSH 起不来时不会自动恢复**；出问题时请双击「出事了怎么办」里的还原脚本。",
-      "rollbackUnknown": "自动回滚：还不知道（这台机器的能力还没检查过）"
+      "rollbackUnknown": "自动回滚：还不知道（这台机器的能力还没检查过）",
+      "watchdogTier": "看门狗的触发方式：{tier}",
+      "watchdogLast": "上一次看门狗的结果：{result}",
+      "tierScheduledTask": "Windows 计划任务",
+      "tierSystemdRun": "systemd 定时器",
+      "tierDetachedProcess": "自建后台进程",
+      "tierNone": "（这台机器没有可用机制）"
     },
     "error": "没能保存设置：{message}",
     "autostartKind": {

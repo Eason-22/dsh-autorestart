@@ -534,6 +534,36 @@ fires in two minutes and does nothing (`cmd /c exit 0`), reads it back, deletes 
 back once more to prove that it is gone. It runs **once**, not on every visit of the settings page,
 and it never leaves a task behind (not even when a step of it fails).
 
+### The watchdog: the three ways it can be triggered
+
+The rollback above needs somebody to *wait*: the host is restarted, and a
+one-off thing has to notice that the new host never came up. That thing is the
+**watchdog** (`scripts/watchdog.mjs`), and how it is triggered is the part
+that differs between the machines — so the plugin picks the best way the
+machine has and says which one it picked:
+
+| Tier | Mechanism | Where |
+|---|---|---|
+| `scheduled-task` | a one-off Windows scheduled task (read back after it was registered, deleted completely afterwards) | the desktop app and `dsh web` on Windows |
+| `systemd-run` | a systemd user timer (`systemd-run --user --on-active=…`), reset when it is over | `dsh web` on Linux, WSL with systemd |
+| `detached-process` | a background process of our own (`setsid nohup sh -c 'sleep …; …'`), its pid in the state directory | containers, WSL without systemd |
+| `none` | nothing on this machine | then there is **no automatic rollback**, and the settings page says so |
+
+**One function decides it** (`lib/watchdog-tier.js`), and the settings page, the
+diagnostics and the watchdog itself all ask that one function — so the warning
+("this machine has no automatic rollback") can never drift away from what the
+plugin actually does.
+
+The flow is the same for every tier (`lib/watchdog.js`): wait for the new host
+to write the ready marker → ask again (a slow host is not a dead host) → is an
+instance alive? (then there is nothing to restore) → take the shared lock
+(`rollback.lock`, so exactly one of us restores) → restore the snapshot → start
+the host again → wait for the ready marker once more. At most **one** restore
+and **one** start; then the watchdog stops and writes what happened into
+`<stateDir>/last-watchdog-report.json` (which tier it used, and why).
+
+`watchdogEnabled: false` switches it off entirely.
+
 ### The access link after a restart
 
 The boot token of `dsh web` is created **per process**, so the link the browser holds answers `401`

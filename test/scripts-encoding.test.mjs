@@ -107,6 +107,21 @@ test('EVERY batch file stays pure ASCII', () => {
   }
 });
 
+test('EVERY node script of scripts/ stays pure ASCII', () => {
+  // The watchdog and its drill are run by the host and by the system (a
+  // scheduled task, a systemd timer, a shell): they are read with whatever
+  // code page the machine has. The Chinese wording lives in a JSON file.
+  const files = scriptsWithExtension('.mjs');
+  assert.ok(files.length > 0, 'no .mjs found in scripts/');
+  for (const name of files) {
+    const bytes = bytesOf(name);
+    for (const byte of bytes) {
+      assert.ok(byte < 128, name + ' must stay pure ASCII (byte ' + byte + ')');
+    }
+    assert.notEqual(bytes[0], 0xef, name + ' must not start with a UTF-8 BOM');
+  }
+});
+
 test('EVERY batch file calls powershell.exe, never pwsh', () => {
   const files = scriptsWithExtension('.cmd');
   assert.ok(files.length > 0, 'no .cmd found in scripts/');

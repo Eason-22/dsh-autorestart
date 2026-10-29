@@ -109,6 +109,29 @@ import {
   SCHEDULER_UNKNOWN,
   shouldWarnScheduler,
 } from './lib/scheduler-capability.js'
+import {
+  detectWatchdogCapabilities,
+  tierProvidesRollback,
+  tierWithProof,
+  TIERS,
+} from './lib/watchdog-tier.js'
+import {
+  buildPending,
+  clearReady,
+  readReady,
+  readReport,
+  writePending,
+  writeReady,
+} from './lib/watchdog.js'
+import {
+  cleanupSystemdUnit,
+  detachedPidPath,
+  localIso,
+  registerDetachedProcess,
+  registerScheduledTask,
+  registerSystemdRun,
+  removeScheduledTask,
+} from './lib/watchdog-schedule.js'
 import { detectHostKind } from './lib/host-kind.js'
 import { planAutostartAdvice } from './lib/autostart-advice.js'
 import { buildDiagnostics, ISSUE_URL_BASE, SUPPORT_EMAIL } from './lib/diagnostics.js'
@@ -640,6 +663,12 @@ function buildConfigSchema() {
         .description('How many snapshots are kept; older ones are deleted automatically.'),
       rollbackTimeoutMs: schemastery.number().min(1000).default(90000)
         .description('Milliseconds the detached watcher waits for the relaunched host before it restores the snapshot.'),
+      // The watchdog: the process that waits for the relaunched host and puts
+      // the snapshot back when it never answers. It has to be triggered
+      // LATER, and the machine decides how (a one-off scheduled task, a
+      // systemd timer, or a detached process of our own).
+      watchdogEnabled: schemastery.boolean().default(true)
+        .description('Whether the watchdog may be armed before a restart: it waits for the new host and puts the snapshot back when it never answers. With it off there is no automatic rollback at all.'),
       // The self-starting supervisor: a separate process that brings the host
       // back when it dies. See the "开机自启" section of the settings.
       supervisorMode: schemastery.union(['auto', 'installed', 'external', 'off']).default('auto')
@@ -721,6 +750,11 @@ const DEFAULTS = {
   backupOnRestart: true,
   backupIncludePlugins: true,
   maxBackups: 2,
+  // The WATCHDOG: the process that waits for the relaunched host and puts the
+  // snapshot back when it never answers. It needs a way to be triggered
+  // later (a scheduled task, a systemd timer, a detached process) — the
+  // machine decides which one, and the settings page says which.
+  watchdogEnabled: true,
   rollbackTimeoutMs: 90000,
   // How long the restart command may run before the plugin stops waiting for
   // it, and how long ONE restore step may take before the watcher gives up.
@@ -2731,14 +2765,50 @@ const titleOfSummary = (item) => {
     } catch (error) {
       checked = { scheduler: SCHEDULER_UNKNOWN, checkedAt: Date.now(), evidence: { error: String(error) } }
     }
-    const record = { ...emptyCapabilities(), ...checked }
+    // The tier is decided by ONE function (lib/watchdog-tier.js), so the
+    // warning in the settings page and the watchdog that is really registered
+    // cannot drift apart.
+    let picked = { tier: TIERS.NONE, reason: 'this machine was not checked yet' }
+    try {
+      const caps = detectWatchdogCapabilities({ platform: env.platform })
+      picked = tierWithProof({
+        platform: env.platform,
+        probeOk: checked.scheduler === 'ok',
+        hasSystemdRun: caps.hasSystemdRun,
+        hasAt: caps.hasAt,
+        canDetach: caps.canDetach,
+      })
+    } catch (error) {
+      picked = { tier: TIERS.NONE, reason: 'the machine could not be checked: ' + String(error) }
+    }
+    const record = { ...emptyCapabilities(), ...checked, tier: picked.tier, tierReason: picked.reason }
     // The warning is only for the TRANSITION into blocked: a machine that was
     // blocked and stays blocked does not nag.
-    if (shouldWarnScheduler(emptyCapabilities(), record)) {
-      runtime.log.warn('this machine refuses one-off scheduled tasks: the automatic rollback is not available')
+    if (shouldWarnScheduler(emptyCapabilities(), record) && !tierProvidesRollback(picked.tier)) {
+      runtime.log.warn('this machine cannot run the watchdog: the automatic rollback is not available')
     }
     writeCapabilitiesRecord(file, record)
     return record
+  }
+
+  /**
+   * THE WATCHDOG: which tier this machine uses, and what the last run did.
+   *
+   * @returns {{ enabled: boolean, tier: string, tierReason: string, available: boolean, report: object|null }}
+   */
+  const watchdogInfo = () => {
+    const capabilities = capabilitiesInfo()
+    const tier = typeof capabilities.tier === 'string' && capabilities.tier !== ''
+      ? capabilities.tier
+      : TIERS.NONE
+    const report = readReport(stateDirOf())
+    return {
+      enabled: config.watchdogEnabled !== false,
+      tier,
+      tierReason: typeof capabilities.tierReason === 'string' ? capabilities.tierReason : '',
+      available: tierProvidesRollback(tier),
+      report,
+    }
   }
 
   /**
@@ -2752,6 +2822,119 @@ const titleOfSummary = (item) => {
     const marked = markSchedulerWarned(stored)
     writeCapabilitiesRecord(file, marked)
     return marked
+  }
+
+  /**
+   * ARM THE WATCHDOG: the one-off thing that waits for the relaunched host.
+   *
+   * The tier is decided by ONE function (lib/watchdog-tier.js) — the same one
+   * that the settings page and the diagnostics ask — so the warning and the
+   * behaviour cannot drift apart. When no tier is available NOTHING is
+   * registered: there is no watchdog, and the report says so.
+   *
+   * @param {{
+   *   snapshotDir?: string,
+   *   profileDir?: string|null,
+   *   relaunchCommand?: object|null,
+   *   healthUrl?: string,
+   *   portFile?: string,
+   *   expectedBootId?: string|null,
+   * }} options
+   * @returns {{ ok: boolean, tier: string, reason: string, error: string|null }}
+   */
+  const armWatchdog = ({
+    snapshotDir = '',
+    profileDir = null,
+    relaunchCommand = null,
+    healthUrl = '',
+    portFile = '',
+    expectedBootId = null,
+  } = {}) => {
+    const stateDir = stateDirOf()
+    if (config.watchdogEnabled === false) {
+      return { ok: false, tier: TIERS.NONE, reason: 'the watchdog is switched off', error: null }
+    }
+    if (profileDir === null || snapshotDir === '') {
+      return { ok: false, tier: TIERS.NONE, reason: 'there is no snapshot to watch', error: null }
+    }
+    const info = watchdogInfo()
+    if (info.tier === TIERS.NONE) {
+      return { ok: false, tier: TIERS.NONE, reason: info.tierReason || 'this machine cannot run the watchdog', error: null }
+    }
+    const timeoutMs = Number(config.rollbackTimeoutMs) > 0 ? Number(config.rollbackTimeoutMs) : 180000
+    // ONE name for the scheduling item: a new registration replaces the old
+    // one, and there is never more than one of them on the machine.
+    const taskName = 'dsh-autorestart-watchdog'
+    const unitId = 'dsh-autorestart-watchdog'
+    const pidPath = detachedPidPath(stateDir)
+    const watchdogCommand = '"' + process.execPath + '" "' + path.join(PLUGIN_DIR, 'scripts', 'watchdog.mjs') + '" --state-dir "' + stateDir + '"'
+    const pending = buildPending({
+      tier: info.tier,
+      tierReason: info.tierReason,
+      taskName,
+      unitId,
+      pidPath,
+      snapshotDir,
+      profileDir,
+      relaunchCommand,
+      healthUrl,
+      healthPath: resolveHealthPath(config),
+      portFile,
+      expectedBootId,
+      timeoutMs,
+      recheckMs: 20000,
+      readyTimeoutMs: 90000,
+      hostKind: hostKindOf().kind,
+      now: Date.now(),
+    })
+    writePending(stateDir, pending)
+
+    let registered = { ok: false, error: 'the watchdog was not registered' }
+    try {
+      if (info.tier === TIERS.SCHEDULED_TASK) {
+        const start = new Date(Date.now() + Math.ceil(timeoutMs / 1000) * 1000);
+        const end = new Date(start.getTime() + 30 * 60 * 1000);
+        registered = registerScheduledTask({
+          taskName,
+          startIso: localIso(start),
+          endIso: localIso(end),
+          command: watchdogCommand,
+          xmlPath: path.join(stateDir, 'watchdog-task.xml'),
+        });
+      } else if (info.tier === TIERS.SYSTEMD_RUN) {
+        // The unit of an earlier run must be gone before a new one can take
+        // the name.
+        cleanupSystemdUnit({ unitId });
+        registered = registerSystemdRun({
+          unitId,
+          delaySeconds: Math.ceil(timeoutMs / 1000),
+          command: [process.execPath, path.join(PLUGIN_DIR, 'scripts', 'watchdog.mjs'), '--state-dir', stateDir],
+        });
+      } else if (info.tier === TIERS.DETACHED_PROCESS) {
+        registered = registerDetachedProcess({
+          delaySeconds: Math.ceil(timeoutMs / 1000),
+          command: process.execPath + ' "' + path.join(PLUGIN_DIR, 'scripts', 'watchdog.mjs') + '" --state-dir "' + stateDir + '"',
+          pidPath,
+        });
+      }
+    } catch (error) {
+      registered = { ok: false, error: error && error.message ? error.message : String(error) };
+    }
+    if (!registered || registered.ok !== true) {
+      // Nothing half-armed: the marker goes, and so does the scheduling item.
+      clearPending(stateDir);
+      try {
+        if (info.tier === TIERS.SCHEDULED_TASK) removeScheduledTask({ taskName });
+        else if (info.tier === TIERS.SYSTEMD_RUN) cleanupSystemdUnit({ unitId });
+      } catch {
+        // The next run cleans up.
+      }
+      const reason = (registered && registered.error) || 'the watchdog could not be registered';
+      log.warn('the watchdog was not armed: ' + reason);
+      return { ok: false, tier: info.tier, reason: info.tierReason, error: reason };
+    }
+    log.warn('the watchdog is armed (' + info.tier + '): ' + info.tierReason);
+    return { ok: true, tier: info.tier, reason: info.tierReason, error: null };
   }
 
   /**
@@ -2774,6 +2957,7 @@ const titleOfSummary = (item) => {
     restartMode: config.restartMode,
     lastRestart: lastRestartVerdict(),
     stateDir: stateDirOf(),
+    watchdog: watchdogInfo(),
   })
 
   /**
@@ -3324,6 +3508,26 @@ const titleOfSummary = (item) => {
       const backup = snapshot && snapshot.backup ? snapshot.backup : null
       const profileDir = snapshot && snapshot.profileDir ? snapshot.profileDir : null
 
+      // ARM THE WATCHDOG: it waits for the relaunched host, and when that
+      // host never answers, it puts the snapshot back and starts it again.
+      // Which way it is triggered is decided by the machine (the tier).
+      if (backup && backup.ok === true && profileDir !== null) {
+        const relaunch = useCustomCommand && typeof config.restartCommand === 'string' && config.restartCommand.trim() !== ''
+          ? {
+            file: config.restartCommand.trim().split(/\s+/)[0],
+            args: config.restartCommand.trim().split(/\s+/).slice(1),
+          }
+          : (env.appExePath ? { file: env.appExePath, args: [] } : null)
+        armWatchdog({
+          snapshotDir: backup.dir,
+          profileDir,
+          relaunchCommand: relaunch,
+          healthUrl: restartHealthUrl(),
+          portFile: accessFilePath(stateDir),
+          expectedBootId: bootId,
+        })
+      }
+
       // THE DURABLE RESTART RECORD. The instance that is being replaced
       // writes the "pending" half BEFORE it runs the restart command: the
       // snapshot it took (directory, local time, duration, which older
@@ -3849,6 +4053,8 @@ const titleOfSummary = (item) => {
     // automatic rollback hangs on that answer.)
     capabilitiesInfo,
     acknowledgeSchedulerWarning,
+    // The watchdog: which tier this machine uses, and what the last run did.
+    watchdogInfo,
     /**
      * THE DIAGNOSTICS of "report a problem" (the text the user copies).
      */
@@ -6346,6 +6552,8 @@ function readCapabilitiesRecord(file) {
       checkedAt: typeof parsed.checkedAt === 'number' ? parsed.checkedAt : null,
       evidence: parsed.evidence && typeof parsed.evidence === 'object' ? parsed.evidence : null,
       warnedAt: typeof parsed.warnedAt === 'number' ? parsed.warnedAt : null,
+      tier: typeof parsed.tier === 'string' ? parsed.tier : '',
+      tierReason: typeof parsed.tierReason === 'string' ? parsed.tierReason : '',
     }
   } catch {
     // A record that cannot be read is a record that does not exist yet.
@@ -7247,6 +7455,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // one-off scheduled task; when that is refused the user is told
             // what they lose).
             capabilities: runtime.capabilitiesInfo(),
+            // The watchdog: which tier this machine uses to trigger it, and
+            // what the last run did.
+            watchdog: runtime.watchdogInfo(),
             // THE RESTART COMMAND that is in effect: what is written, and what
             // an undo would restore. The settings page shows it in a folded
             // "for a technical colleague" section.
@@ -7334,6 +7545,27 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
         return
       }
       const probeIndex = typeof req.url === 'string' && req.url.includes('probeIndex=1')
+      // THE READY MARKER: this host answers its own health route, so it is
+      // up. The watchdog (which waits for the relaunched host) sees the
+      // marker and stands down — no rollback of a host that is fine.
+      try {
+        const marker = readReady(stateDirOf())
+        if (!marker || marker.bootId !== runtime.bootId) {
+          writeReady(stateDirOf(), { bootId: runtime.bootId, port: runtime.port ?? null })
+          // The host is up: the watchdog has nothing to do. Its scheduling
+          // item and its pending marker go NOW — nothing may be left behind.
+          if (readPending(stateDirOf()) !== null) {
+            clearPending(stateDirOf())
+            try {
+              removeScheduledTask({ taskName: 'dsh-autorestart-watchdog' })
+            } catch {
+              // The watchdog removes it itself when it runs.
+            }
+          }
+        }
+      } catch {
+        // The marker is a convenience: the watchdog also asks the health route.
+      }
       const body = JSON.stringify({
         ok: true,
         plugin: name,

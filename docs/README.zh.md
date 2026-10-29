@@ -170,6 +170,23 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 
 `dsh web` 的 boot token **每个进程都不一样**，重启后浏览器手里那条旧链接会 401，用户就被挡在门外。所以插件把当前实例的访问链接写进 `storages/dsh-autorestart/access.json`（权限 `0600`，里面是密钥），并在 `continuum_status` 与日志里报出来；前端发现手里那条链接过期时，会自己跟到新链接上。
 
+### 看门狗：三种触发方式
+
+上面的回滚需要有人**等**：宿主被重启了，得有个一次性的东西发现新宿主一直没起来。那个东西就是**看门狗**（`scripts/watchdog.mjs`）。而"怎么让它稍后跑起来"是各台机器最不一样的地方，所以插件挑这台机器有的最好方式，并且**说清楚挑的是哪一种**：
+
+| 档 | 机制 | 用在哪 |
+|---|---|---|
+| `scheduled-task` | 一次性 Windows 计划任务（建完**回读校验**，之后**完全删掉**） | 桌面客户端、Windows 上的 `dsh web` |
+| `systemd-run` | systemd 用户定时器（`systemd-run --user --on-active=…`），结束后 `reset-failed` 清掉 | Linux 上的 `dsh web`、有 systemd 的 WSL |
+| `detached-process` | 自建后台进程（`setsid nohup sh -c 'sleep …; …'`），pid 写在 stateDir 里 | 容器、没有 systemd 的 WSL |
+| `none` | 这台机器上什么都没有 | 那就**没有自动回滚**，设置页会明说 |
+
+**由一个函数决定**（`lib/watchdog-tier.js`），设置页、diagnostics 和看门狗自己问的都是这同一个函数 —— 所以"这台机器没有自动回滚"这句警告**不可能**和插件实际做的事对不上。
+
+三档跑的是**同一套**流程（`lib/watchdog.js`）：等新宿主写下 ready 标记 → **再问一次**（起得慢不等于死了）→ 有实例活着吗（活着就没什么好还原的）→ 抢共用的锁（`rollback.lock`，保证只有一个在还原）→ 还原快照 → **再拉起宿主** → 再等一次 ready。最多**一次**还原 + **一次**拉起；然后看门狗停下，把结果写进 `<stateDir>/last-watchdog-report.json`（用的是哪一档、为什么）。
+
+`watchdogEnabled: false` 可以整个关掉它。
+
 ### 开机自启：插件自带的守护
 
 手动启动的托管实例（`dsh web`）挂掉之后不会自己回来——没人拉起来的重启，就等于要用户自己再启动一次。插件可以装一个**守护**：一个独立的小进程，负责拉起宿主、看住它、它掉了再拉起。

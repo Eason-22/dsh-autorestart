@@ -86,6 +86,19 @@
       "reason.port-not-fixable": "端口每次都变，浏览器会被踢出去；得先把端口固定下来。",
       "reason.supervised": "插件自己的守护在管这个进程，重启直接交给它。"
     },
+    "report": {
+      "label": "遇到问题了？",
+      "github": "复制诊断信息并去 GitHub 提问题",
+      "hint": "诊断信息里没有你的访问令牌，也没有任何密钥；把它贴进 issue，我们就能看出问题出在哪。",
+      "email": "没有 GitHub 账号？发邮件到 {email}",
+      "copy": "复制诊断信息",
+      "mail": "写邮件",
+      "copyFailed": "复制失败，请手动复制这段",
+      "issueTitle": "重启 / 开机自启相关的问题",
+      "issueBody": "请把刚才复制的诊断信息粘贴到下面。\n\n## 发生了什么\n\n\n## 期望什么\n\n\n## 怎么复现\n",
+      "mailSubject": "重启 / 开机自启相关的问题",
+      "mailBody": "请把刚才复制的诊断信息粘贴到下面。\n\n发生了什么：\n\n期望什么：\n\n怎么复现：\n"
+    },
     "error": "没能保存设置：{message}"
   },
   "supervisor": {

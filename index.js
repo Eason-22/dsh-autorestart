@@ -94,6 +94,7 @@ import { composeFragment, detectInitSystems } from './lib/supervisor-install.js'
 import { classifyStartup } from './lib/startup-mode.js'
 import { detectHostKind } from './lib/host-kind.js'
 import { planAutostartAdvice } from './lib/autostart-advice.js'
+import { buildDiagnostics, ISSUE_URL_BASE, SUPPORT_EMAIL } from './lib/diagnostics.js'
 import { countBlockerTasks } from './lib/blockers.js'
 import {
   buildDryRunPlan,
@@ -2526,6 +2527,21 @@ const titleOfSummary = (item) => {
   const lastRestartVerdict = () => summarizeRestartVerdict(readRestartVerdict(stateDirOf()))
 
   /**
+   * The version of THIS plugin (the one the user runs).
+   *
+   * @returns {string}
+   */
+  const pluginVersion = () => {
+    try {
+      const raw = fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+      const parsed = JSON.parse(raw)
+      return typeof parsed.version === 'string' && parsed.version !== '' ? parsed.version : 'unknown'
+    } catch {
+      return 'unknown'
+    }
+  }
+
+  /**
    * Write (or update) the durable record of the restart.
    *
    * The record is written by BOTH halves of a restart: the instance that is
@@ -2597,6 +2613,28 @@ const titleOfSummary = (item) => {
     })
     return cachedAutostart
   }
+
+  /**
+   * THE DIAGNOSTICS of "report a problem".
+   *
+   * One generator, on the host: the browser copies the text it gets, so the
+   * two can never drift. It carries the facts a bug report needs — and NOT
+   * the access token of this instance (the generator only copies the fields
+   * it knows, and everything it copies is redacted again).
+   *
+   * @returns {string}
+   */
+  const diagnosticsText = () => buildDiagnostics({
+    version: pluginVersion(),
+    platform: env.platform,
+    hostKind: hostKindOf().kind,
+    isDesktopApp: env.isDesktopApp === true,
+    startup: startupModeOf(),
+    supervisor: supervisorStatusOf(),
+    restartMode: config.restartMode,
+    lastRestart: lastRestartVerdict(),
+    stateDir: stateDirOf(),
+  })
 
   /**
    * HOW THIS HOST WAS STARTED (the startup matrix).
@@ -3661,6 +3699,10 @@ const titleOfSummary = (item) => {
      * and what the plugin may do about it.
      */
     startupMode: startupModeOf,
+    /**
+     * THE DIAGNOSTICS of "report a problem" (the text the user copies).
+     */
+    diagnostics: diagnosticsText,
     /**
      * WHICH MACHINE IS THIS? (Windows / WSL / Linux / macOS) — the same
      * answer the graceful shutdown uses.
@@ -6904,6 +6946,14 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             onboarding: runtime.onboardingChoice,
             // The route that installs, uninstalls and reports the supervisor.
             supervisorUrl: resolveSupervisorPath(config),
+            // "REPORT A PROBLEM": the diagnostic text (built by ONE generator on
+            // the host, so the browser and the host can never drift) and the
+            // two places a report can go.
+            diagnostics: runtime.diagnostics(),
+            report: {
+              email: SUPPORT_EMAIL,
+              issueUrlBase: ISSUE_URL_BASE,
+            },
           })
         } catch {
           // The banner must never break the health route: fall back to "no restart".

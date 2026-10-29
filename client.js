@@ -320,6 +320,18 @@
     'settings.supervisor.reason.container-no-init': '这台机器没有开机自启机制（容器），所以不承诺自动拉起。',
     'settings.supervisor.reason.port-not-fixable': '端口每次都变，浏览器会被踢出去；得先把端口固定下来。',
     'settings.supervisor.reason.supervised': '插件自己的守护在管这个进程，重启直接交给它。',
+    'settings.groups.report': '报告问题',
+    'settings.report.label': '遇到问题了？',
+    'settings.report.github': '复制诊断信息并去 GitHub 提问题',
+    'settings.report.hint': '诊断信息里没有你的访问令牌，也没有任何密钥；把它贴进 issue，我们就能看出问题出在哪。',
+    'settings.report.email': '没有 GitHub 账号？发邮件到 {email}',
+    'settings.report.copy': '复制诊断信息',
+    'settings.report.mail': '写邮件',
+    'settings.report.copyFailed': '复制失败，请手动复制这段',
+    'settings.report.issueTitle': '重启 / 开机自启相关的问题',
+    'settings.report.issueBody': '请把刚才复制的诊断信息粘贴到下面。\n\n## 发生了什么\n\n\n## 期望什么\n\n\n## 怎么复现\n',
+    'settings.report.mailSubject': '重启 / 开机自启相关的问题',
+    'settings.report.mailBody': '请把刚才复制的诊断信息粘贴到下面。\n\n发生了什么：\n\n期望什么：\n\n怎么复现：\n',
     'settings.error': '没能保存设置：{message}',
     'sleep.dryRun.title': '试运行：不会真的关机',
     'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
@@ -559,6 +571,18 @@
     'settings.supervisor.reason.container-no-init': 'This machine has no "at login" (a container), so no automatic start is promised.',
     'settings.supervisor.reason.port-not-fixable': 'The port changes every time, so the browser would be logged out; the port has to be fixed first.',
     'settings.supervisor.reason.supervised': 'The supervisor of this plugin is in charge: the restart is handed to it.',
+    'settings.groups.report': 'Report a problem',
+    'settings.report.label': 'Something wrong?',
+    'settings.report.github': 'Copy the diagnostics and open a GitHub issue',
+    'settings.report.hint': 'The diagnostics carry no access token and no secrets — paste them into the issue and we can see what went wrong.',
+    'settings.report.email': 'No GitHub account? Write to {email}',
+    'settings.report.copy': 'Copy the diagnostics',
+    'settings.report.mail': 'Write the email',
+    'settings.report.copyFailed': 'The copy failed — please copy this by hand',
+    'settings.report.issueTitle': 'A problem with the restart / start at login',
+    'settings.report.issueBody': 'Please paste the diagnostics you just copied below.\n\n## What happened\n\n\n## What you expected\n\n\n## How to reproduce\n',
+    'settings.report.mailSubject': 'A problem with the restart / start at login',
+    'settings.report.mailBody': 'Please paste the diagnostics you just copied below.\n\nWhat happened:\n\nWhat you expected:\n\nHow to reproduce:\n',
     'settings.error': 'Could not save the settings: {message}',
     'sleep.dryRun.title': 'Dry run: the machine stays on',
     'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
@@ -1516,6 +1540,85 @@
   }
 
   /**
+   * The body of a pre-filled issue must stay short: URLs have a length limit.
+   * The full diagnostics travel by clipboard, not by URL.
+   */
+  const REPORT_BODY_LIMIT = 800;
+
+  /**
+   * Cut a text to a length limit.
+   *
+   * @param {string} text
+   * @param {number} [limit]
+   * @returns {string}
+   */
+  function truncateReportText(text, limit) {
+    const source = typeof text === 'string' ? text : '';
+    const max = Number.isFinite(Number(limit)) && Number(limit) > 0 ? Math.trunc(Number(limit)) : REPORT_BODY_LIMIT;
+    if (source.length <= max) return source;
+    return source.slice(0, Math.max(0, max - 1)) + '…';
+  }
+
+  /**
+   * The pre-filled "new issue" URL.
+   *
+   * The title and the body are encoded, so Chinese text and spaces survive.
+   *
+   * @param {string} base the "new issue" page
+   * @param {string} title
+   * @param {string} body
+   * @returns {string}
+   */
+  function buildIssueUrl(base, title, body) {
+    const root = typeof base === 'string' && base.trim() !== '' ? base.trim() : '';
+    const safeTitle = truncateReportText(title, 200);
+    const safeBody = truncateReportText(body, REPORT_BODY_LIMIT);
+    return root + '?title=' + encodeURIComponent(safeTitle) + '&body=' + encodeURIComponent(safeBody);
+  }
+
+  /**
+   * The `mailto:` link (the way out when there is no GitHub account).
+   *
+   * @param {string} email
+   * @param {string} subject
+   * @param {string} body
+   * @returns {string}
+   */
+  function buildMailtoUrl(email, subject, body) {
+    const to = typeof email === 'string' ? email.trim() : '';
+    const safeSubject = truncateReportText(subject, 200);
+    const safeBody = truncateReportText(body, REPORT_BODY_LIMIT);
+    return 'mailto:' + to + '?subject=' + encodeURIComponent(safeSubject) + '&body=' + encodeURIComponent(safeBody);
+  }
+
+  /**
+   * Copy a text to the clipboard — with a FALLBACK.
+   *
+   * `navigator.clipboard` is refused in an insecure context and when the
+   * permission was not given. Then the text is returned, so the caller can
+   * show it in a box the user can select and copy by hand.
+   *
+   * @param {string} text
+   * @param {object} [options]
+   * @returns {Promise<{ ok: boolean, fallback: boolean, text: string }>}
+   */
+  async function copyReportText(text, options) {
+    const source = typeof text === 'string' ? text : '';
+    const clipboard = options && typeof options.clipboard === 'object'
+      ? options.clipboard
+      : (typeof navigator !== 'undefined' && navigator ? navigator.clipboard : null);
+    try {
+      if (clipboard && typeof clipboard.writeText === 'function') {
+        await clipboard.writeText(source);
+        return { ok: true, fallback: false, text: source };
+      }
+    } catch {
+      // The clipboard refused it: the text goes back to the caller.
+    }
+    return { ok: false, fallback: true, text: source };
+  }
+
+  /**
    * The named exports of this module.
    *
    * The client module system materializes `factory(require) -> exports`, so
@@ -1543,6 +1646,10 @@
     supervisorModeLabel,
     startupModeLabel,
     canOfferSupervisorInstall,
+    // "Report a problem": the URL builders and the clipboard with its fallback.
+    buildIssueUrl,
+    buildMailtoUrl,
+    copyReportText,
     // The two dictionaries, so a test can build a translator without a Host.
     dictionaries: { zh: ZH, en: EN },
   }
@@ -3977,6 +4084,9 @@
         const [error, setError] = useState('')
         // The dry run of the restart command (null = not derived yet).
         const [dryRun, setDryRun] = useState(null)
+        // "REPORT A PROBLEM": the text to copy by hand, shown when the
+        // clipboard refuses (an insecure context, no permission).
+        const [reportFallback, setReportFallback] = useState('')
         const t = props && typeof props.t === 'function'
           ? props.t
           : (translate ?? ((name) => name))
@@ -4160,6 +4270,48 @@
         }
 
         ensureSleepStyle()
+
+        // "REPORT A PROBLEM". The diagnostic text comes from the HOST (one
+        // generator, so the two can never drift); the browser only copies it
+        // and opens the pre-filled issue page.
+        const diagnostics = info && typeof info.diagnostics === 'string' ? info.diagnostics : ''
+        const report = info && typeof info.report === 'object' && info.report !== null ? info.report : {}
+        const reportEmail = typeof report.email === 'string' ? report.email : ''
+        const reportIssueUrl = buildIssueUrl(
+          typeof report.issueUrlBase === 'string' ? report.issueUrlBase : '',
+          t('settings.report.issueTitle'),
+          t('settings.report.issueBody'),
+        )
+        const reportMailto = buildMailtoUrl(
+          reportEmail,
+          t('settings.report.mailSubject'),
+          t('settings.report.mailBody'),
+        )
+
+        /**
+         * Copy the diagnostics, and open the pre-filled issue page.
+         *
+         * The clipboard can refuse (an insecure context, no permission). Then
+         * the text is shown in a box the user can select — a report must never
+         * be lost because a browser said no.
+         */
+        const reportIssue = async () => {
+          const copied = await copyReportText(diagnostics)
+          if (copied.fallback) setReportFallback(copied.text)
+          try {
+            if (typeof window !== 'undefined' && typeof window.open === 'function') {
+              window.open(reportIssueUrl, '_blank', 'noopener')
+            }
+          } catch {
+            // A blocked pop-up must not eat the report: the text is copied.
+          }
+        }
+
+        /** Copy the diagnostics only (the way out without GitHub). */
+        const copyDiagnostics = async () => {
+          const copied = await copyReportText(diagnostics)
+          if (copied.fallback) setReportFallback(copied.text)
+        }
 
         return h(
           'div',
@@ -4504,6 +4656,105 @@
                   )
                 : null,
             ),
+          ),
+          // "REPORT A PROBLEM": copy the diagnostics and open a pre-filled
+          // issue page. The email is the way out when there is no GitHub
+          // account. When the clipboard refuses, the text is shown in a box
+          // the user can select.
+          h(
+            'div',
+            {
+              className: 'dsh-autorestart-settings__group',
+              'data-dsh-autorestart-group': 'report',
+            },
+            h(
+              'div',
+              { className: 'dsh-autorestart-settings__group-title' },
+              t('settings.groups.report'),
+            ),
+            h(
+              'div',
+              { className: 'dsh-autorestart-settings__field' },
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__label' },
+                t('settings.report.label'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-autorestart-settings__button',
+                  disabled: busy,
+                  'data-dsh-autorestart-report': 'github',
+                  onClick: () => void reportIssue(),
+                },
+                t('settings.report.github'),
+              ),
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__hint' },
+                t('settings.report.hint'),
+              ),
+            ),
+            h(
+              'div',
+              { className: 'dsh-autorestart-settings__field' },
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__hint' },
+                fill(t('settings.report.email'), { email: reportEmail }),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-autorestart-settings__button',
+                  disabled: busy,
+                  'data-dsh-autorestart-report': 'copy',
+                  onClick: () => void copyDiagnostics(),
+                },
+                t('settings.report.copy'),
+              ),
+              h(
+                'a',
+                {
+                  className: 'dsh-autorestart-settings__value',
+                  href: reportMailto,
+                  'data-dsh-autorestart-report': 'mail',
+                },
+                t('settings.report.mail'),
+              ),
+            ),
+            reportFallback === ''
+              ? null
+              : h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__field' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-report': 'copy-failed' },
+                    t('settings.report.copyFailed'),
+                  ),
+                  h(
+                    'textarea',
+                    {
+                      className: 'dsh-autorestart-settings__value',
+                      readOnly: true,
+                      rows: 10,
+                      'data-dsh-autorestart-report': 'text',
+                      value: reportFallback,
+                      onFocus: (event) => {
+                        try {
+                          if (event && event.target && typeof event.target.select === 'function') event.target.select()
+                        } catch {
+                          // The browser decides how a selection behaves.
+                        }
+                      },
+                    },
+                    reportFallback,
+                  ),
+                ),
           ),
           error === ''
             ? null

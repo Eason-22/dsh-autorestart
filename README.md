@@ -121,6 +121,23 @@ safely and keeps a backup — then open DSH again.
 your environment is recognised wrongly, please send us the "startup mode + the evidence" block from
 the settings page.
 
+### Report a problem
+
+The settings page has a "**Report a problem**" group at the bottom:
+
+- The main button "**Copy the diagnostics and open a GitHub issue**": one click puts the diagnostics
+  on the clipboard and opens a **pre-filled** issue page (title and outline) — paste the clipboard
+  text into it.
+- The diagnostics carry **no access token and no secrets**: only the plugin version, the platform,
+  whether this is the desktop client, how the host was started (with the evidence), the supervisor,
+  the restart mode, and the verdict of the last restart (with the checks that failed).
+- When the browser refuses the clipboard (an insecure context, or no permission), the plugin shows
+  the diagnostics in a **selectable** box and says so — a report never dies because the browser said
+  no.
+- No GitHub account? The same group carries the mailbox (252170229@qq.com), a "Copy the
+  diagnostics" button and a matching mail link (the subject is filled in, the body asks you to
+  paste).
+
 ## What it occupies in DSH
 
 Nothing here is hidden: this is the complete list of where the plugin attaches itself, so you can see

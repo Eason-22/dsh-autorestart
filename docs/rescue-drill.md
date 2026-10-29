@@ -363,6 +363,42 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\restore-profile.
 > 建议：拒绝类断言除了退出码，还要断言输出里**出现了具体的拒绝原因**（例如包含「拒绝动盘符根目录」）。
 > 这样「脚本自己坏了」和「脚本正确地拒绝了」才分得开。
 
+### 同一个坑又踩了一次（16:24:46）—— 但这次被硬闸当场抓住
+
+修好 BOM 之后，**又有人在 16:24:46 改了一次 `scripts/drill-rescue.ps1`，BOM 又没了**
+（首字节又回到 `3C 23 0A`）。根因很明确：**任何用 edit / 写文件工具重写这两个 `.ps1` 的动作，都会把 BOM 抹掉**。
+这不是谁不小心，是工具行为 —— 所以「记得补 BOM」这种约定一定会再失效。
+
+当前工作区的实测：
+
+```
+powershell.exe -ExecutionPolicy Bypass -File scripts\drill-rescue.ps1
+  -> exit = 1，【0 条 [通过]、0 条 [失败]】（解析阶段就死了，一条断言都没跑到）
+  At scripts\drill-rescue.ps1:70 char:20
+  +     Write-Host ('  [澶辫触] ' + $Name + ' 鈥斺€?閫€鍑虹爜鏄?' + $Result.Code +  ...
+  Unexpected token '[澶辫触]' in expression or statement.
+```
+
+**但这次没有造成事故** —— t3 新加的编码硬闸当场就抓住了：
+
+```
+node --test test\scripts-encoding.test.mjs
+  ✖ the PowerShell scripts keep their UTF-8 byte order mark   (actual: 60, expected: 239 —— 60 是 '<'，239 是 0xEF)
+  ✔ the batch entry point stays pure ASCII
+  ✔ the batch entry point calls powershell.exe, never pwsh
+  ✔ the drill script never sweeps %TEMP% with a wildcard
+  pass 3 / fail 1
+```
+
+**已提交的历史是干净的**（`65a4c98` 那一版 BOM 在、drill 22 条断言全过、node --test 36/36 全过），
+坏掉的只是当时的工作区。所以这两次事故的净结论是：
+
+> **编码硬闸是有用的，但它只在「有人想起来跑测试」时才生效。**
+> 这套脚本平时根本没人跑 —— 坏了没人发现，正是它当初能被悄悄弄死、而整个自救包静默失效的原因。
+> 建议再往前一步：把「`.ps1` 丢了 BOM 就不许提交」做成 pre-commit 检查或发布前的必跑项。
+> 更彻底的做法是把 `.ps1` 里面向用户的中文字符串挪到旁边的 UTF-8 文本文件、运行时读出来，
+> 让 `.ps1` 本身变成纯 ASCII —— BOM 这个坑从此不存在。
+
 ---
 
 ## 十、已知限制

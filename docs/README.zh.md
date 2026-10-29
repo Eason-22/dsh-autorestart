@@ -88,7 +88,9 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
   - **Windows**：计划任务 `dsh-autorestart-web`（`/SC ONLOGON /RL LIMITED`）。若该机策略不允许普通用户建计划任务，会自动降级到「启动文件夹」里的一个 `.cmd`（同样零权限、同样是"登录时"）。
   - **Linux / WSL**：systemd **用户**单元（`~/.config/systemd/user/dsh-autorestart-web.service`）。没有系统服务管理器的机器（容器、没开 systemd 的 WSL）根本没有"开机自启"这回事——插件会明说，并把启动命令交给用户。
 - **装多少次都只有一个**：任务/单元名是固定的，计划任务用 `/F` 覆盖，守护自己还持一把独占锁——两个守护不可能并存。
-- **随时可以还原**：安装前先把原来的 `restartMode` / `restartCommand` 存下来，卸载时写回去。设置页有「开机自启 → 卸载」一个按钮，手动收尾的命令也印在卡片和日志里；卸载哪一步没做完，会把待办**写下来**（`UNINSTALL-PENDING.json`），不会悄悄丢掉。
+- **装到一半失败不会留残骸**：某一步失败时，已经写下的 unit（或计划任务）会被撤掉，回滚过程也报在步骤列表里——半装的守护会在下次登录拉起一个过期的。
+- **命令名不会被拼两次**：一步里程序名放在 `file`、参数放在 `args`，所以跑的是 `systemctl --user enable --now …`，而不是 `systemctl systemctl …`（那会让 systemd 回一句 "Unknown command verb systemctl"）。
+- **随时可以还原**：安装前先把原来的 `restartMode` / `restartCommand` 存下来，卸载时写回去。设置页有「开机自启 → 卸载」一个按钮，手动收尾的命令也印在卡片和日志里；卸载哪一步没做完，会把待办**写下来**（`UNINSTALL-PENDING.json`，放在守护目录**旁边**的 `<stateDir>/` 下，所以写它不会把守护目录又拽回来），而且**只有真的还有残留时**才写。
 - **第一次会问一次**：托管实例第一次出现时问一句"要不要装守护"。卡片写清**会改什么 / 需要什么权限 / 怎么卸**。选「保持我现在的启动方式」什么都不改——插件只记录"你已经自己有守护了"（于是永远不会装第二个）。
 
 桌面版**不问**：它自己就能把自己拉起来（`restartMode: app`），问了是噪声。桌面版**也装不了**守护：登录自启记录会去跑 Electron 客户端本体，那等于**每次登录再开一个 DSH**（双开）。所以桌面版上 `plan` / `install` 直接回 `ok: false`、`error: "desktop-manages-itself"`、步骤列表为空；设置页显示 `mode: "app"`（`restartCapable: true`），不会再吓唬用户"重启能力不可用"。

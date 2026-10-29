@@ -141,11 +141,14 @@ test('the systemd unit path lives in the home directory of the user', () => {
 
 test('the systemd commands are the user ones by default', () => {
   const args = systemdArgs()
-  assert.deepEqual(args.daemonReload, ['systemctl', '--user', 'daemon-reload'])
-  assert.deepEqual(args.enable, ['systemctl', '--user', 'enable', '--now', SUPERVISOR_TASK_NAME + '.service'])
-  assert.deepEqual(args.disable, ['systemctl', '--user', 'disable', '--now', SUPERVISOR_TASK_NAME + '.service'])
+  // The program is in `file`, NOT in the arguments: `systemctl systemctl
+  // --user daemon-reload` is a command nobody can run.
+  assert.deepEqual(args.daemonReload, ['--user', 'daemon-reload'])
+  assert.deepEqual(args.enable, ['--user', 'enable', '--now', SUPERVISOR_TASK_NAME + '.service'])
+  assert.deepEqual(args.disable, ['--user', 'disable', '--now', SUPERVISOR_TASK_NAME + '.service'])
   const system = systemdArgs({ system: true })
-  assert.deepEqual(system.enable[1], '--system')
+  assert.deepEqual(system.enable[0], '--system')
+  assert.equal(system.enable.includes('systemctl'), false, 'the program is never repeated in the arguments')
 })
 
 test('a machine without a service manager is reported as such', () => {

@@ -414,11 +414,18 @@ it is gone.
     the start command to the user.
 - **It is idempotent:** installing twice leaves exactly ONE record (the task/unit name is fixed, the
   task is created with `/F`, and the daemon takes an exclusive lock — two supervisors are impossible).
+- **A failed installation leaves nothing behind:** when a step fails half way, the unit (or the task)
+  that was already written is taken away again and the rollback is reported in the step list — a
+  half-installed supervisor would start a stale one at the next login.
+- **The program is never repeated:** a step carries the program in `file` and the arguments in `args`,
+  so the record runs `systemctl --user enable --now …` and never `systemctl systemctl …` (which every
+  systemd answers with "Unknown command verb systemctl").
 - **It is reversible:** the previous `restartMode` / `restartCommand` are saved before anything
   changes and put back by the uninstall. The settings page has one button for it ("Settings →
   Auto-restart & shut down → Start at login"), and the manual way out is printed in the card and in
   the log. When a step of the uninstall fails, the pending cleanup is written down instead of being
-  dropped silently.
+  dropped silently — but only when something is really left, and it lives next to the supervisor
+  directory (`<stateDir>/UNINSTALL-PENDING.json`), so writing it cannot bring that directory back.
 - **The first-run card:** a hosted host is asked ONCE whether the supervisor may be installed. The
   card says what it would change, which rights it needs, and how to remove it again. Choosing "keep
   the way I start it" changes nothing — the plugin only records that a supervisor of your own is

@@ -98,8 +98,18 @@ import {
   deriveStartCommand,
   detectContainer,
   detectExternalSupervisor,
+  inspectExternalSupervisor,
   pickFreePort,
 } from './lib/supervisor-config.js'
+import {
+  buildRestartVerdict,
+  buildSnapshotRecord,
+  evaluateRestartChecks,
+  readRestartVerdict,
+  RESTART_RESULTS,
+  summarizeRestartVerdict,
+  writeRestartVerdict,
+} from './lib/restart-verdict.js'
 import { waitForHealthyInstance } from './lib/health.js'
 import {
   buildCustomCommand,
@@ -1282,7 +1292,10 @@ function resolveProfileDir() {
  * rollback possible at all.
  *
  * A failing backup never blocks the restart: the reason is logged and the
- * caller continues without a rollback point.
+ * caller continues without a rollback point. It is NOT silent though: the
+ * facts of the snapshot (was one asked for, was one taken, which directory,
+ * how long it took, which older snapshots were pruned) travel with the answer,
+ * so the restart record can tell the operator what the rollback net is.
  *
  * @param {{
  *   config?: object,
@@ -1291,7 +1304,14 @@ function resolveProfileDir() {
  *   profile?: { dir?: string|null, source?: string },
  *   createBackup?: Function,
  * }} [options]
- * @returns {{ backup: object|null, profileDir: string|null, profile: { dir: string|null, source: string } }}
+ * @returns {{
+ *   backup: object|null,
+ *   profileDir: string|null,
+ *   profile: { dir: string|null, source: string },
+ *   requested: boolean,
+ *   durationMs: number,
+ *   error: string|null,
+ * }}
  */
 export function takePreRestartSnapshot({
   config = {},
@@ -1300,15 +1320,25 @@ export function takePreRestartSnapshot({
   profile = null,
   createBackup: createBackupFn = createBackup,
 } = {}) {
+  const startedAt = Date.now()
   const info = profile && typeof profile === 'object'
     ? { dir: profile.dir ?? null, source: profile.source ?? 'unknown' }
     : { dir: null, source: 'unknown' }
   const profileDir = typeof info.dir === 'string' && info.dir.trim() !== '' ? info.dir : null
   // The snapshot is optional: the operator can turn it off entirely.
-  if (config.backupOnRestart !== true) return { backup: null, profileDir, profile: info }
+  if (config.backupOnRestart !== true) {
+    return { backup: null, profileDir, profile: info, requested: false, durationMs: 0, error: null }
+  }
   if (profileDir === null) {
     log.warn('no profile directory is known; skipping the pre-restart backup', { source: info.source })
-    return { backup: null, profileDir: null, profile: info }
+    return {
+      backup: null,
+      profileDir: null,
+      profile: info,
+      requested: true,
+      durationMs: Math.max(0, Date.now() - startedAt),
+      error: 'no profile directory is known',
+    }
   }
   let backup = null
   try {
@@ -1322,9 +1352,14 @@ export function takePreRestartSnapshot({
     // A backup that throws must not take the restart down with it.
     backup = { ok: false, error: String(error) }
   }
+  const durationMs = Math.max(0, Date.now() - startedAt)
   if (backup && backup.ok === true) {
     log.warn('pre-restart backup written', {
       dir: backup.dir,
+      stamp: backup.stamp,
+      at: backup.at,
+      atLocal: backup.atLocal,
+      durationMs,
       bytes: backup.bytes,
       includePlugins: backup.includePlugins,
       pruned: backup.pruned,
@@ -1337,7 +1372,14 @@ export function takePreRestartSnapshot({
       error: backup && backup.error ? backup.error : 'unknown error',
     })
   }
-  return { backup, profileDir, profile: info }
+  return {
+    backup,
+    profileDir,
+    profile: info,
+    requested: true,
+    durationMs,
+    error: backup && backup.ok === true ? null : (backup && backup.error ? backup.error : 'unknown error'),
+  }
 }
 
 /** A logger that never throws and never requires a particular Cordis logger shape. */
@@ -1516,6 +1558,12 @@ export function createRuntime(ctx, config, options = {}) {
    * logged, never thrown: the plugin still loads and the other tools still work.
    */
   const toolErrors = []
+  /**
+   * The routes of this plugin that the web server accepted, and the ones it
+   * refused. The boot check of the restart record reports them.
+   */
+  const registeredRoutes = []
+  const routeErrors = []
 
   const persist = () => {
     try {
@@ -2466,7 +2514,52 @@ const titleOfSummary = (item) => {
   const stateDirOf = () => path.dirname(stateFile)
 
   /**
+   * The durable record of the last restart: the snapshot that was taken, the
+   * verdict of the new instance and its four boot checks.
+   *
+   * @returns {object|null} the summary (null when no restart happened yet)
+   */
+  const lastRestartVerdict = () => summarizeRestartVerdict(readRestartVerdict(stateDirOf()))
+
+  /**
+   * Write (or update) the durable record of the restart.
+   *
+   * The record is written by BOTH halves of a restart: the instance that is
+   * replaced writes the `pending` half (with the snapshot), the instance that
+   * replaces it writes the final verdict. `skipIfFinalized` keeps the older
+   * instance from overwriting a verdict that the new one already wrote.
+   *
+   * @param {object} [patch] the fields to change
+   * @param {{ skipIfFinalized?: boolean }} [options]
+   * @returns {object|null} the record that is on disk now
+   */
+  const recordRestartVerdict = (patch = {}, options = {}) => {
+    const dir = stateDirOf()
+    let current = null
+    try {
+      current = readRestartVerdict(dir)
+    } catch {
+      current = null
+    }
+    if (options.skipIfFinalized === true
+      && current !== null
+      && current.bootId !== null
+      && current.result !== RESTART_RESULTS.PENDING) {
+      return current
+    }
+    const merged = buildRestartVerdict({ ...(current ?? {}), ...patch })
+    const written = writeRestartVerdict(dir, merged)
+    if (!written.ok) log.warn('could not write the restart record:', written.error)
+    return merged
+  }
+
+  /**
    * What the plugin knows about the supervisor.
+   *
+   * The parent chain of this very process is part of the answer: a host that
+   * somebody ELSE supervises (systemd, pm2, a `supervise-*.sh` script) must
+   * not be restarted by a self-replay — the supervisor starts it again, and a
+   * second host on the same port is a double start.
    *
    * @returns {object} the status (mode, kind, installed, running, restartCapable)
    */
@@ -2475,6 +2568,7 @@ const titleOfSummary = (item) => {
     env: process.env,
     platform: env.platform,
     mode: config.supervisorMode,
+    ppid: process.ppid,
   })
 
   /**
@@ -2963,6 +3057,34 @@ const titleOfSummary = (item) => {
       // The snapshot is the rollback point of BOTH branches.
       const backup = snapshot && snapshot.backup ? snapshot.backup : null
       const profileDir = snapshot && snapshot.profileDir ? snapshot.profileDir : null
+
+      // THE DURABLE RESTART RECORD. The instance that is being replaced
+      // writes the "pending" half BEFORE it runs the restart command: the
+      // snapshot it took (directory, local time, duration, which older
+      // snapshots were pruned) and the generation. The instance that replaces
+      // it rewrites the record as `ok` / `failed` after it has checked itself
+      // (see `verifyRestartBoot`). If the new instance never comes up, the
+      // record stays `pending` — which is exactly what has to be visible.
+      recordRestartVerdict({
+        result: RESTART_RESULTS.PENDING,
+        mode: useCustomCommand ? 'command' : 'app',
+        generation: state.generation,
+        requestedAt: state.restart && Number.isFinite(state.restart.requestedAt)
+          ? state.restart.requestedAt
+          : null,
+        startedAt: Date.now(),
+        previousBootId: bootId,
+        bootId: null,
+        reason: state.restart && typeof state.restart.reason === 'string' ? state.restart.reason : null,
+        snapshot: buildSnapshotRecord({
+          requested: snapshot && snapshot.requested === true,
+          backup,
+          profileDir,
+          durationMs: snapshot && Number.isFinite(snapshot.durationMs) ? snapshot.durationMs : null,
+          error: snapshot && snapshot.error ? snapshot.error : null,
+        }),
+        checks: [],
+      })
       // The marker of an EARLIER decision must not confuse this restart's
       // watcher: it would stand down before it even looked at the new
       // instance. It is removed BEFORE the watcher is armed.
@@ -3029,6 +3151,12 @@ const titleOfSummary = (item) => {
             log.error('the restart command failed; the pre-restart snapshot is restored:', reason)
             rollbackInProcess({ backup, profileDir, reason })
             writeRestartOutcome({ decided: true, ok: false, reason })
+            recordRestartVerdict({
+              result: RESTART_RESULTS.FAILED,
+              verifiedAt: Date.now(),
+              reason,
+              checks: [{ name: 'command', ok: false, detail: reason }],
+            })
             return
           }
           if (outcome.timedOut === true) {
@@ -3054,12 +3182,24 @@ const titleOfSummary = (item) => {
           if (confirmed && confirmed.ok === true) {
             log.warn('the new instance answered its health route:', confirmed)
             writeRestartOutcome({ decided: true, ok: true, reason: 'the new instance answered' })
+            recordRestartVerdict({
+              result: RESTART_RESULTS.OK,
+              verifiedAt: Date.now(),
+              reason: 'the new instance answered',
+              checks: [{ name: 'command', ok: true, detail: 'the new instance answered its health route' }],
+            }, { skipIfFinalized: true })
             return
           }
           const reason = (confirmed && confirmed.reason) || 'the new instance never answered'
           log.error('the new instance did not come up; the pre-restart snapshot is restored:', reason)
           rollbackInProcess({ backup, profileDir, reason })
           writeRestartOutcome({ decided: true, ok: false, reason })
+          recordRestartVerdict({
+            result: RESTART_RESULTS.FAILED,
+            verifiedAt: Date.now(),
+            reason,
+            checks: [{ name: 'command', ok: false, detail: reason }],
+          })
         } catch (error) {
           // The command has already run: a retry would restart the host a
           // SECOND time. The snapshot is restored and the reason is reported.
@@ -3067,6 +3207,12 @@ const titleOfSummary = (item) => {
           log.error(reason)
           rollbackInProcess({ backup, profileDir, reason })
           writeRestartOutcome({ decided: true, ok: false, reason })
+          recordRestartVerdict({
+            result: RESTART_RESULTS.FAILED,
+            verifiedAt: Date.now(),
+            reason,
+            checks: [{ name: 'command', ok: false, detail: reason }],
+          })
         }
       } else {
         const aborts = Number(state.restart.gateAborts) || 0
@@ -3470,11 +3616,19 @@ const titleOfSummary = (item) => {
      * ONLY for the HOSTED hosts: the desktop app brings itself back up
      * (`restartMode: app`), so asking a hosted user "shall I install a
      * supervisor?" would be noise there.
+     *
+     * And NEVER when somebody else is already in charge: a second supervisor
+     * would fight over the port with the first one — that is the double start
+     * the whole external-supervisor detection exists to prevent.
      */
     get supervisorOffer() {
       if (env.isDesktopApp) return false
       const record = state.onboarding
       if (record && typeof record === 'object' && record.feature === 'supervisor') return false
+      try {
+        const status = supervisorStatusOf()
+        if (status && status.mode === 'external') return false
+      } catch {}
       return true
     },
     env,
@@ -3529,6 +3683,24 @@ const titleOfSummary = (item) => {
       return { applied: result.applied, showSleepButton: showSleepButton === true }
     },
     toolErrors,
+    /**
+     * The routes of this plugin that the web server accepted, and the ones it
+     * refused. The boot check reports them: a host that came up without its
+     * routes is NOT a healthy host.
+     */
+    registeredRoutes,
+    routeErrors,
+    /**
+     * The outcome of the boot recovery pass of THIS boot:
+     * `{ ran, ok, detail }`. `ran` is false when the recovery is switched off.
+     */
+    recovery: null,
+    /**
+     * The durable record of the last restart (the snapshot that was taken and
+     * the verdict of the instance that came up).
+     */
+    lastRestartVerdict,
+    recordRestartVerdict,
     startPolling,
     stopPolling,
     tick,
@@ -4141,6 +4313,137 @@ async function recoverAfterRestart(ctx, runtime, config) {
   return { recovered: results, phase: 'running' }
 }
 
+/**
+ * How long a pending restart record stays fresh enough to be finished by
+ * THIS boot. A record that is older belongs to a restart of another day — it
+ * stays `pending`, because that restart really was never confirmed.
+ */
+export const RESTART_VERDICT_FRESH_MS = 30 * 60 * 1000
+
+/**
+ * The four checks the instance that replaced the old one runs on itself.
+ *
+ * They answer the question the operator actually has after a restart: "did
+ * the new host really come up?" — and each of them is a fact about THIS boot,
+ * not about the old one:
+ *
+ *   - `listener` — the host listens on a known port;
+ *   - `routes`  — the routes of this plugin were accepted by the web server;
+ *   - `plugin`  — the plugin itself is alive in this boot;
+ *   - `recovery`— the boot recovery pass finished (or was not needed).
+ *
+ * @param {object} runtime
+ * @returns {Array<{ name: string, ok: boolean, detail: string }>}
+ */
+export function collectBootChecks(runtime) {
+  const checks = []
+
+  const port = Number(runtime && runtime.webPort)
+  checks.push({
+    name: 'listener',
+    ok: Number.isFinite(port) && port > 0,
+    detail: Number.isFinite(port) && port > 0
+      ? 'the host listens on port ' + port
+      : 'the host does not listen on a known port',
+  })
+
+  const registered = Array.isArray(runtime && runtime.registeredRoutes) ? runtime.registeredRoutes : []
+  const routeErrors = Array.isArray(runtime && runtime.routeErrors) ? runtime.routeErrors : []
+  checks.push({
+    name: 'routes',
+    ok: registered.length > 0 && routeErrors.length === 0,
+    detail: registered.length === 0
+      ? 'no route of this plugin was registered'
+      : registered.length + ' route(s) registered'
+        + (routeErrors.length > 0 ? ', ' + routeErrors.length + ' refused' : ''),
+  })
+
+  const bootId = runtime && typeof runtime.bootId === 'string' ? runtime.bootId : ''
+  const toolErrors = Array.isArray(runtime && runtime.toolErrors) ? runtime.toolErrors : []
+  checks.push({
+    name: 'plugin',
+    ok: bootId !== '' && toolErrors.length === 0,
+    detail: bootId === ''
+      ? 'the plugin did not register a boot id'
+      : 'the plugin is alive (boot ' + bootId + ')'
+        + (toolErrors.length > 0 ? ', ' + toolErrors.length + ' tool(s) failed' : ''),
+  })
+
+  const recovery = runtime && runtime.recovery && typeof runtime.recovery === 'object'
+    ? runtime.recovery
+    : null
+  checks.push({
+    name: 'recovery',
+    ok: recovery === null ? false : recovery.ok === true,
+    detail: recovery === null
+      ? 'the boot recovery did not report anything'
+      : (typeof recovery.detail === 'string' && recovery.detail !== '' ? recovery.detail : 'the boot recovery finished'),
+  })
+
+  return checks
+}
+
+/**
+ * Finish the durable restart record.
+ *
+ * The instance that replaced the old one reads the `pending` record, runs the
+ * four boot checks and writes the final verdict (`ok` / `failed`) with the
+ * time it verified itself and how long the whole restart took.
+ *
+ * Nothing is written when there is no pending record (this boot was not the
+ * result of a restart) or when the pending record belongs to another day.
+ *
+ * @param {object} runtime
+ * @param {{ timeoutMs?: number, now?: number, sleep?: Function }} [options]
+ * @returns {Promise<object|null>} the record that is on disk now
+ */
+export async function verifyRestartBoot(runtime, options = {}) {
+  const log = runtime.log
+  const stateDir = path.dirname(runtime.stateFile)
+  const pending = readRestartVerdict(stateDir)
+  if (pending === null) return null
+  if (pending.result !== RESTART_RESULTS.PENDING) return pending
+  const now = typeof options.now === 'function' ? options.now : () => Date.now()
+  const timeoutMs = Number.isFinite(Number(options.timeoutMs)) && Number(options.timeoutMs) > 0
+    ? Math.trunc(Number(options.timeoutMs))
+    : 15000
+  const sleep = typeof options.sleep === 'function' ? options.sleep : recoveryDelay
+  const started = now()
+  // The web server may still be coming up: the checks need its port and its
+  // routes, so they wait — but only for a bounded while.
+  while (now() - started < timeoutMs) {
+    const port = Number(runtime.webPort)
+    const registered = Array.isArray(runtime.registeredRoutes) ? runtime.registeredRoutes.length : 0
+    if (Number.isFinite(port) && port > 0 && registered > 0) break
+    await sleep(250)
+  }
+  const checks = collectBootChecks(runtime)
+  const evaluated = evaluateRestartChecks(checks)
+  const verifiedAt = now()
+  const record = runtime.recordRestartVerdict({
+    result: evaluated.ok ? RESTART_RESULTS.OK : RESTART_RESULTS.FAILED,
+    verifiedAt,
+    durationMs: pending.startedAt !== null ? Math.max(0, verifiedAt - pending.startedAt) : null,
+    bootId: runtime.bootId,
+    checks,
+    reason: evaluated.ok
+      ? 'the new instance came up and every check passed'
+      : 'the new instance came up, but ' + evaluated.failed.join(', ') + ' failed',
+  })
+  if (record !== null) {
+    if (evaluated.ok) {
+      log.warn('the new instance verified itself:', { durationMs: record.durationMs, checks })
+    } else {
+      log.error('the new instance did NOT come up cleanly:', {
+        durationMs: record.durationMs,
+        failed: evaluated.failed,
+        checks,
+      })
+    }
+  }
+  return record
+}
+
 /** Promise-based pause used by boot recovery (batching + resolveAgent retries). */
 function recoveryDelay(ms) {
   const wait = Number.isFinite(ms) && ms > 0 ? ms : 0
@@ -4352,6 +4655,9 @@ function registerTools(ctx, runtime, config) {
           profileDirSource: { type: 'string' },
           backupIncludePlugins: { type: 'boolean' },
           lastRollback: { type: 'object' },
+          // The last restart: the snapshot that was taken before it and the
+          // verdict of the instance that came up.
+          lastRestart: { type: 'object' },
           // The access link of the running instance (with the boot token).
           accessUrl: { type: 'string' },
           environment: { type: 'object' },
@@ -4390,6 +4696,11 @@ function registerTools(ctx, runtime, config) {
         backupIncludePlugins: config.backupIncludePlugins !== false,
         // Present only when the previous restart had to be rolled back.
         ...(runtime.lastRollback ? { lastRollback: runtime.lastRollback } : {}),
+        // THE LAST RESTART: the snapshot that was taken before it (directory,
+        // LOCAL time, duration, pruned) and the verdict of the instance that
+        // came up (the four boot checks). Present only when a restart
+        // happened — otherwise there is nothing to report.
+        ...(runtime.lastRestartVerdict() ? { lastRestart: runtime.lastRestartVerdict() } : {}),
         // The access link of THIS instance (with the boot token). The boot
         // token is created per process, so the link the browser holds answers
         // 401 after a restart — this is the link that still works.
@@ -6414,6 +6725,20 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // The supervisor: who starts this host, and whether the restart
             // can work at all.
             supervisor: runtime.supervisorStatus(),
+            // WHICH END this is. The browser side serves the desktop app AND
+            // the hosted web host, so it may not assume one of them: the
+            // desktop app brings itself back up (there is nothing to install
+            // there), while the hosted host may ask for a supervisor.
+            instance: {
+              isDesktopApp: runtime.env.isDesktopApp === true,
+              platform: runtime.env.platform,
+            },
+            // THE LAST RESTART: the snapshot that was taken before it (the
+            // directory, its LOCAL time, how long it took, which older
+            // snapshots were pruned) and the verdict of the instance that came
+            // up (the four checks). Without it a restart has no visible
+            // result at all.
+            lastRestart: runtime.lastRestartVerdict(),
             // Whether the one-time question about the supervisor may be asked.
             supervisorOffer: runtime.supervisorOffer,
             // The answer of the one-time question about the supervisor (null
@@ -6514,52 +6839,28 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       //     restart, instead of being locked out by a 401.
       publishInstanceRecord(ctx, runtime, config, origin)
     } catch {}
-    try {
-      target.effect(() => webServer.register(route), 'dsh-autorestart: health route')
-    } catch (error) {
-      // A duplicate registration means another load of this plugin already owns it.
-      runtime.log.warn('could not register the health route:', String(error))
-    }
-    try {
-      target.effect(() => webServer.register(parkRoute), 'dsh-autorestart: park route')
-    } catch (error) {
-      runtime.log.warn('could not register the park route:', String(error))
-    }
-    try {
-      target.effect(() => webServer.register(recoverRoute), 'dsh-autorestart: recover route')
-    } catch (error) {
-      runtime.log.warn('could not register the recover route:', String(error))
-    }
-    try {
-      target.effect(() => webServer.register(handoffRoute), 'dsh-autorestart: handoff route')
-    } catch (error) {
-      runtime.log.warn('could not register the handoff route:', String(error))
-    }
-    try {
-      target.effect(() => webServer.register(choiceRoute), 'dsh-autorestart: choice route')
-    } catch (error) {
-      runtime.log.warn('could not register the choice route:', String(error))
-    }
-    try {
-      target.effect(() => webServer.register(cancelRoute), 'dsh-autorestart: cancel route')
-    } catch (error) {
-      runtime.log.warn('could not register the cancel route:', String(error))
-    }
-    try {
-      target.effect(() => webServer.register(announcementsRoute), 'dsh-autorestart: announcements route')
-    } catch (error) {
-      runtime.log.warn('could not register the announcements route:', String(error))
-    }
-    try {
-      target.effect(() => webServer.register(supervisorRoute), 'dsh-autorestart: supervisor route')
-    } catch (error) {
-      runtime.log.warn('could not register the supervisor route:', String(error))
-    }
-    if (sleepRoute !== null) {
+    // The routes of this plugin. Every one of them is remembered: the boot
+    // check of the restart record reports "the routes are there" — a host
+    // that came up without them is not a healthy host.
+    const routes = [
+      { name: 'health', route },
+      { name: 'park', route: parkRoute },
+      { name: 'recover', route: recoverRoute },
+      { name: 'handoff', route: handoffRoute },
+      { name: 'choice', route: choiceRoute },
+      { name: 'cancel', route: cancelRoute },
+      { name: 'announcements', route: announcementsRoute },
+      { name: 'supervisor', route: supervisorRoute },
+    ]
+    if (sleepRoute !== null) routes.push({ name: 'sleep', route: sleepRoute })
+    for (const entry of routes) {
       try {
-        target.effect(() => webServer.register(sleepRoute), 'dsh-autorestart: sleep route')
+        target.effect(() => webServer.register(entry.route), 'dsh-autorestart: ' + entry.name + ' route')
+        runtime.registeredRoutes.push(entry.name)
       } catch (error) {
-        runtime.log.warn('could not register the sleep route:', String(error))
+        // A duplicate registration means another load of this plugin already owns it.
+        runtime.log.warn('could not register the ' + entry.name + ' route:', String(error))
+        runtime.routeErrors.push({ route: entry.name, error: String(error) })
       }
     }
     if (config.autoReloadPage !== false && typeof webServer.tapIndex === 'function') {
@@ -6784,15 +7085,35 @@ export function apply(ctx, rawConfig, options = {}) {
   if (runtime.isNewBoot && config.resumeOnBoot) {
     runtime.recoverTimer = ctx.timeout(() => {
       recoverAfterRestart(ctx, runtime, config)
-        .then(() => { restoreSleepIntent() })
+        .then(() => {
+          runtime.recovery = { ran: true, ok: true, detail: 'the boot recovery finished' }
+          restoreSleepIntent()
+        })
         .catch((error) => {
           log.warn('boot recovery failed:', String(error))
+          runtime.recovery = { ran: true, ok: false, detail: 'the boot recovery failed: ' + String(error) }
           restoreSleepIntent()
+        })
+        // THE VERDICT OF THE RESTART. The instance that replaced the old one
+        // checks itself (listener / routes / plugin / recovery) and writes the
+        // result into the durable restart record. Without this the four
+        // checks would live nowhere and a failed restart would look like a
+        // successful one.
+        .then(() => verifyRestartBoot(runtime))
+        .catch((error) => {
+          log.warn('the boot verification failed:', String(error))
         })
     }, Math.max(0, config.recoveryDelayMs))
   } else {
     // No recovery pass: the intent is restored right away (a hot reload must
     // not lose it either).
+    runtime.recovery = {
+      ran: false,
+      ok: true,
+      detail: runtime.isNewBoot
+        ? 'the boot recovery is switched off'
+        : 'this is not a new boot',
+    }
     restoreSleepIntent()
   }
 

@@ -299,6 +299,9 @@
     'settings.supervisor.install': '装上守护',
     'settings.supervisor.uninstall': '卸载守护',
     'settings.supervisor.hint': '守护是一个独立进程：登录时自动启动，宿主进程掉了自动拉起，启动失败自动回滚上次快照。不需要管理员。',
+    'settings.supervisor.noInstallDesktop': '桌面版自带重启，这里不用装守护。',
+    'settings.supervisor.noInstallExternal': '已经有别的守护在管这个宿主：再装一个会两个一起拉起、抢同一个端口，所以这里不提供安装。',
+    'settings.supervisor.noInstallUnknown': '宿主没说清是谁在拉起它，所以这里不提供安装。',
     'settings.supervisor.access': '当前访问链接',
     'settings.supervisor.accessHint': '重启后 token 会变，链接也会变。这个链接一直是最新的。',
     'settings.supervisor.pending': '卸载没有完成，请手动执行：{commands}',
@@ -535,6 +538,9 @@
     'settings.supervisor.install': 'Install the supervisor',
     'settings.supervisor.uninstall': 'Uninstall the supervisor',
     'settings.supervisor.hint': 'The supervisor is a process of its own: it starts at login, it starts the host again when its process is gone, and it restores the last snapshot when the host does not come up. No administrator rights needed.',
+    'settings.supervisor.noInstallDesktop': 'The desktop app restarts itself — there is no supervisor to install here.',
+    'settings.supervisor.noInstallExternal': 'Another supervisor is already in charge of this host. A second one would start the host as well and both would fight over the port, so there is nothing to install here.',
+    'settings.supervisor.noInstallUnknown': 'The host did not say who starts it, so there is nothing to install here.',
     'settings.supervisor.access': 'The current access link',
     'settings.supervisor.accessHint': 'The token changes with every restart, and so does the link. This one is always the current one.',
     'settings.supervisor.pending': 'The uninstall did not finish. Please run it by hand: {commands}',
@@ -1451,6 +1457,36 @@
   }
 
   /**
+   * May the panel offer to install the supervisor of this plugin?
+   *
+   * The browser side serves the desktop app AND the hosted web host, so it may
+   * not assume one of them:
+   *
+   *   - the desktop app brings itself back up (there is nothing to install);
+   *   - a host that somebody ELSE supervises must not get a SECOND supervisor:
+   *     both would start the host and they would fight over the port;
+   *   - the automatic restart may be switched off.
+   *
+   * When the Host says nothing, the answer is "no": an unknown host is no
+   * reason to touch the machine. The UNINSTALL button always stays available
+   * when a supervisor of this plugin is installed — removing it is always
+   * allowed.
+   *
+   * @param {any} status the supervisor status of the Host
+   * @param {any} host the host block of the Host (which end this is)
+   * @returns {boolean}
+   */
+  function canOfferSupervisorInstall(status, host) {
+    if (!status || typeof status !== 'object') return false
+    if (status.installed === true) return true
+    const isDesktop = host && typeof host === 'object' && host.isDesktopApp === true
+    if (isDesktop) return false
+    const mode = typeof status.mode === 'string' ? status.mode : ''
+    if (mode === 'external' || mode === 'off') return false
+    return true
+  }
+
+  /**
    * The named exports of this module.
    *
    * The client module system materializes `factory(require) -> exports`, so
@@ -1476,6 +1512,7 @@
     countSubagentTasks,
     resolveAccessRedirect,
     supervisorModeLabel,
+    canOfferSupervisorInstall,
     // The two dictionaries, so a test can build a translator without a Host.
     dictionaries: { zh: ZH, en: EN },
   }
@@ -3944,6 +3981,25 @@
           ? info.supervisor
           : null
         const supervisorInstalled = supervisorStatus !== null && supervisorStatus.installed === true
+        // WHICH END IS THIS? The same browser side serves the desktop app and
+        // the hosted web host, so it may not assume one of them. The Host says
+        // which one it is; when it does not say, the panel stays neutral.
+        const hostIsDesktop = info && typeof info === 'object' && info.instance && typeof info.instance === 'object'
+          ? info.instance.isDesktopApp === true
+          : false
+        const supervisorMode = supervisorStatus !== null && typeof supervisorStatus.mode === 'string'
+          ? supervisorStatus.mode
+          : ''
+        // The install button is only offered where it makes sense: the desktop
+        // app brings itself back up (there is nothing to install there), and a
+        // host that somebody ELSE supervises must not get a second supervisor
+        // (they would both start the host and fight over the port).
+        const supervisorCanInstall = canOfferSupervisorInstall(supervisorStatus, info && info.instance)
+        const supervisorNoInstall = hostIsDesktop
+          ? 'settings.supervisor.noInstallDesktop'
+          : (supervisorMode === 'external'
+            ? 'settings.supervisor.noInstallExternal'
+            : 'settings.supervisor.noInstallUnknown')
         const accessUrl = info && typeof info === 'object' && typeof info.accessUrl === 'string' ? info.accessUrl : ''
         const supervisorPending = supervisorStatus !== null
           && supervisorStatus.detail !== null
@@ -4235,28 +4291,38 @@
                   : t('settings.supervisor.capableNo'),
               ),
             ),
-            h(
-              'div',
-              { className: 'dsh-autorestart-settings__field' },
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-autorestart-settings__button',
-                  disabled: busy,
-                  'data-dsh-autorestart-supervisor': supervisorInstalled ? 'uninstall' : 'install',
-                  onClick: () => void driveSupervisor(supervisorInstalled ? 'uninstall' : 'install'),
-                },
-                supervisorInstalled ? t('settings.supervisor.uninstall') : t('settings.supervisor.install'),
-              ),
-              supervisorPending
-                ? h(
+            supervisorInstalled || supervisorCanInstall
+              ? h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__field' },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-autorestart-settings__button',
+                      disabled: busy,
+                      'data-dsh-autorestart-supervisor': supervisorInstalled ? 'uninstall' : 'install',
+                      onClick: () => void driveSupervisor(supervisorInstalled ? 'uninstall' : 'install'),
+                    },
+                    supervisorInstalled ? t('settings.supervisor.uninstall') : t('settings.supervisor.install'),
+                  ),
+                  supervisorPending
+                    ? h(
+                        'span',
+                        { className: 'dsh-autorestart-settings__hint' },
+                        fill(t('settings.supervisor.pending'), { commands: supervisorPending }),
+                      )
+                    : null,
+                )
+              : h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__field' },
+                  h(
                     'span',
-                    { className: 'dsh-autorestart-settings__hint' },
-                    fill(t('settings.supervisor.pending'), { commands: supervisorPending }),
-                  )
-                : null,
-            ),
+                    { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-supervisor': 'no-install' },
+                    t(supervisorNoInstall),
+                  ),
+                ),
             accessUrl
               ? h(
                   'div',

@@ -714,6 +714,23 @@ was only recognised as WSL because the Windows drive is mounted — a hint, not 
 `lastRun.dryRun` marks the last run as a rehearsal that switched nothing off; and
 `backupOnRestart` / `backupIncludePlugins` report the effective scope of the pre-restart backup.
 
+**The record of the last restart.** `GET <healthPath>?state=1` and the `continuum_status` tool both
+report `lastRestart`: the snapshot that was taken before the restart (`snapshot.dir`,
+`snapshot.stamp`, `snapshot.atLocal` — the local time, because the directory name is UTC —,
+`snapshot.durationMs`, `snapshot.pruned`) and the verdict of the instance that came up
+(`result` is `pending`, `ok` or `failed`, plus `verifiedAt`, `durationMs` and the four boot checks
+`listener` / `routes` / `plugin` / `recovery`). A restart whose new instance never came up stays
+`pending` — that is visible too. The file behind it is
+`<stateDir>/last-restart-verdict.json`.
+
+**Who starts this host.** The `supervisor` block of the same payload says `mode`
+(`installed` / `external` / `unknown` / `off`), `restartCapable`, and — since a second supervisor
+would fight over the port — `selfReplay` (`allowed` / `refused` / `unknown`) plus the `external`
+evidence (`kind`, `evidence`, `commandLine`) when somebody else is in charge. On Linux the parent
+chain of the host is read (`/proc/<pid>/cmdline`), so a `supervise-*.sh` script of the user is
+recognised. When nobody can be identified the mode is `unknown`, never a silent "bare host": the
+plugin then refuses to replay its own command.
+
 **When the shutdown command does not start.** The host waits for the real answer of the process. If
 the command cannot start (missing binary, denied permission), the shutdown does **not** pretend it
 worked: the phase goes back to `idle`, the reason is reported ("the shutdown command did not start

@@ -484,6 +484,10 @@ WSL 的判定依据：`WSL_DISTRO_NAME`、`WSL_INTEROP`、`/proc/version` 里出
 
 **给代码看的状态字段。** `GET <healthPath 前缀>/sleep`（默认 `/__dsh_autorestart/sleep`）会回答阶段、倒数和"要关的是哪台机器"。其中几个字段是给**程序**看的、不是给人看的：`host.kind` 是机器类别（`windows` / `wsl` / `linux` / `macos` / `unsupported`；如果平台没认出来、但你配了 `sleepCommand`，则是 `custom`）；`host.suspect` 为 `true` 表示这台机器**只凭挂着 Windows 盘**才被认成 WSL（是佐证，不是铁证）；`lastRun.dryRun` 表示上一次是**试运行**，什么都没真关；`backupOnRestart` / `backupIncludePlugins` 报告重启前备份的当前范围。
 
+**上一次重启的记录。** `GET <healthPath>?state=1` 和 `continuum_status` 工具都会报 `lastRestart`：重启前拍的那份快照（`snapshot.dir`、`snapshot.stamp`、`snapshot.atLocal`——**本地时间**，因为目录名是 UTC——、`snapshot.durationMs`、`snapshot.pruned`），以及**起来那个新实例**的判定（`result` 是 `pending` / `ok` / `failed`，外加 `verifiedAt`、`durationMs` 和四条开机检查 `listener` / `routes` / `plugin` / `recovery`）。新实例始终没起来时，记录停在 `pending`——这同样看得见。记录落在 `<stateDir>/last-restart-verdict.json`。
+
+**这个宿主是谁拉起来的。** 同一个返回里的 `supervisor` 块说 `mode`（`installed` / `external` / `unknown` / `off`）、`restartCapable`，以及——因为**第二个守护会抢同一个端口**——`selfReplay`（`allowed` / `refused` / `unknown`）；别人在管时还有 `external` 的证据（`kind`、`evidence`、`commandLine`）。Linux 上会读宿主的**父进程链**（`/proc/<pid>/cmdline`），所以用户自己的 `supervise-*.sh` 脚本能被认出来。**认不出人时是 `unknown`，绝不会默默当成"裸跑"**：这时插件拒绝自己重放自己的命令。
+
 **关机命令起不来时的退路。** 宿主会等命令的**真实结果**（进程有没有真的起来）。命令起不来（找不到程序、权限不够）时，关机**不会假装成功**：状态回到 `idle`，并给出原因（"关机命令没跑起来（…），电脑还开着，可以再点一次月亮按钮。"），电脑保持开机。界面上那个「正在关机」的卡片也**不会把界面锁死**：最多停留 8 秒就会给出一个"关掉这个提示"的按钮。
 
 ## 需要 goal 吗？

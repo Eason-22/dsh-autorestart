@@ -7645,12 +7645,27 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             }
           }
         }
-      } catch {
-        // The marker is a convenience: the watchdog also asks the health route.
+      } catch (error) {
+        // NEVER silent: a swallowed error here leaves an armed watchdog behind.
+        // It is recorded on `runtime` (this scope has no logger) so the settings
+        // page and the diagnostics can show it instead of pretending all is well.
+        runtime.watchdogReadyError = {
+          at: Date.now(),
+          message: String(error && error.message ? error.message : error),
+        }
+        // One retry with the bare minimum: the marker alone is what the
+        // watchdog actually waits for.
+        try {
+          writeReady(stateDirOf(), { bootId: runtime.bootId, port: runtime.port ?? null })
+          runtime.watchdogReadyError.retry = 'ok'
+        } catch (again) {
+          runtime.watchdogReadyError.retry = String(again && again.message ? again.message : again)
+        }
       }
       const body = JSON.stringify({
         ok: true,
         plugin: name,
+        version: PLUGIN_VERSION_FALLBACK,
         bootId: runtime.bootId,
         pid: process.pid,
         phase: state.phase,

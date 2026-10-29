@@ -71,7 +71,12 @@
 
 ### DSH 起不来了
 
-双击插件目录里的 `scripts/emergency-disable.cmd` —— 它会把这个插件安全地摘掉并留一份备份；然后重新打开 DSH 就行（细节见下面的「起不来怎么办」）。
+插件目录的 `scripts/` 里有两个能双击的脚本，分工不一样：
+
+- **`scripts/restore-profile.cmd` —— 回到上一次好状态**：把最新的一份带 manifest 的快照放回 profile；坏掉的那份**挪走而不是删掉**，留成 `profile.broken-<时间戳>`。它**不会替你重启 DSH**，重新打开 DSH 是你自己的事。
+- **`scripts/emergency-disable.cmd` —— 只把这个插件摘掉**：其余一切原样不动（只从 bundles 里拿掉这一个名字，并留一份文件备份）。
+
+**怎么选**：「想整个回到上一个好状态」用前一个；「只怀疑这个插件」用后一个。边界（目标 profile 必须已存在、必须有带 manifest 的快照、不会自动重启、`broken-` 目录会留着）写在 [`scripts/README.md`](../scripts/README.md) 里。
 
 ### 实测状态表（哪些真机验过，哪些只有单元测试）
 

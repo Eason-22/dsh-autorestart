@@ -105,8 +105,18 @@ writes that sentence and the matching command into the settings page.
 
 ### If DSH does not come up
 
-Double-click `scripts/emergency-disable.cmd` in the plugin directory — it takes this plugin out
-safely and keeps a backup — then open DSH again.
+Two double-clickable scripts in `scripts/`, and they do different jobs:
+
+- **`scripts/restore-profile.cmd` — back to the last good state.** It puts the newest snapshot that
+  carries a manifest back over the profile, and leaves the broken one behind as
+  `profile.broken-<timestamp>` (moved aside, not deleted). It does not restart DSH for you.
+- **`scripts/emergency-disable.cmd` — take this plugin out and change nothing else.** It removes
+  only `dsh-autorestart` from the profile's bundle list and keeps a backup of the file.
+
+**Which one:** "back to the last good state" → `restore-profile.cmd`; "I only suspect this plugin" →
+`emergency-disable.cmd`. The boundaries (the profile directory has to exist, a snapshot with a
+manifest is required, DSH is never restarted for you, the `broken-` folder stays) are written down
+in [`scripts/README.md`](scripts/README.md).
 
 ### What has really been tested
 

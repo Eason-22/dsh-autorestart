@@ -320,7 +320,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.6.2'
+const PLUGIN_VERSION_FALLBACK = '0.7.0'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.

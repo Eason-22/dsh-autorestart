@@ -165,7 +165,7 @@ what it adds before you install it.
 
 ## Install
 
-Current version: **0.6.2**.
+Current version: **0.7.0**.
 
 From npm — the package is published under the name `dsh-autorestart`:
 

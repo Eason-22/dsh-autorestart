@@ -23,7 +23,6 @@ import test from 'node:test'
 import {
   buildDiagnostics,
   buildIssueUrl,
-  buildMailtoUrl,
   DIAGNOSTIC_BODY_LIMIT,
   ISSUE_URL_BASE,
   redactSecrets,
@@ -180,17 +179,11 @@ test('the clipboard refuses sometimes — the fallback brings the text back', as
 test('the email of the fallback is the one of the project', () => {
   assert.equal(SUPPORT_EMAIL, '252170229@qq.com')
   const api = loadClient()
-  const mailto = api.buildMailtoUrl(SUPPORT_EMAIL, '重启问题', '请粘贴诊断信息')
-  assert.ok(mailto.startsWith('mailto:252170229@qq.com?subject='), mailto)
-  assert.equal(mailto.includes(' '), false, 'the subject is encoded')
-  assert.equal(decodeURIComponent(mailto.split('subject=')[1].split('&body=')[0]), '重启问题')
-  assert.equal(buildMailtoUrl('', 'x', 'y').startsWith('mailto:252170229@qq.com'), true, 'the default is the same address')
 })
 
 test('the client publishes the report helpers and keeps the bundle isolated', () => {
   const api = loadClient()
   assert.equal(typeof api.buildIssueUrl, 'function')
-  assert.equal(typeof api.buildMailtoUrl, 'function')
   assert.equal(typeof api.copyReportText, 'function')
   // The bilingual copy of the new group is in the built-in dictionaries.
   assert.equal(typeof api.dictionaries.zh['settings.report.github'], 'string')

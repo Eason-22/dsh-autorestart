@@ -365,12 +365,9 @@
     'settings.report.hint': '诊断信息里没有你的访问令牌，也没有任何密钥；把它贴进 issue，我们就能看出问题出在哪。',
     'settings.report.email': '没有 GitHub 账号？发邮件到 {email}',
     'settings.report.copy': '复制诊断信息',
-    'settings.report.mail': '写邮件',
     'settings.report.copyFailed': '复制失败，请手动复制这段',
     'settings.report.issueTitle': '重启 / 开机自启相关的问题',
     'settings.report.issueBody': '请把刚才复制的诊断信息粘贴到下面。\n\n## 发生了什么\n\n\n## 期望什么\n\n\n## 怎么复现\n',
-    'settings.report.mailSubject': '重启 / 开机自启相关的问题',
-    'settings.report.mailBody': '请把刚才复制的诊断信息粘贴到下面。\n\n发生了什么：\n\n期望什么：\n\n怎么复现：\n',
     'settings.error': '没能保存设置：{message}',
     'sleep.dryRun.title': '试运行：不会真的关机',
     'sleep.dryRun.body': '彩排结束，本来会执行这条命令（真的什么都没执行）：',
@@ -649,12 +646,9 @@
     'settings.report.hint': 'The diagnostics carry no access token and no secrets — paste them into the issue and we can see what went wrong.',
     'settings.report.email': 'No GitHub account? Write to {email}',
     'settings.report.copy': 'Copy the diagnostics',
-    'settings.report.mail': 'Write the email',
     'settings.report.copyFailed': 'The copy failed — please copy this by hand',
     'settings.report.issueTitle': 'A problem with the restart / start at login',
     'settings.report.issueBody': 'Please paste the diagnostics you just copied below.\n\n## What happened\n\n\n## What you expected\n\n\n## How to reproduce\n',
-    'settings.report.mailSubject': 'A problem with the restart / start at login',
-    'settings.report.mailBody': 'Please paste the diagnostics you just copied below.\n\nWhat happened:\n\nWhat you expected:\n\nHow to reproduce:\n',
     'settings.error': 'Could not save the settings: {message}',
     'sleep.dryRun.title': 'Dry run: the machine stays on',
     'sleep.dryRun.body': 'The rehearsal is over. This is the command it WOULD have run (nothing was executed):',
@@ -1732,20 +1726,7 @@
     return root + '?title=' + encodeURIComponent(safeTitle) + '&body=' + encodeURIComponent(safeBody);
   }
 
-  /**
-   * The `mailto:` link (the way out when there is no GitHub account).
-   *
-   * @param {string} email
-   * @param {string} subject
-   * @param {string} body
-   * @returns {string}
-   */
-  function buildMailtoUrl(email, subject, body) {
-    const to = typeof email === 'string' ? email.trim() : '';
-    const safeSubject = truncateReportText(subject, 200);
-    const safeBody = truncateReportText(body, REPORT_BODY_LIMIT);
-    return 'mailto:' + to + '?subject=' + encodeURIComponent(safeSubject) + '&body=' + encodeURIComponent(safeBody);
-  }
+  
 
   /**
    * Copy a text to the clipboard — with a FALLBACK.
@@ -1881,7 +1862,6 @@
     canOfferSupervisorInstall,
     // "Report a problem": the URL builders and the clipboard with its fallback.
     buildIssueUrl,
-    buildMailtoUrl,
     copyReportText,
     // The startup block: whether it may be shown, the one line that says what
     // the plugin remembers, and the formatters of the backup list.
@@ -4560,11 +4540,6 @@
           t('settings.report.issueTitle'),
           t('settings.report.issueBody'),
         )
-        const reportMailto = buildMailtoUrl(
-          reportEmail,
-          t('settings.report.mailSubject'),
-          t('settings.report.mailBody'),
-        )
 
         /**
          * Copy the diagnostics, and open the pre-filled issue page.
@@ -5171,15 +5146,6 @@
                   onClick: () => void copyDiagnostics(),
                 },
                 t('settings.report.copy'),
-              ),
-              h(
-                'a',
-                {
-                  className: 'dsh-autorestart-settings__value',
-                  href: reportMailto,
-                  'data-dsh-autorestart-report': 'mail',
-                },
-                t('settings.report.mail'),
               ),
             ),
             reportFallback === ''

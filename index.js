@@ -2569,6 +2569,9 @@ const titleOfSummary = (item) => {
     platform: env.platform,
     mode: config.supervisorMode,
     ppid: process.ppid,
+    // The desktop app brings ITSELF back up (`restartMode: app`): it is not
+    // "nobody knows", and the restart is available.
+    isDesktopApp: env.isDesktopApp === true,
   })
 
   /**
@@ -2630,6 +2633,9 @@ const titleOfSummary = (item) => {
       platform: env.platform,
       confirmed: options.confirmed === true,
       dryRun: options.dryRun === true,
+      // The desktop app manages itself: a login record would start a SECOND
+      // client at every login, so the installation is refused there.
+      isDesktopApp: env.isDesktopApp === true,
       nodePath: process.execPath,
       execPath: start.execPath,
       execArgv: start.execArgv,
@@ -5074,12 +5080,37 @@ function registerTools(ctx, runtime, config) {
       if (action === 'plan') {
         const plan = planSupervisorInstall({
           platform: runtime.env.platform,
+          // The desktop app manages itself: the plan is refused there, and no
+          // step is generated that could be run by accident.
+          isDesktopApp: runtime.env.isDesktopApp === true,
           nodePath: process.execPath,
+          execPath: process.execPath,
           supervisorPath: supervisorPaths(path.dirname(runtime.stateFile)).script,
           configPath: supervisorPaths(path.dirname(runtime.stateFile)).config,
           kind: config.supervisorKind,
         })
-        return { ok: true, action, kind: plan.kind, reason: plan.reason, steps: plan.steps, supervisor }
+        return {
+          ok: plan.error ? false : true,
+          action,
+          kind: plan.kind,
+          reason: plan.reason,
+          error: plan.error ?? undefined,
+          steps: plan.steps,
+          supervisor,
+        }
+      }
+      if (action === 'install' && runtime.env.isDesktopApp === true) {
+        // The desktop app manages itself: a login record would open a SECOND
+        // client at every login. The refusal comes BEFORE the confirmation, so
+        // the user is never asked to confirm something that cannot happen.
+        return {
+          ok: false,
+          action,
+          error: 'desktop-manages-itself',
+          reason: 'the desktop app relaunches itself; a supervisor would start a second copy',
+          steps: [],
+          supervisor,
+        }
       }
       if (args.confirmed !== true) {
         // The card is what says "yes": without it the machine is not touched.
@@ -6046,7 +6077,10 @@ function buildSupervisorRoute(ctx, runtime, config) {
           // written and nothing is run.
           const plan = planSupervisorInstall({
             platform: runtime.env.platform,
+            // The desktop app manages itself: there is no plan there.
+            isDesktopApp: runtime.env.isDesktopApp === true,
             nodePath: process.execPath,
+            execPath: process.execPath,
             supervisorPath: supervisorPaths(path.dirname(runtime.stateFile)).script,
             configPath: supervisorPaths(path.dirname(runtime.stateFile)).config,
             kind: config.supervisorKind,
@@ -6054,7 +6088,14 @@ function buildSupervisorRoute(ctx, runtime, config) {
           res.statusCode = 200
           res.setHeader('content-type', 'application/json; charset=utf-8')
           res.setHeader('cache-control', 'no-store')
-          res.end(JSON.stringify({ ok: true, action, plan, supervisor: runtime.supervisorStatus() }))
+          res.end(JSON.stringify({
+            ok: plan.error ? false : true,
+            action,
+            plan,
+            error: plan.error ?? null,
+            reason: plan.reason,
+            supervisor: runtime.supervisorStatus(),
+          }))
           return
         }
         if (action === 'dry-run' || action === 'derive') {
@@ -6113,6 +6154,23 @@ function buildSupervisorRoute(ctx, runtime, config) {
           return
         }
         if (action === 'install' || action === 'uninstall') {
+          if (action === 'install' && runtime.env.isDesktopApp === true) {
+            // The desktop app manages itself: a login record would open a
+            // SECOND client at every login. The refusal comes BEFORE the
+            // confirmation, so nothing is asked of the user.
+            res.statusCode = 400
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.setHeader('cache-control', 'no-store')
+            res.end(JSON.stringify({
+              ok: false,
+              action,
+              error: 'desktop-manages-itself',
+              reason: 'the desktop app relaunches itself; a supervisor would start a second copy',
+              steps: [],
+              supervisor: runtime.supervisorStatus(),
+            }))
+            return
+          }
           if (body.confirmed !== true) {
             // The confirmation card is what says "yes": without it nothing is
             // changed on the machine.

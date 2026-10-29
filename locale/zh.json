@@ -48,6 +48,7 @@
       "installed": "插件守护",
       "external": "你自己的方式",
       "unknown": "未知",
+      "app": "桌面版自带重启",
       "off": "关闭",
       "capable": "重启能力",
       "capableYes": "可用：宿主退出后会自动回来",

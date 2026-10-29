@@ -91,7 +91,9 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 - **随时可以还原**：安装前先把原来的 `restartMode` / `restartCommand` 存下来，卸载时写回去。设置页有「开机自启 → 卸载」一个按钮，手动收尾的命令也印在卡片和日志里；卸载哪一步没做完，会把待办**写下来**（`UNINSTALL-PENDING.json`），不会悄悄丢掉。
 - **第一次会问一次**：托管实例第一次出现时问一句"要不要装守护"。卡片写清**会改什么 / 需要什么权限 / 怎么卸**。选「保持我现在的启动方式」什么都不改——插件只记录"你已经自己有守护了"（于是永远不会装第二个）。
 
-桌面版**不问**：它自己就能把自己拉起来（`restartMode: app`），问了是噪声。
+桌面版**不问**：它自己就能把自己拉起来（`restartMode: app`），问了是噪声。桌面版**也装不了**守护：登录自启记录会去跑 Electron 客户端本体，那等于**每次登录再开一个 DSH**（双开）。所以桌面版上 `plan` / `install` 直接回 `ok: false`、`error: "desktop-manages-itself"`、步骤列表为空；设置页显示 `mode: "app"`（`restartCapable: true`），不会再吓唬用户"重启能力不可用"。
+
+守护的启动命令**必须指向一个真正的 Node**：进程本身就是 node 时用它，否则去安装目录里找 `resources/runtime/primary-runtime/dependencies/node/bin/node.exe`，再退到 PATH 里的 `node`。**绝不拿应用 exe 冒充 node**；一个都找不到就拒绝安装并说清原因。
 
 ### 「保持我现在的启动方式」之后：推导重启命令（E）与干跑确认（B）
 
@@ -486,7 +488,7 @@ WSL 的判定依据：`WSL_DISTRO_NAME`、`WSL_INTEROP`、`/proc/version` 里出
 
 **上一次重启的记录。** `GET <healthPath>?state=1` 和 `continuum_status` 工具都会报 `lastRestart`：重启前拍的那份快照（`snapshot.dir`、`snapshot.stamp`、`snapshot.atLocal`——**本地时间**，因为目录名是 UTC——、`snapshot.durationMs`、`snapshot.pruned`），以及**起来那个新实例**的判定（`result` 是 `pending` / `ok` / `failed`，外加 `verifiedAt`、`durationMs` 和四条开机检查 `listener` / `routes` / `plugin` / `recovery`）。新实例始终没起来时，记录停在 `pending`——这同样看得见。记录落在 `<stateDir>/last-restart-verdict.json`。
 
-**这个宿主是谁拉起来的。** 同一个返回里的 `supervisor` 块说 `mode`（`installed` / `external` / `unknown` / `off`）、`restartCapable`，以及——因为**第二个守护会抢同一个端口**——`selfReplay`（`allowed` / `refused` / `unknown`）；别人在管时还有 `external` 的证据（`kind`、`evidence`、`commandLine`）。Linux 上会读宿主的**父进程链**（`/proc/<pid>/cmdline`），所以用户自己的 `supervise-*.sh` 脚本能被认出来。**认不出人时是 `unknown`，绝不会默默当成"裸跑"**：这时插件拒绝自己重放自己的命令。
+**这个宿主是谁拉起来的。** 同一个返回里的 `supervisor` 块说 `mode`（`app` / `installed` / `external` / `unknown` / `off`）、`restartCapable`，以及——因为**第二个守护会抢同一个端口**——`selfReplay`（`allowed` / `refused` / `unknown` / `n/a`）；别人在管时还有 `external` 的证据（`kind`、`evidence`、`commandLine`）。Linux 上会读宿主的**父进程链**（`/proc/<pid>/cmdline`），所以用户自己的 `supervise-*.sh` 脚本能被认出来。**认不出人时是 `unknown`，绝不会默默当成"裸跑"**：这时插件拒绝自己重放自己的命令。**桌面版不会是 `unknown`**：它自己会把自己拉起来，所以报 `mode: "app"`、`restartCapable: true`、`selfReplay: "n/a"`。
 
 **关机命令起不来时的退路。** 宿主会等命令的**真实结果**（进程有没有真的起来）。命令起不来（找不到程序、权限不够）时，关机**不会假装成功**：状态回到 `idle`，并给出原因（"关机命令没跑起来（…），电脑还开着，可以再点一次月亮按钮。"），电脑保持开机。界面上那个「正在关机」的卡片也**不会把界面锁死**：最多停留 8 秒就会给出一个"关掉这个提示"的按钮。
 

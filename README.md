@@ -425,7 +425,17 @@ it is gone.
   already there (so it never installs a second one).
 
 The desktop app is **not** asked: it brings itself back up on its own (`restartMode: app`), so the
-question would be noise there.
+question would be noise there. It is also **refused** the installation itself — a login record that
+starts the supervisor would start the Electron client, and that would open a **second** copy of the
+app at every login. `plan` / `install` answer `ok: false` with `error: "desktop-manages-itself"` and
+an empty step list there, and the settings page shows `mode: "app"` (`restartCapable: true`) instead
+of the scary "restart not available".
+
+The record that starts the supervisor always names a **real Node interpreter**: the process itself
+when it is node, otherwise the runtime that ships with the installation
+(`resources/runtime/primary-runtime/dependencies/node/bin/node.exe`), otherwise the `node` of the
+PATH. The application executable is never used as a stand-in for node, and when no interpreter is
+found the installation is refused with the reason.
 
 ### "Keep the way I start it": the derived restart command (E) and the dry run (B)
 
@@ -724,12 +734,13 @@ report `lastRestart`: the snapshot that was taken before the restart (`snapshot.
 `<stateDir>/last-restart-verdict.json`.
 
 **Who starts this host.** The `supervisor` block of the same payload says `mode`
-(`installed` / `external` / `unknown` / `off`), `restartCapable`, and — since a second supervisor
-would fight over the port — `selfReplay` (`allowed` / `refused` / `unknown`) plus the `external`
+(`app` / `installed` / `external` / `unknown` / `off`), `restartCapable`, and — since a second supervisor
+would fight over the port — `selfReplay` (`allowed` / `refused` / `unknown` / `n/a`) plus the `external`
 evidence (`kind`, `evidence`, `commandLine`) when somebody else is in charge. On Linux the parent
 chain of the host is read (`/proc/<pid>/cmdline`), so a `supervise-*.sh` script of the user is
 recognised. When nobody can be identified the mode is `unknown`, never a silent "bare host": the
-plugin then refuses to replay its own command.
+plugin then refuses to replay its own command. The **desktop app** is never `unknown`: it brings
+itself back up, so it reports `mode: "app"` with `restartCapable: true` and `selfReplay: "n/a"`.
 
 **When the shutdown command does not start.** The host waits for the real answer of the process. If
 the command cannot start (missing binary, denied permission), the shutdown does **not** pretend it

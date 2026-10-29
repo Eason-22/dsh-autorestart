@@ -1453,6 +1453,8 @@
     if (mode === 'installed') return translate('settings.supervisor.installed')
     if (mode === 'external') return translate('settings.supervisor.external')
     if (mode === 'off') return translate('settings.supervisor.off')
+    // The desktop app relaunches itself: it is not "nobody knows".
+    if (mode === 'app') return translate('settings.supervisor.app')
     return translate('settings.supervisor.unknown')
   }
 
@@ -1483,6 +1485,9 @@
     if (isDesktop) return false
     const mode = typeof status.mode === 'string' ? status.mode : ''
     if (mode === 'external' || mode === 'off') return false
+    // The Host says the desktop app manages itself: a supervisor there would
+    // start a SECOND client at every login.
+    if (mode === 'app') return false
     return true
   }
 

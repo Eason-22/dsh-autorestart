@@ -48,6 +48,7 @@
       "installed": "the supervisor of this plugin",
       "external": "your own way",
       "unknown": "nobody knows",
+      "app": "the desktop app itself",
       "off": "switched off",
       "capable": "Restart capability",
       "capableYes": "available: the host comes back on its own",

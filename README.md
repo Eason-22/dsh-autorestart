@@ -13,6 +13,13 @@ Chinese version: [README.zh.md](docs/README.zh.md)
 
 `dsh-autorestart` turns a DeepSeek Harness restart into a resumable event instead of a dead end.
 
+**New in 0.7.0** — it now also knows *how it was started*: the desktop client, somebody else's
+supervisor (a shell script, systemd, a container, pm2, a Windows scheduled task), or a bare process
+nobody manages. It never starts a second DSH next to a running one, and when it cannot tell it does
+nothing instead of guessing a command. The settings page shows what is really inside the
+pre-restart backups (count, local time, size, path), and carries a **Report a problem** entry that
+copies the diagnostics and opens a pre-filled GitHub issue.
+
 An agent can request a graceful restart. The plugin waits until every conversation is idle and the
 host has been quiet for the settle window, then it restarts the host. Once the host is back, the
 interrupted sessions resume automatically: a session that owns a durable goal gets that goal
@@ -136,9 +143,8 @@ The settings page has a "**Report a problem**" group at the bottom:
 - When the browser refuses the clipboard (an insecure context, or no permission), the plugin shows
   the diagnostics in a **selectable** box and says so — a report never dies because the browser said
   no.
-- No GitHub account? The same group carries the mailbox (252170229@qq.com), a "Copy the
-  diagnostics" button and a matching mail link (the subject is filled in, the body asks you to
-  paste).
+- No GitHub account? The same group shows the mailbox (252170229@qq.com) as plain text, plus a
+  "Copy the diagnostics" button.
 
 ## What it occupies in DSH
 

@@ -247,16 +247,20 @@ test('a cancelled snapshot never turns into a restart (the host stays up)', asyn
 test('a cancel in the "restarting" stage is refused, with the reason', async (t) => {
   const dir = tempDir(t, 'refused');
   const stateFile = path.join(dir, 'state.json');
-  // A checkpoint of THIS process (the boot therefore is not a new one): the
-  // stage under test is the one that was written, not the "back" of a boot.
+  // A checkpoint of THIS process (the boot therefore is not a new one).
   const state = createEmptyState(Date.now())
   state.bootPid = process.pid
   state.bootId = 'the-current-boot'
-  setRestartPhase(state, { phase: 'restarting', now: Date.now() })
   writeState(stateFile, state)
 
   const routes = [];
-  apply(fakeContext({ routes }), { stateFile, enabled: true, recoveryDelayMs: 0 });
+  const runtime = apply(fakeContext({ routes }), { stateFile, enabled: true, recoveryDelayMs: 0 });
+  // THE STAGE UNDER TEST BELONGS TO A RUNNING RESTART, so the RUNNING runtime
+  // writes it. (Since 0.8.5 a 'restarting' stage found on disk at boot is reset
+  // instead of being inherited — a stage must not outlive its action, which is
+  // exactly the hang that was reported.)
+
+  runtime.markRestartStage('restarting', { reason: 'test: restart under way' })
 
   const cancel = routes.find((route) => route.path === '/__dsh_autorestart/cancel')
   assert.ok(cancel, 'the cancel route is registered')
@@ -341,3 +345,146 @@ test('a slow copy is reported as slow instead of pretending to be busy', () => {
   assert.match(waiting.text.zh, /^DSH 重启前备份中…$/, 'the sentence says what it is, then stops')
   assert.doesNotMatch(waiting.text.zh, /正在备份/)
 })
+
+// (6) THE STAGE CANNOT OUTLIVE THE ACTION --------------------------------------------
+//
+// THE REPORT (user, 2026-10-29): a restart was postponed right after the copy
+// (another conversation became active), the stage stayed 'snapshotting', and the
+// centred card kept saying "DSH 重启前备份中" for ever. Three things must hold now:
+//   a. 'snapshotting' exists only while files are copied;
+//   b. every postponement writes 'waiting' (with the reason);
+//   c. a stage left on disk is reset at boot instead of being inherited.
+
+test('a copy that is followed by a refused restart goes back to waiting', async (t) => {
+  const root = tempDir(t, 'deferred-after-copy');
+  const profile = makeProfile(root, { count: 12 });
+  const stateFile = path.join(root, 'state.json');
+  const backups = path.join(root, 'backups');
+  const ctx = fakeContext();
+  const config = normalizeConfig({
+    stateFile,
+    restartMode: 'app',
+    settleMs: 0,
+    restartGraceMs: 0,
+    backupOnRestart: true,
+    backupIncludePlugins: true,
+  });
+  // What the stage was at the moments that matter: arming the watchdog happens
+  // IMMEDIATELY after the copy, so 'snapshotting' must already be over there.
+  const stageWhenArming = [];
+  let copyFinished = 0;
+  const runtime = createRuntime(ctx, config, {
+    env: { isDesktopApp: true, appExePath: 'C:\\fake\\DeepSeek Harness.exe' },
+    snapshot: async () => {
+      copyFinished += 1;
+      return { ok: true, backup: { ok: true, dir: backups }, profileDir: profile, files: 12, bytes: 40 * 1024, total: 40 * 1024 };
+    },
+    armWatchdog: () => {
+      stageWhenArming.push(runtime.restartStageInfo().phase);
+      return { ok: false, tier: 'none', reason: 'the test arms nothing' };
+    },
+    // The detached helper refuses because a conversation is active again.
+    // (Scheduled SYNCHRONOUSLY by the runtime, so the result must not be a promise.)
+    scheduleDetached: () => ({ ok: false, error: 'the idle gate denied the restart' }),
+    launchWatcher: () => ({ ok: true, method: 'test', error: null }),
+    probeInstance: async () => ({ ok: true, reason: 'unused' }),
+  });
+
+  requestRestart(runtime.state, { reason: 'phase test', bySessionId: 'sess-deferred' });
+  await runtime.executeRestart();
+
+  assert.equal(copyFinished, 1, 'the copy really ran');
+  assert.deepEqual(stageWhenArming, ['restarting'], 'the stage left snapshotting the moment the copy returned');
+  const stage = runtime.restartStageInfo();
+  assert.equal(stage.phase, 'waiting', 'the postponed restart is back to waiting, not snapshotting');
+  assert.match(String(stage.reason), /^deferred: /, 'and it says why');
+  assert.equal(runtime.state.phase, 'deferred');
+  // The checkpoint on disk agrees — this is what the interface reads.
+  const onDisk = readState(stateFile, Date.now());
+  assert.equal(onDisk.state.restartPhase.phase, 'waiting');
+  assert.notEqual(onDisk.state.restartPhase.phase, 'snapshotting');
+});
+
+test('a conversation that becomes active while the helper waits sends the stage back to waiting', async (t) => {
+  const root = tempDir(t, 'gate-denied');
+  const profile = makeProfile(root, { count: 6 });
+  const stateFile = path.join(root, 'state.json');
+  const backups = path.join(root, 'backups');
+  const timers = [];
+  const ctx = fakeContext();
+  // The gate watchdog is the ONLY ctx.timeout of a runtime that was not applied,
+  // so capturing it is exactly the "the helper did not kill us" signal.
+  ctx.timeout = (fn) => {
+    timers.push(fn);
+    return () => {};
+  };
+  const config = normalizeConfig({
+    stateFile,
+    restartMode: 'app',
+    settleMs: 0,
+    restartGraceMs: 0,
+    backupOnRestart: true,
+    backupIncludePlugins: true,
+  });
+  const runtime = createRuntime(ctx, config, {
+    env: { isDesktopApp: true, appExePath: 'C:\\fake\\DeepSeek Harness.exe' },
+    snapshot: async () => ({ ok: true, backup: { ok: true, dir: backups }, profileDir: profile, files: 6, bytes: 20 * 1024, total: 20 * 1024 }),
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test arms nothing' }),
+    scheduleDetached: () => ({ ok: true, pid: 1234 }),
+    launchWatcher: () => ({ ok: true, method: 'test', error: null }),
+    probeInstance: async () => ({ ok: true, reason: 'unused' }),
+  });
+
+  requestRestart(runtime.state, { reason: 'phase test', bySessionId: 'sess-gate' });
+  await runtime.executeRestart();
+
+  assert.equal(runtime.restartStageInfo().phase, 'restarting', 'the host is on its way out');
+  assert.equal(timers.length, 1, 'the gate watchdog was armed');
+
+  // A conversation became active at the last moment: the helper refused to kill
+  // this process, so the restart is postponed right here.
+  timers[0]();
+
+  const stage = runtime.restartStageInfo();
+  assert.equal(stage.phase, 'waiting', 'the stage went back to waiting instead of hanging');
+  assert.match(String(stage.reason), /^deferred: /);
+  assert.equal(runtime.state.phase, 'deferred');
+  // …and what the interface reads is the same thing.
+  assert.equal(runtime.restartStageBrief().phase, 'waiting');
+  assert.match(String(runtime.restartStageBrief().reason), /gate/);
+});
+
+test('a stage left on disk does not survive into the next process', async (t) => {
+  const dir = tempDir(t, 'stale-boot');
+  const stateFile = path.join(dir, 'state.json');
+  const state = createEmptyState(Date.now());
+  // ANOTHER process wrote this stage and then died before it could end it.
+  state.bootPid = 424242;
+  state.bootId = 'the-process-that-died';
+  setRestartPhase(state, { phase: 'snapshotting', now: Date.now() });
+  writeState(stateFile, state);
+
+  const runtime = apply(fakeContext(), { stateFile, enabled: true, recoveryDelayMs: 0 });
+
+  // A new process is up and nothing is copied here: never 'snapshotting'.
+  assert.notEqual(runtime.restartStageInfo().phase, 'snapshotting');
+  assert.ok(
+    runtime.restartStageInfo().phase === 'back' || runtime.restartStageInfo().phase === 'waiting',
+    `a boot rewrites the leftover stage, got ${runtime.restartStageInfo().phase}`,
+  );
+});
+
+test('a stage left by the same process is reset on a plugin reload', async (t) => {
+  const dir = tempDir(t, 'stale-reload');
+  const stateFile = path.join(dir, 'state.json');
+  const state = createEmptyState(Date.now());
+  state.bootPid = process.pid;
+  state.bootId = 'the-current-boot';
+  setRestartPhase(state, { phase: 'restarting', now: Date.now() });
+  writeState(stateFile, state);
+
+  const runtime = apply(fakeContext(), { stateFile, enabled: true, recoveryDelayMs: 0 });
+
+  assert.equal(runtime.restartStageInfo().phase, 'waiting', 'the reload does not inherit the stage');
+  assert.match(String(runtime.restartStageInfo().reason), /^boot: /);
+});

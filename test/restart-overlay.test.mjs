@@ -165,6 +165,9 @@ function statePayload({
   progress = null,
   blockedBy = null,
   snapshotBytes = null,
+  // When the Host last touched the stage: the staleness tests need a stage that
+  // was last refreshed N seconds ago.
+  at = Date.now(),
 } = {}) {
   return {
     ok: true,
@@ -178,7 +181,7 @@ function statePayload({
     reason: 'blocked',
     restartPhase: {
       phase,
-      at: Date.now(),
+      at,
       elapsedMs: 3000,
       // The number the overlay prints: it travels as a NUMBER, not only inside
       // the sentence (a surface with room for two words must not parse a text).
@@ -859,4 +862,69 @@ test('no time floor exists in the source any more', () => {
   // …and the Host never had one (it must not slow the restart down either).
   const indexSource = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
   assert.equal(indexSource.includes('SNAPSHOT_MIN_VISIBLE_MS'), false, 'no hold in the host')
+})
+
+/* ------------------------------------------------------------------ *
+ * 13. A STALE STAGE CANNOT LEAVE A CARD ON SCREEN.
+ *
+ * The Host fix (0.8.5) puts every postponed restart back to 'waiting'. The card
+ * still must not depend on that: a stage nobody refreshed is not evidence of
+ * anything happening right now, and drawing it is exactly the "card that never
+ * goes away" the user reported. Times are driven here, no real waiting.
+ * ------------------------------------------------------------------ */
+
+test('the stage is believed only while it keeps being refreshed (fake clock)', () => {
+  const api = globalThis.__dshAutorestartClient;
+  assert.equal(api.RESTART_STAGE_STALE_MS, 15000, '15 silent seconds make a stage stale');
+  assert.equal(api.RESTART_SNAPSHOT_FRESH_MS, 10000, 'a copy refreshes at least every 10 s');
+
+  const now = 1_700_000_000_000;
+  const live = (stage) => api.isRestartStageLive(stage, now);
+
+  // A copy that stopped reporting 15 s ago is not running any more.
+  assert.equal(live({ phase: 'snapshotting', at: now - 15000 }), false, '15 s without a byte: no card');
+  assert.equal(live({ phase: 'snapshotting', at: now - 15001 }), false);
+  // A copy that reported 3 s ago is running.
+  assert.equal(live({ phase: 'snapshotting', at: now - 3000 }), true, '3 s ago: the copy is alive');
+  // The copy window is tighter than the general one: a copy silent for 11 s is out.
+  assert.equal(live({ phase: 'snapshotting', at: now - 11000 }), false);
+  assert.equal(live({ phase: 'snapshotting', at: now - 10000 }), true, 'exactly at the limit still counts');
+
+  // The host going down has no progress of its own: the 15 s window applies.
+  assert.equal(live({ phase: 'restarting', at: now - 14000 }), true);
+  assert.equal(live({ phase: 'restarting', at: now - 16000 }), false, 'a restart that never happened is dropped');
+
+  // The other phases never draw a card, and a stage without a timestamp cannot
+  // be trusted to describe "now" at all.
+  assert.equal(live({ phase: 'waiting', at: now }), false);
+  assert.equal(live({ phase: 'back', at: now }), false);
+  assert.equal(live({ phase: 'idle', at: now }), false);
+  assert.equal(live({ phase: 'snapshotting' }), false, 'no timestamp: no card');
+  assert.equal(live({ phase: 'snapshotting', at: 0 }), false);
+  assert.equal(live(null), false);
+})
+
+test('a stale snapshot stage draws NOTHING, a fresh one draws the card', async () => {
+  const api = globalThis.__dshAutorestartClient;
+  const stale = mountClient({
+    health: statePayload({
+      phase: 'snapshotting',
+      progress: { bytes: 92 * 1024, total: 92 * 1024, percent: 100 },
+      // The stage was written 15 s ago and never refreshed after that.
+      at: Date.now() - api.RESTART_STAGE_STALE_MS,
+    }),
+  });
+  // still pendingRestart: the pill goes on saying "waiting", the card does not.
+  assert.equal(await stale.settled('autorestart-restart-overlay'), null, 'the card is gone with the stale stage');
+
+  const fresh = mountClient({
+    health: statePayload({
+      phase: 'snapshotting',
+      progress: { bytes: 92 * 1024, total: 92 * 1024, percent: 100 },
+      at: Date.now() - 3000,
+    }),
+  });
+  const card = await fresh.settled('autorestart-restart-overlay');
+  assert.equal(card.props['data-dsh-autorestart-restart-overlay-phase'], 'snapshotting');
+  assert.match(textOf(card), /DSH 重启前备份中/);
 })

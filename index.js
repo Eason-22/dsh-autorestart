@@ -387,7 +387,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.8.4'
+const PLUGIN_VERSION_FALLBACK = '0.8.5'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -2588,12 +2588,18 @@ const titleOfSummary = (item) => {
     state.restart.failedAttempts = (Number(state.restart.failedAttempts) || 0) + 1
     if (state.restart.failedAttempts >= 2) {
       log.error('restart could not be scheduled twice; cancelling the pending restart instead of retrying forever:', reason)
+      // The restart is gone: so is its stage (a stage without a restart would
+      // draw a card for nothing).
+      clearRestartStage()
       releaseRequesters()
       cancelRestart(state, { now: Date.now() })
       persist()
       stopPolling()
       return
     }
+    // A retry is scheduled: the stage goes back to waiting, WITH the reason, so
+    // no surface keeps showing the step that already ended.
+    deferRestartStage(String(reason))
     setPhase(state, 'deferred')
     if (state.restart.attempt > 0) state.restart.attempt -= 1
     // Back off before the next attempt: no tight retry loop on a broken scheduler.
@@ -2615,6 +2621,12 @@ const titleOfSummary = (item) => {
         const aborts = (Number(state.restart.gateAborts) || 0) + 1
         state.restart.gateAborts = aborts
         if (state.restart.attempt > 0) state.restart.attempt -= 1
+        // The helper refused to kill this process (a conversation is active): the
+        // restart is postponed, so the stage must say 'waiting' — this is the
+        // exact path that left the backup card on screen for ever.
+        deferRestartStage('detached helper denied the idle gate', {
+          blocked: countBlockerTasks(gate().blockedBy),
+        })
         setPhase(state, 'deferred')
         if (aborts > 20) {
           log.error('the detached helper aborted on the idle gate more than 20 times; the next attempt is scheduled UNGATED:', { gateAborts: aborts })
@@ -2661,11 +2673,31 @@ const titleOfSummary = (item) => {
    * @param {{ blocked?: number, now?: number }} [options]
    * @returns {object|null} the recorded stage
    */
-  const markRestartStage = (phase, { blocked = 0, now = Date.now() } = {}) => {
+  const markRestartStage = (phase, { blocked = 0, now = Date.now(), reason = null } = {}) => {
     if (!RESTART_PHASES.includes(phase)) return null
-    const record = setRestartPhase(state, { phase, blocked, now })
+    const record = setRestartPhase(state, { phase, blocked, now, reason })
     persist()
     return record
+  }
+
+  /**
+   * Send the stage BACK TO WAITING — the one way a postponed restart is recorded.
+   *
+   * WHY (user report, 2026-10-29): a restart that had already written
+   * 'snapshotting' and was then postponed (a conversation became active again,
+   * the detached helper refused to kill this process, a retry was scheduled)
+   * left that stage on disk. The interface drew a card for a copy that had long
+   * finished, and the card never went away. Every deferral now goes through
+   * here, so the stage always says the truth: waiting.
+   *
+   * @param {string} reason why the restart was postponed
+   * @param {{ blocked?: number }} [options]
+   * @returns {object|null} the recorded stage
+   */
+  const deferRestartStage = (reason, { blocked = 0 } = {}) => {
+    const text = typeof reason === 'string' && reason !== '' ? 'deferred: ' + reason : 'deferred'
+    const count = Number.isFinite(blocked) ? blocked : 0
+    return markRestartStage('waiting', { blocked: count, reason: text })
   }
 
   /**
@@ -2717,6 +2749,9 @@ const titleOfSummary = (item) => {
       // The measured size of the pre-restart snapshot: it survives the stage
       // change, so a page that missed the copy can still report it.
       snapshotBytes: record && typeof record === 'object' ? record.snapshotBytes : null,
+      // WHY the stage is what it is ("deferred: conversation-active", "snapshot
+      // done", …), so a postponed restart can be told from a running one.
+      reason: record && typeof record === 'object' ? record.reason : null,
       now: Date.now(),
     })
   }
@@ -3648,6 +3683,11 @@ const titleOfSummary = (item) => {
         blockedBy: verdict.blockedBy,
         quietForMs: verdict.quietForMs,
       })
+      // Postponed BEFORE the copy: the stage goes back to waiting (with the
+      // reason and a fresh timestamp), so no card survives the deferral.
+      deferRestartStage(verdict.reason || 'conversation-active', {
+        blocked: countBlockerTasks(verdict.blockedBy),
+      })
       persist()
       startPolling()
       return
@@ -3718,6 +3758,12 @@ const titleOfSummary = (item) => {
         stopPolling()
         return
       }
+      // THE INVARIANT (user report, 2026-10-29): 'snapshotting' exists ONLY while
+      // files are being copied. The moment the copy returns — copied, cancelled
+      // or thrown — the stage leaves it. Everything after this point (arming the
+      // watchdog, the supervisor hand-off, the command) is "the restart is being
+      // executed", and a deferral from here on goes back to 'waiting'.
+      markRestartStage('restarting', { reason: 'snapshot done' })
       // The snapshot is the rollback point of BOTH branches.
       const backup = snapshot && snapshot.backup ? snapshot.backup : null
       const profileDir = snapshot && snapshot.profileDir ? snapshot.profileDir : null
@@ -3990,7 +4036,7 @@ const titleOfSummary = (item) => {
         })
         log.warn('scheduled detached restart:', result)
         if (!result || result.ok !== true) {
-          markRestartStage('waiting', { blocked: 0 })
+          deferRestartStage((result && result.error) || 'detached restart refused')
           rollbackRestart((result && result.error) || 'detached restart refused')
         } else {
           // The helper is scheduled: the host is going down, and from here on a
@@ -4367,6 +4413,34 @@ const titleOfSummary = (item) => {
     // single description (text included) that the state route, the health route
     // and the settings page share.
     markRestartStage,
+    /**
+     * Reset a stage that cannot be true in THIS process (boot / plugin reload).
+     *
+     * WHY (user report, 2026-10-29): the stage lives in the checkpoint, so a
+     * 'snapshotting' or 'restarting' written by an earlier attempt can be read
+     * back by a process in which nothing is being copied and nothing is going
+     * down. The interface would then draw a card for an action that is not
+     * happening — the card that never went away. A stage that describes an
+     * action must not outlive the process that performed it.
+     *
+     * @param {string} reason why it is being reset ("boot", "plugin reload", …)
+     * @returns {object|null} the recorded stage, or null when nothing was stale
+     */
+    resetStaleStage(reason) {
+      const record = state.restartPhase
+      const phase = record && typeof record === 'object' ? record.phase : null
+      if (phase !== 'snapshotting' && phase !== 'restarting') return null
+      let blocked = 0
+      try {
+        blocked = countBlockerTasks(gate().blockedBy)
+      } catch {
+        blocked = 0
+      }
+      return markRestartStage('waiting', {
+        blocked,
+        reason: reason ? 'boot: ' + reason : 'boot',
+      })
+    },
     recordSnapshotProgress,
     clearRestartStage,
     restartStageInfo,
@@ -4389,6 +4463,8 @@ const titleOfSummary = (item) => {
         blocking: info.blocking,
         // The size of the pre-restart snapshot, on every stage (bytes).
         snapshotBytes: info.snapshotBytes,
+        // Why this stage ("deferred: …" = the restart went back to waiting).
+        reason: info.reason,
         progress: info.progress === null
           ? null
           : { files: info.progress.files, bytes: info.progress.bytes, total: info.progress.total, percent: info.progress.percent, ageMs: info.progress.ageMs },
@@ -8418,7 +8494,15 @@ export function apply(ctx, rawConfig, options = {}) {
   // says "back — carrying on". Written here (not after the recovery) so a boot
   // that finds nothing to resume still shows the end of the story instead of a
   // spinner left over from the old process.
-  if (runtime.isNewBoot) runtime.markRestartStage('back')
+  if (runtime.isNewBoot) {
+    runtime.markRestartStage('back')
+  } else {
+    // The SAME process is loading the plugin again: a stage left on disk by an
+    // earlier attempt ('snapshotting' / 'restarting') describes an action that is
+    // not running in this process, so it is reset instead of being inherited
+    // (user report, 2026-10-29: a card that never went away).
+    runtime.resetStaleStage('plugin reload')
+  }
 
   trackAgents(ctx, runtime, config)
 
@@ -8496,6 +8580,11 @@ export function apply(ctx, rawConfig, options = {}) {
     sleep.controller.dispose()
     persistSafely(runtime)
   }, 'dsh-autorestart lifecycle')
+
+  // The runtime is handed back so a test can look at — and drive — the very
+  // object the routes use (the cancel route is decided by ITS stage). Nothing in
+  // the plugin system reads this value.
+  return runtime
 }
 
 export {

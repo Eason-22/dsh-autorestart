@@ -2192,6 +2192,50 @@
    * @param {Function} [translator]
    * @returns {string}
    */
+  /**
+   * HOW LONG A STAGE MAY GO UNMENTIONED BEFORE THE CARD STOPS TRUSTING IT.
+   *
+   * WHY (user report, 2026-10-29): a restart was postponed (a conversation
+   * became active again) right after the copy, and the card kept saying
+   * "DSH 重启前备份中" for ever — the stage on disk had not been brought back to
+   * 'waiting'. The Host is fixed, but the interface must not be able to hang on
+   * a stale stage either: a stage is evidence only while it keeps being
+   * refreshed.
+   */
+  const RESTART_STAGE_STALE_MS = 15000
+  // While files are being copied the Host refreshes the stage on every progress
+  // tick, so ten silent seconds mean the copy is no longer reporting — either it
+  // is over or nobody is copying any more. A 'restarting' stage has no progress
+  // of its own and only has to stay inside the stale window above.
+  const RESTART_SNAPSHOT_FRESH_MS = 10000
+
+  /**
+   * Is the reported stage still something the card may draw?
+   *
+   * The card is an ALARM about something happening right now: 'snapshotting'
+   * (files are being copied) or 'restarting' (the host is going down). A stage
+   * that nobody refreshed for 15 s (10 s for a copy, which refreshes on every
+   * file) describes something that is not happening any more, and drawing it
+   * would leave a card hanging — exactly the bug to avoid. The pill keeps
+   * telling the user the restart is still pending; the card simply stops
+   * claiming progress.
+   *
+   * @param {object|null} stage the `restartPhase` of the state route
+   * @param {number} now
+   * @returns {boolean}
+   */
+  function isRestartStageLive(stage, now) {
+    const phase = stage && typeof stage.phase === 'string' ? stage.phase : ''
+    if (phase !== 'snapshotting' && phase !== 'restarting') return false
+    const at = stage && Number.isFinite(Number(stage.at)) ? Number(stage.at) : null
+    // No timestamp at all: the stage cannot be trusted to describe "now".
+    if (at === null || at <= 0) return false
+    const age = Math.max(0, now - at)
+    if (age > RESTART_STAGE_STALE_MS) return false
+    if (phase === 'restarting') return true
+    return age <= RESTART_SNAPSHOT_FRESH_MS
+  }
+
   function restartOverlayTitle(stage, translator) {
     const phase = stage && typeof stage === 'object' && typeof stage.phase === 'string' ? stage.phase : ''
     if (!isRestartOverlayPhase(phase)) return ''
@@ -2275,6 +2319,10 @@
     // The stage of a restart on the two surfaces that have room for it: the
     // composer row (one short line) and the centred overlay (the detail).
     isRestartOverlayPhase,
+    // Is the reported stage still worth a card? (a stale stage cannot hang it)
+    isRestartStageLive,
+    RESTART_STAGE_STALE_MS,
+    RESTART_SNAPSHOT_FRESH_MS,
     restartPillStageText,
     restartOverlayTitle,
     // The size with the unit that fits it ("92 KB", "156 MB"): a hosted profile
@@ -3817,8 +3865,11 @@
         // on right now", the state file alone does not.
         const pending = Boolean(info && info.pendingRestart === true)
         // THE ONLY TWO STAGES THAT ARE "SOMETHING IS REALLY HAPPENING": the
-        // snapshot is being written, or the host is on its way out.
-        const running = pending && (phase === 'snapshotting' || phase === 'restarting')
+        // snapshot is being written, or the host is on its way out — AND the
+        // stage must still be fresh. A stage nobody refreshed (the restart was
+        // postponed and the Host did not say so) cannot leave a card on screen
+        // for ever; the pill still says the restart is pending.
+        const running = pending && isRestartStageLive(stage, Date.now())
 
         useEffect(() => {
           if (running) setSawRunning(true)

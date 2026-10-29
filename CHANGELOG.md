@@ -22,7 +22,7 @@
 - **设置修改有回执**：改完设置，面板里给回执——成功是绿色「已生效」+ 时间；失败是红色并保留原因、不自动消失。
 - **回执贴在设置面板内部顶部**（`position:sticky` + `top:0`，往下滚动设置内容也一直可见；条高 30px，覆盖不挤压表单），不再浮到窗口层——`shell.overlay` 上那条注册已删，提示只出现在本插件的设置页里，关掉设置页即清空。
 - **口径统一**：悬停提示里的「任务」改成「会话」（英文 session(s)），和胶囊、面板保持一致。
-- **说清是什么备份**：光看「正在备份」看不出备份的是什么，所以浮层改成「DSH 重启前备份中」、胶囊改成「重启前备份中」（英文 "Backing up before DSH restart" / "Backing up…"），进度条与 MB 数字不变。
+- **说清是什么备份**：光看「正在备份」看不出备份的是什么，所以浮层改成「DSH 重启前备份中」、胶囊改成「重启前备份中」（英文 "Backing up before DSH restart" / "Backing up…"），进度条与 MB 数字不变。设置页与 tooltip 那句长句也一起改成同一个说法：「DSH 重启前备份中（预计 X 秒，已完成 Y MB）…」（英文 "Backing up before DSH restart (about Xs, Y MB done)…"），「慢就明说」那条也把主语补成「DSH 重启前备份比预期慢…」，全产品不再出现孤立的「正在备份」。
 
 ### 验证
 
@@ -67,7 +67,7 @@ health 路由里那段"写 marker + 撤看门狗"的代码读的是 `stateDirOf(
 
 用户反馈："点『0 秒后重启』之后十几秒什么都不动，其实在备份 156MB，我会以为按钮没反应 / 0 秒是假的 / 有 bug。"
 
-- **四个阶段立刻可见**：`waiting`「正在等待所有会话空闲…」→ `snapshotting`「正在备份配置和插件（预计 X 秒，已完成 Y MB）…」→ `restarting`「正在重启，稍后自动继续…」→ `back`「已回来，接着干」。阶段写在 checkpoint（`restartPhase`）里，点击的**同一次调用**就把 `waiting` 落盘并 persist，界面下一次轮询（2 秒一次，且点击后立即再拉一次）就能看到。
+- **四个阶段立刻可见**：`waiting`「正在等待所有会话空闲…」→ `snapshotting`「正在备份配置和插件（预计 X 秒，已完成 Y MB）…」（0.8.3 起改为「DSH 重启前备份中（预计 X 秒，已完成 Y MB）…」）→ `restarting`「正在重启，稍后自动继续…」→ `back`「已回来，接着干」。阶段写在 checkpoint（`restartPhase`）里，点击的**同一次调用**就把 `waiting` 落盘并 persist，界面下一次轮询（2 秒一次，且点击后立即再拉一次）就能看到。
 - **备份进度是真的**：`createBackup` 改成**文件级拷贝循环**（原来是 `fs.cpSync` 一次性拷完，既没进度也不能取消），边拷边报 `{ files, bytes, total }`，`total` 是拷之前量出来的真实总量；拷贝过程**每 120ms / 每 40 个文件让出一次事件循环**，所以取消请求能在拷贝途中被服务，进度也能在拷贝途中到界面。
 - **备份阶段可取消**：取消后拷贝在下一个文件处停下，**半成品快照目录被删掉**（不留一个看着能还原的假备份），请求被撤回、宿主不重启；**进入 `restarting` 后取消被拒绝**（HTTP 409 + `reason: not-cancellable` + 原因），界面按钮置灰并说明"正在重启，已经不能取消了"。
 - **两处都能读到**：`/__dsh_autorestart/health?state=1` 与 `/health` 都带 `restartPhase`（阶段、双语文字、可取消性、`slow`）和 `progress`（files/bytes/total/percent/ageMs）。

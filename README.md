@@ -417,7 +417,7 @@ with its plugins is ~150 MB). The button looked dead. It is not — and now it s
 | Stage | What the interface shows | Where the data comes from |
 |---|---|---|
 | `waiting` | "Waiting for every conversation to be idle…" (+ how many are busy) | the idle gate's blockers |
-| `snapshotting` | The centred card: "Backing up before DSH restart" + a real progress bar, "12.3 / 40 MB" and a percentage; the settings page keeps the long line ("Backing up the configuration and the plugins (about 12s left, 78 MB done)…") | the REAL copy loop: files and bytes written, measured total |
+| `snapshotting` | The centred card: "Backing up before DSH restart" + a real progress bar, "12.3 / 40 MB" and a percentage; the settings page and the tooltip keep the long line, in the same words ("Backing up before DSH restart (about 12s, 78 MB done)…") | the REAL copy loop: files and bytes written, measured total |
 | `restarting` | "Restarting; the work continues by itself in a moment…" | the host is on its way out |
 | `back` | "Back — carrying on where we left off" | the new host, once it boots |
 

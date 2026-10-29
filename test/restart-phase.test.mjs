@@ -294,7 +294,11 @@ test('a slow copy is reported as slow instead of pretending to be busy', () => {
     now: startedAt + SLOW_TOTAL_MS,
   })
   assert.equal(slowTotal.slow, 'total')
-  assert.match(slowTotal.text.zh, /备份比预期慢（可能磁盘很忙），还在继续/)
+  // The slow branch names the SAME subject as the card: it is the DSH pre-restart
+  // backup that is slow, never a nameless "backup".
+  assert.match(slowTotal.text.zh, /DSH 重启前备份比预期慢（可能磁盘很忙），还在继续/)
+  assert.doesNotMatch(slowTotal.text.zh, /正在备份/, 'no bare "正在备份" in the slow line either')
+  assert.match(slowTotal.text.en, /DSH pre-restart backup/)
   assert.match(slowTotal.text.en, /slower than expected/)
 
   // The byte counter has not moved for a minute.
@@ -306,7 +310,8 @@ test('a slow copy is reported as slow instead of pretending to be busy', () => {
     now: startedAt + 2000 + SLOW_STALL_MS,
   })
   assert.equal(stalled.slow, 'stalled')
-  assert.match(stalled.text.zh, /备份比预期慢/)
+  assert.match(stalled.text.zh, /DSH 重启前备份比预期慢/)
+  assert.doesNotMatch(stalled.text.zh, /正在备份/)
 
   // A healthy copy shows the measured bytes and an estimate — and no slow line.
   const healthy = describeRestartPhase({
@@ -318,8 +323,14 @@ test('a slow copy is reported as slow instead of pretending to be busy', () => {
   })
   assert.equal(healthy.slow, null)
   assert.equal(healthy.progress.percent, 50)
-  assert.match(healthy.text.zh, /正在备份配置和插件/)
+  // THE ONE VOICE: the settings page and the tooltip say what the card says —
+  // "DSH 重启前备份中" — and never the nameless "正在备份".
+  assert.match(healthy.text.zh, /DSH 重启前备份中/)
+  assert.doesNotMatch(healthy.text.zh, /正在备份/)
   assert.match(healthy.text.zh, /已完成 78 MB/)
+  assert.match(healthy.text.en, /Backing up before DSH restart/)
+  assert.doesNotMatch(healthy.text.en, /configuration and the plugins/)
+  assert.match(healthy.text.en, /78 MB done/)
   assert.ok(healthy.estimateSeconds !== null && healthy.estimateSeconds > 0)
 
   // Before the first measurement the text claims no number at all.
@@ -327,4 +338,6 @@ test('a slow copy is reported as slow instead of pretending to be busy', () => {
   assert.equal(waiting.progress, null)
   assert.equal(waiting.estimateSeconds, null)
   assert.doesNotMatch(waiting.text.zh, /预计/)
+  assert.match(waiting.text.zh, /^DSH 重启前备份中…$/, 'the sentence says what it is, then stops')
+  assert.doesNotMatch(waiting.text.zh, /正在备份/)
 })

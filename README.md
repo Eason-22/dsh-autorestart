@@ -574,6 +574,17 @@ the host again → wait for the ready marker once more. At most **one** restore
 and **one** start; then the watchdog stops and writes what happened into
 `<stateDir>/last-watchdog-report.json` (which tier it used, and why).
 
+**Only one watchdog at a time.** There is an older watcher in this plugin as
+well (it restores the snapshot but does **not** start the host again). Both take
+the same lock, so running them together is worse than running one: the one that
+loses the lock gives up — and if the new one lost, the profile would be restored
+and **nothing would be running**. So the plugin decides once, in one place
+(`lib/watchdog-arbiter.js`): the new watchdog takes over whenever it can be
+armed at all, and the old one only runs when the new one cannot (no tier on this
+machine, the watchdog is switched off, or the registration failed). The report
+names the arbiter (`arbiter: "v2"` or `"v1"`), so it is visible at a glance who
+was watching.
+
 `watchdogEnabled: false` switches it off entirely.
 
 ### The access link after a restart

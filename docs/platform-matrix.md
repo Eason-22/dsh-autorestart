@@ -20,7 +20,7 @@
 | 重启（DSH 自己把自己重启起来） | ✅ | ✅ | ✅ | ✅ | ✅ | `lib/restart.js`：桌面用当前 exe，托管用配置的 `restartCommand` |
 | 会话续接（重启后接着干活） | ✅ | ✅ | ✅ | ✅ | ✅ | `lib/checkpoint.js` + `lib/lifecycle.js`：checkpoint 落在 `<DSH_HOME>/storages/dsh-autorestart/` |
 | 重启前备份（profile 快照） | ✅ | ✅ | ✅ | ✅ | ✅ | `lib/backup.js`：快照目录 `<stateDir>/backups/`，默认留 2 份 |
-| **自动回滚（看门狗）** | ✅ 计划任务 | ✅ 计划任务 | ✅ systemd 定时器 | ✅ systemd（有 systemd 时）/ ⚠️ 自建后台进程：没有 systemd 时，用户在设置页会看到「看门狗的触发方式：自建后台进程」 | ⚠️ 自建后台进程：用户会看到「看门狗的触发方式：自建后台进程」（容器里没有 systemd 定时器可依赖） | `lib/watchdog-tier.js` 选档，`lib/watchdog-schedule.js` 注册，`lib/watchdog.js` 跑流程 |
+| **自动回滚（看门狗）** | ✅ 计划任务 | ✅ 计划任务 | ✅ systemd 定时器 | ✅ systemd（有 systemd 时）/ ⚠️ 自建后台进程：没有 systemd 时，用户在设置页会看到「看门狗的触发方式：自建后台进程」 | ⚠️ 自建后台进程：用户会看到「看门狗的触发方式：自建后台进程」（容器里没有 systemd 定时器可依赖） | `lib/watchdog-tier.js` 选档，`lib/watchdog-schedule.js` 注册，`lib/watchdog.js` 跑流程；**同一时刻只有一个监护者**（`lib/watchdog-arbiter.js`：v2 能用就是 v2，v2 用不了才回落 v1） |
 | 自动回滚的**能力检测**（能不能建任务） | ✅ | ✅ | ✅ | ✅ | ✅ | `lib/scheduler-capability.js`：真注册一次任务再回读、删掉、确认没了 |
 | 自动回滚被拒时的降级链路 | ❌ | ❌ | ❌ | ❌ | ❌ | **有意不做**：被禁就是被禁，只告知（`README.md` 的「当机器不允许创建计划任务时」） |
 | 手动还原（出事了自己救） | ✅ `restore-profile.cmd` | ✅ `restore-profile.cmd` | ✅ `restore-profile.sh` | ✅ `restore-profile.sh` | ✅ `restore-profile.sh` | `scripts/restore-profile.ps1` / `scripts/restore-profile.sh` |

@@ -233,6 +233,7 @@ async function runHostedRestart(t, options = {}) {
   const commands = []
   const watchers = []
   const probes = []
+  const watchdogArms = []
   const runtime = createRuntime(fake.ctx, hostedConfig(state.file), {
     env: { isDesktopApp: false, appExePath: null },
     snapshot: (options_) => takePreRestartSnapshot(options_),
@@ -244,6 +245,13 @@ async function runHostedRestart(t, options = {}) {
       watchers.push(options_)
       return { ok: true, method: 'test', error: null }
     },
+    // The NEW watchdog is injected: the test decides who is the arbiter, and
+    // NOTHING is registered on the machine. By default v2 cannot run, so the
+    // old watcher is the arbiter - the fallback path these tests are about.
+    armWatchdog: (options_) => {
+      watchdogArms.push(options_)
+      return options.watchdogArm || { ok: false, tier: 'none', reason: 'the test forces the fallback' }
+    },
     probeInstance: async (options_) => {
       probes.push(options_)
       return options.probeOutcome || { ok: true, reason: 'the new instance answered' }
@@ -251,7 +259,7 @@ async function runHostedRestart(t, options = {}) {
   })
   requestRestart(runtime.state, { reason: 'test', bySessionId: 'sess-safety' })
   await runtime.executeRestart()
-  return { base, profile, state, runtime, fake, commands, watchers, probes }
+  return { base, profile, state, runtime, fake, commands, watchers, probes, watchdogArms }
 }
 
 test('the hosted branch arms the rollback watcher BEFORE the restart command runs', async (t) => {
@@ -265,6 +273,21 @@ test('the hosted branch arms the rollback watcher BEFORE the restart command run
   )
   assert.equal(probes.length, 1, 'the new instance is confirmed once')
   assert.ok(fs.existsSync(path.join(state.dir, 'access.json')), 'the instance record exists')
+})
+
+test('when the watchdog v2 is armed, the old watcher is NOT started', async (t) => {
+  // The two watchdogs take the same lock: the one that loses it gives up. If
+  // v2 lost, the profile would be restored and nothing would be running.
+  const { commands, watchers, probes, state, watchdogArms } = await runHostedRestart(t, {
+    label: 'v2-wins',
+    watchdogArm: { ok: true, tier: 'scheduled-task', reason: '' },
+  })
+  assert.equal(watchdogArms.length, 1, 'the new watchdog was armed once')
+  assert.equal(watchers.length, 0, 'the old watcher is NOT started next to v2')
+  assert.equal(commands.length, 1, 'the restart command still ran exactly once')
+  assert.equal(probes.length, 1, 'the new instance is confirmed once')
+  const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-watchdog-report.json'), 'utf8'))
+  assert.equal(report.arbiter, 'v2', 'the report names the arbiter')
 })
 
 test('the hosted branch rolls the snapshot back ONCE when the new instance never answers', async (t) => {
@@ -314,6 +337,7 @@ test('the hosted branch restores the snapshot of the profile it took', async (t)
       return { ok: true, command, exitCode: 0, timedOut: false }
     },
     launchWatcher: () => ({ ok: true, method: 'test', error: null }),
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
     probeInstance: async () => ({ ok: false, reason: 'the new instance never answered' }),
   })
   requestRestart(runtime.state, { reason: 'test', bySessionId: 'sess-restore' })
@@ -599,6 +623,7 @@ test('the hosted branch stands down when the watcher is already restoring', asyn
     snapshot: (options) => takePreRestartSnapshot(options),
     runCommand: async ({ command }) => ({ ok: true, command, exitCode: 0, timedOut: false }),
     launchWatcher: () => ({ ok: true, method: 'test', error: null }),
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
     probeInstance: async () => ({ ok: false, reason: 'the new instance never answered' }),
   })
   requestRestart(runtime.state, { reason: 'test', bySessionId: 'sess-locked' })
@@ -637,6 +662,7 @@ test('a marker of an EARLIER decision does not stop the new watcher', async (t) 
       watchers.push(options)
       return { ok: true, method: 'test', error: null }
     },
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
     probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestart(runtime.state, { reason: 'test', bySessionId: 'sess-stale' })

@@ -127,6 +127,9 @@ test('the hosted mode snapshots the profile before the restart command runs', as
       return { ok: true, command, pid: null }
     },
     // The new instance is confirmed without waiting for a real health route.
+    // The new watchdog is injected too: the test decides who is the arbiter
+    // and NOTHING is registered on the machine.
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
     probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(runtime)
@@ -169,6 +172,9 @@ test('the hosted mode takes no snapshot when backupOnRestart is false', async (t
       return { ok: true, command, pid: null }
     },
     // The new instance is confirmed without waiting for a real health route.
+    // The new watchdog is injected too: the test decides who is the arbiter
+    // and NOTHING is registered on the machine.
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
     probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(runtime)
@@ -201,6 +207,9 @@ test('the desktop app and the hosted command share ONE pre-restart snapshot entr
       return { ok: true, command, pid: null }
     },
     // The new instance is confirmed without waiting for a real health route.
+    // The new watchdog is injected too: the test decides who is the arbiter
+    // and NOTHING is registered on the machine.
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
     probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(hostedRuntime)
@@ -216,6 +225,9 @@ test('the desktop app and the hosted command share ONE pre-restart snapshot entr
       scheduled.push(options)
       return { ok: true, method: 'wmi', error: null }
     },
+    // The old watcher is the arbiter here (the new one cannot run), so the
+    // desktop mode still hands over its watcher script.
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
   })
   // A known web port: the rollback watcher needs the health route.
   desktopRuntime.webPort = 51004
@@ -266,6 +278,9 @@ test('a failed snapshot does not block the restart command', async (t) => {
       return { ok: true, command, pid: null }
     },
     // The new instance is confirmed without waiting for a real health route.
+    // The new watchdog is injected too: the test decides who is the arbiter
+    // and NOTHING is registered on the machine.
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
     probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(runtime)
@@ -347,6 +362,9 @@ test('the hosted mode with an empty restart command takes no snapshot and restar
       return { ok: true, command, pid: null }
     },
     // The new instance is confirmed without waiting for a real health route.
+    // The new watchdog is injected too: the test decides who is the arbiter
+    // and NOTHING is registered on the machine.
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
     probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
   })
   requestRestartNow(runtime)
@@ -377,11 +395,17 @@ test('the desktop app still falls back to the app relaunch when the command is e
       return { ok: true, command, pid: null }
     },
     // The new instance is confirmed without waiting for a real health route.
+    // The new watchdog is injected too: the test decides who is the arbiter
+    // and NOTHING is registered on the machine.
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
     probeInstance: async () => ({ ok: true, reason: 'the new instance answered' }),
     scheduleDetached: (options) => {
       scheduled.push(options)
       return { ok: true, method: 'wmi', error: null }
     },
+    // The old watcher is the arbiter here (the new one cannot run), so the
+    // desktop mode still hands over its watcher script.
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test forces the fallback' }),
   })
   runtime.webPort = 51004
   requestRestartNow(runtime)

@@ -122,7 +122,12 @@ import {
   readReport,
   writePending,
   writeReady,
+  writeReport,
 } from './lib/watchdog.js'
+import {
+  ARBITERS,
+  planWatchdogArbiter,
+} from './lib/watchdog-arbiter.js'
 import {
   cleanupSystemdUnit,
   detachedPidPath,
@@ -1602,6 +1607,13 @@ export function createRuntime(ctx, config, options = {}) {
   const probeInstanceFn = typeof options.probeInstance === 'function'
     ? options.probeInstance
     : waitForHealthyInstance
+  // The NEW watchdog (v2). It is injected so a test can decide who is the
+  // arbiter of the restart WITHOUT registering anything on the machine.
+  // (The fallback is a wrapper: `armWatchdog` is declared further down, so it
+  // must not be READ here.)
+  const armWatchdogFn = typeof options.armWatchdog === 'function'
+    ? options.armWatchdog
+    : (...args) => armWatchdog(...args)
   const stateFile = resolveStateFile(config)
 
   const loaded = readState(stateFile, Date.now())
@@ -3445,6 +3457,37 @@ const titleOfSummary = (item) => {
     return { ok: true, method: result.method, error: null, scriptPath }
   }
 
+  /**
+   * Say in the report WHO is watching this restart.
+   *
+   * The v2 watchdog writes its own report when it acts. When v1 is the
+   * arbiter (v2 could not be armed), the host writes it right away — so
+   * `last-watchdog-report.json` always names the arbiter, and a problem can
+   * be read at a glance.
+   *
+   * @param {string} arbiter
+   * @param {string} reason
+   */
+  const writeArbiterReport = (arbiter, reason, tier = 'none') => {
+    try {
+      writeReport(stateDirOf(), {
+        at: new Date().toISOString(),
+        result: 'armed',
+        tier,
+        tierReason: reason || '',
+        arbiter,
+        waitedMs: 0,
+        rechecked: false,
+        restored: false,
+        relaunched: false,
+        ready: false,
+        error: null,
+      })
+    } catch (error) {
+      log.warn('could not write the arbiter report:', String(error))
+    }
+  }
+
   /** Execute the restart now; the detached helper survives our own death. */
   const executeRestart = async () => {
     stopPolling()
@@ -3511,22 +3554,26 @@ const titleOfSummary = (item) => {
       // ARM THE WATCHDOG: it waits for the relaunched host, and when that
       // host never answers, it puts the snapshot back and starts it again.
       // Which way it is triggered is decided by the machine (the tier).
-      if (backup && backup.ok === true && profileDir !== null) {
-        const relaunch = useCustomCommand && typeof config.restartCommand === 'string' && config.restartCommand.trim() !== ''
-          ? {
-            file: config.restartCommand.trim().split(/\s+/)[0],
-            args: config.restartCommand.trim().split(/\s+/).slice(1),
-          }
-          : (env.appExePath ? { file: env.appExePath, args: [] } : null)
-        armWatchdog({
+      //
+      // The result matters: when v2 is armed, it is the ONLY watchdog. The
+      // old one (v1) is NOT started next to it — they take the same lock, and
+      // the one that loses it gives up. If v2 lost, the profile would be
+      // restored but nothing would be running any more.
+      const watchdogArm = backup && backup.ok === true && profileDir !== null
+        ? armWatchdogFn({
           snapshotDir: backup.dir,
           profileDir,
-          relaunchCommand: relaunch,
+          relaunchCommand: useCustomCommand && typeof config.restartCommand === 'string' && config.restartCommand.trim() !== ''
+            ? {
+              file: config.restartCommand.trim().split(/\s+/)[0],
+              args: config.restartCommand.trim().split(/\s+/).slice(1),
+            }
+            : (env.appExePath ? { file: env.appExePath, args: [] } : null),
           healthUrl: restartHealthUrl(),
           portFile: accessFilePath(stateDir),
           expectedBootId: bootId,
         })
-      }
+        : { ok: false, tier: TIERS.NONE, reason: 'there is no snapshot to watch', error: null }
 
       // THE DURABLE RESTART RECORD. The instance that is being replaced
       // writes the "pending" half BEFORE it runs the restart command: the
@@ -3605,7 +3652,25 @@ const titleOfSummary = (item) => {
         // It is NOT armed when the supervisor of this plugin is in charge:
         // that one restores the snapshot itself, and two of them would write
         // the same files at the same time.
-        if (!detected.supervised) armRollbackWatcher({ backup, profileDir })
+        //
+        // It is NOT armed when the watchdog v2 is armed either: v2 does the
+        // same job AND starts the host again. Two watchdogs take the same
+        // lock, and the one that loses it gives up — if v2 lost, the profile
+        // would be restored but nothing would be running any more.
+        const arbiter = planWatchdogArbiter({
+          v2Armed: watchdogArm !== null && watchdogArm.ok === true,
+          supervised: detected.supervised,
+        })
+        if (arbiter.startV1 === true) {
+          armRollbackWatcher({ backup, profileDir })
+          writeArbiterReport(ARBITERS.V1, arbiter.reason, 'none')
+        } else if (arbiter.arbiter === ARBITERS.V2) {
+          writeArbiterReport(ARBITERS.V2, arbiter.reason, watchdogArm.tier)
+          log.warn('the watchdog v2 takes over: the old rollback watcher is NOT started', {
+            tier: watchdogArm.tier,
+            tierReason: watchdogArm.tierReason || '',
+          })
+        }
 
         try {
           // (2) THE COMMAND, with a real success judgement. The old code only
@@ -3698,9 +3763,26 @@ const titleOfSummary = (item) => {
         // The watcher does NOT need the port of the old instance (it reads the
         // port of the NEW one from the instance record), so it is armed as
         // soon as there is a snapshot and a profile directory.
-        const watchScriptPath = backup && backup.ok === true && profileDir !== null
+        //
+        // ONLY when the watchdog v2 could not be armed: v2 is the better
+        // watcher (it starts the host again), and two watchers take the same
+        // lock — the loser gives up.
+        const arbiter = planWatchdogArbiter({
+          v2Armed: watchdogArm !== null && watchdogArm.ok === true,
+          supervised: false,
+        })
+        const watchScriptPath = arbiter.startV1 === true && backup && backup.ok === true && profileDir !== null
           ? path.join(stateDir, 'restart-' + state.generation + '-watch.ps1')
           : null
+        if (arbiter.startV1 === true) {
+          writeArbiterReport(ARBITERS.V1, arbiter.reason, 'none')
+        } else if (arbiter.arbiter === ARBITERS.V2) {
+          writeArbiterReport(ARBITERS.V2, arbiter.reason, watchdogArm.tier)
+          log.warn('the watchdog v2 takes over: the old rollback watcher is NOT started', {
+            tier: watchdogArm.tier,
+            tierReason: watchdogArm.tierReason || '',
+          })
+        }
         const watchScript = watchScriptPath === null
           ? null
           : buildWatchScript({

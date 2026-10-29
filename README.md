@@ -105,11 +105,12 @@ safely and keeps a backup — then open DSH again.
 
 | How it was started | Tested on a real machine? | Evidence |
 | --- | --- | --- |
-| a shell supervisor script (`supervise-*.sh` and friends) | **yes** | recognised on a real machine as "somebody else manages it" → graceful exit only |
-| started by hand in a terminal (foreground) | **yes** | the whole flow ran on a real machine (install, run, uninstall) |
-| started in the background (`nohup` / `setsid`) | **yes** | on a real machine the re-launch command was confirmed to outlive its shell |
+| started by a shell supervisor script (`supervise-*.sh` and friends) | **yes** | recognised on a real machine as external, the evidence points at that script process, and **installing a second supervisor was refused** |
+| started by hand in a terminal (foreground) | **partly** | on a real machine it recognised itself as "nobody manages it" (mode `bare`, the evidence is the parent being bash) and handed out an installation plan; the real "install → run → uninstall" was done on an instance that was **already managed by a supervisor**, so the bare instance never had the full install/uninstall cycle |
+| started in the background (`nohup` / `setsid`) | **partly** | on a real machine it was recognised as a bare background start; **"the re-launch command outlives its shell" is pinned by unit tests only** (the machine did not report the detached flag back then) |
 | WSL with systemd | **yes** | really installed and really removed |
-| a Windows login task | **yes** | really created and really deleted at the system level (including the fallback into the startup folder) |
+| a Windows login task | **partly** | on a real machine one login-triggered task was created → queried (State=Ready, the logon trigger) → deleted (no leftovers) with the system's own tools, which proves that no administrator rights are needed; **"the fallback into the startup folder when the task is refused" is pinned by unit tests only** |
+| the desktop client | **yes** | on a real machine it comes back by itself (there is a snapshot and a self-check record, no rollback was triggered, and it does not start twice); that is the client's own business, it is not part of the hosted matrix |
 | pm2 / forever | no, unit tests only | the recognition and the behaviour are pinned by unit tests |
 | container / compose | no, unit tests only | same |
 | `npx` / `pnpm dlx` wrapper | no, unit tests only | same |
@@ -117,9 +118,10 @@ safely and keeps a backup — then open DSH again.
 | tmux / screen / an SSH session | no, unit tests only | same |
 | WSL started by a Windows-side process | no, unit tests only | same (it is recognised as "cannot tell", so nothing happens) |
 
-**Not tested on a real machine does not mean unsupported**: those paths are pinned by unit tests. If
-your environment is recognised wrongly, please send us the "startup mode + the evidence" block from
-the settings page.
+**Not tested on a real machine does not mean unsupported**: those paths are pinned by unit tests, and
+"no full install/uninstall cycle" or "unit tests only" does not mean unsupported either. If your
+environment is recognised wrongly, please send us the "startup mode + the evidence" block from the
+settings page.
 
 ### Report a problem
 

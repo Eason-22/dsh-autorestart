@@ -77,7 +77,11 @@ import {
   claimRollbackLock,
   clearRollbackReport,
   createBackup,
+  DEFAULT_MAX_BACKUPS,
+  KIND_KNOWN_GOOD,
+  latestKnownGood,
   listBackups,
+  markKnownGood,
   readManifest,
   readRollbackReport,
   releaseRollbackLock,
@@ -678,8 +682,8 @@ function buildConfigSchema() {
       // rollback of "a plugin upgrade broke the boot" possible)
       backupIncludePlugins: schemastery.boolean().default(true)
         .description('Include the installed plugin tree in that snapshot: about 117 MB and roughly 3 extra seconds, but it is what makes a rollback of a broken plugin upgrade possible.'),
-      maxBackups: schemastery.number().step(1).min(1).default(2)
-        .description('How many snapshots are kept; older ones are deleted automatically.'),
+      maxBackups: schemastery.number().step(1).min(1).default(DEFAULT_MAX_BACKUPS)
+        .description('How many snapshots are kept (default 3: the current one plus the two before it); older ones are deleted automatically, except the newest known-good one, which is never removed.'),
       rollbackTimeoutMs: schemastery.number().min(1000).default(90000)
         .description('Milliseconds the detached watcher waits for the relaunched host before it restores the snapshot.'),
       // The watchdog: the process that waits for the relaunched host and puts
@@ -768,7 +772,7 @@ const DEFAULTS = {
   // detached watcher puts the snapshot back and launches the host again.
   backupOnRestart: true,
   backupIncludePlugins: true,
-  maxBackups: 2,
+  maxBackups: DEFAULT_MAX_BACKUPS,
   // The WATCHDOG: the process that waits for the relaunched host and puts the
   // snapshot back when it never answers. It needs a way to be triggered
   // later (a scheduled task, a systemd timer, a detached process) — the
@@ -814,7 +818,7 @@ function normalizeConfig(raw) {
   if (config.deferPolicy !== 'auto' && config.deferPolicy !== 'wait') config.deferPolicy = 'auto'
   if (config.restartMode !== 'app' && config.restartMode !== 'command') config.restartMode = 'app'
   const maxBackups = Number(config.maxBackups)
-  config.maxBackups = Number.isFinite(maxBackups) && maxBackups >= 1 ? Math.trunc(maxBackups) : 2
+  config.maxBackups = Number.isFinite(maxBackups) && maxBackups >= 1 ? Math.trunc(maxBackups) : DEFAULT_MAX_BACKUPS
   const rollbackTimeout = Number(config.rollbackTimeoutMs)
   config.rollbackTimeoutMs =
     Number.isFinite(rollbackTimeout) && rollbackTimeout >= 1000 ? Math.trunc(rollbackTimeout) : 90000
@@ -1377,6 +1381,101 @@ function resolveProfileDir() {
  */
 function backupsDirFor(dir) {
   return backupsRoot(typeof dir === 'string' ? dir : '')
+}
+
+/**
+ * THE FIRST SAFE COPY (user decision, 2026-10-30).
+ *
+ * A machine that has never restarted has no backup at all, so a boot that fails
+ * after the plugin is installed has nothing to roll back to. The FIRST boot of a
+ * NEW host process therefore seeds one known-good copy of the profile.
+ *
+ * Two rules keep it honest:
+ *   - a plugin RELOAD is not an installation: `runtime.isNewBoot` must be true,
+ *     and nothing is written on a reload;
+ *   - a machine that already has a known-good copy gets no second seed.
+ *
+ * A failure is NOT silent: it is recorded on `runtime.firstInstallBackup` (and
+ * in the checkpoint, so it survives the next boot) and the health route reports
+ * it, because a machine with no safe copy must be able to say so.
+ *
+ * @param {object} runtime
+ * @param {object} [config]
+ * @param {{ profileDir?: string }} [overrides] the profile to copy (tests pass it)
+ * @returns {Promise<object|null>} the record that was written (null = nothing to do)
+ */
+export async function seedFirstInstallBackup(runtime, config = {}, overrides = {}) {
+  const state = runtime && runtime.state && typeof runtime.state === 'object' ? runtime.state : null
+  if (state === null) return null
+  if (runtime.isNewBoot !== true) return null
+  // NO BACKUPS AT ALL: the user switched the pre-restart snapshot off, so a
+  // safe copy is not wanted either.
+  if (config.backupOnRestart === false) return null
+  const stateDir = path.dirname(String(runtime.stateFile ?? ''))
+  const backupsDir = backupsDirFor(stateDir)
+  /**
+   * Record the outcome where the interface can see it.
+   *
+   * @param {object} value
+   * @returns {object}
+   */
+  const record = (value) => {
+    state.firstInstallBackup = value
+    runtime.firstInstallBackup = value
+    persistSafely(runtime)
+    return value
+  }
+  const existing = latestKnownGood(backupsDir)
+  if (existing !== null) {
+    return record({ result: 'present', at: Date.now(), dir: existing.dir, bytes: null, error: null })
+  }
+  /**
+   * Report that this machine has NO safe copy, with the reason.
+   *
+   * @param {string} error
+   * @returns {object}
+   */
+  const failed = (error) => {
+    const value = { result: 'no-known-good', at: Date.now(), dir: null, bytes: null, error: String(error) }
+    try {
+      runtime.log.warn('the first safe copy could not be written: this machine has nothing to roll back to', { error: String(error) })
+    } catch {}
+    return record(value)
+  }
+  const profileDir = typeof overrides.profileDir === 'string' && overrides.profileDir !== ''
+    ? overrides.profileDir
+    : resolveProfileDir()
+  if (profileDir === null) return failed('the profile directory could not be resolved')
+  const maxBackups = Number(config.maxBackups)
+  let result = null
+  try {
+    result = await createBackup({
+      profileDir,
+      backupsDir,
+      // CONFIGURATION ONLY. The seed exists so a fresh installation has
+      // something to roll back to at once; the plugin tree (the 117 MB part)
+      // comes with the snapshot of the first restart, which is promoted to
+      // known-good as soon as that restart proves it boots.
+      includePlugins: false,
+      maxBackups: Number.isFinite(maxBackups) && maxBackups >= 1 ? Math.trunc(maxBackups) : DEFAULT_MAX_BACKUPS,
+      kind: KIND_KNOWN_GOOD,
+      reason: 'first-install',
+      version: runtime.pluginVersion ?? PLUGIN_VERSION_FALLBACK,
+      bootId: runtime.bootId ?? null,
+    })
+  } catch (error) {
+    return failed(error && error.message ? error.message : String(error))
+  }
+  if (!result || result.ok !== true || typeof result.dir !== 'string' || result.dir === '') {
+    return failed(result && result.error ? result.error : 'the safe copy was not written')
+  }
+  return record({
+    result: 'seeded',
+    at: Date.now(),
+    dir: result.dir,
+    bytes: Number.isFinite(result.bytes) ? result.bytes : null,
+    error: null,
+  })
 }
 
 /**
@@ -4132,6 +4231,13 @@ const titleOfSummary = (item) => {
           })
           if (confirmed && confirmed.ok === true) {
             log.warn('the new instance answered its health route:', confirmed)
+            // THE SNAPSHOT HAS PROVEN ITSELF: this restart came up, so the copy
+            // taken before it is the one a failed boot may be rolled back to
+            // (user decision, 2026-10-30).
+            if (backup && typeof backup.dir === 'string' && backup.dir !== '') {
+              const promoted = markKnownGood(backup.dir, { reason: 'boot-ok' })
+              log.info('the snapshot of this restart is now known-good', { dir: backup.dir, promoted })
+            }
             writeRestartOutcome({ decided: true, ok: true, reason: 'the new instance answered' })
             recordRestartVerdict({
               result: RESTART_RESULTS.OK,
@@ -5625,6 +5731,16 @@ export async function verifyRestartBoot(runtime, options = {}) {
   if (record !== null) {
     if (evaluated.ok) {
       log.warn('the new instance verified itself:', { durationMs: record.durationMs, checks })
+      // THIS SNAPSHOT HAS NOW PROVEN IT BOOTS: the restart it belongs to came
+      // up, so it is the copy a failed boot may be rolled back to (user
+      // decision, 2026-10-30). A FAILED boot never promotes anything.
+      const snapshotDir = pending && pending.snapshot && typeof pending.snapshot.dir === 'string'
+        ? pending.snapshot.dir
+        : ''
+      if (snapshotDir !== '') {
+        const promoted = markKnownGood(snapshotDir, { reason: 'boot-ok' })
+        log.info('the snapshot of this restart is now known-good', { dir: snapshotDir, promoted })
+      }
     } else {
       log.error('the new instance did NOT come up cleanly:', {
         durationMs: record.durationMs,
@@ -8212,6 +8328,10 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // The copy progress on its own as well, so a client that only wants
             // the numbers does not have to walk the stage object.
             progress: stage.progress,
+            // THE FIRST SAFE COPY: what happened when this machine looked for a
+            // known-good backup and found none (user decision, 2026-10-30).
+            // Absent when nothing was ever tried, so an old client sees no change.
+            ...(live.firstInstallBackup ? { firstInstallBackup: live.firstInstallBackup } : {}),
             updatedAt: live.updatedAt,
             // The park route, so the client never has to guess the prefix, and
             // the goals this plugin already disarmed (they are re-armed after
@@ -8409,6 +8529,10 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
         // out there; it must be visible from outside the process, not only in
         // a log line nobody reads.
         watchdog: summarizeDisarm(runtime.watchdogDisarm),
+        // THE FIRST SAFE COPY: what happened when this machine looked for a
+        // known-good backup and found none (user decision, 2026-10-30). Absent
+        // when nothing was ever tried.
+        ...(state.firstInstallBackup ? { firstInstallBackup: state.firstInstallBackup } : {}),
         // THE RESTART STAGE, read from the health route as well: a script (or a
         // user watching the console) can tell "waiting" from "backing up 120 MB
         // of 156 MB" without opening the interface.
@@ -8703,6 +8827,14 @@ export function apply(ctx, rawConfig, options = {}) {
     // (user report, 2026-10-29: a card that never went away).
     runtime.resetStaleStage('plugin reload')
   }
+
+  // THE FIRST SAFE COPY (user decision, 2026-10-30): a machine that has never
+  // restarted has nothing a failed boot could roll back to, so a NEW host
+  // process seeds one known-good copy. A reload seeds nothing, and the seed is
+  // fire-and-forget: the boot path never waits for a 117 MB copy.
+  void seedFirstInstallBackup(runtime, config).catch((error) => {
+    log.warn('the first-install safe copy failed:', String(error))
+  })
 
   trackAgents(ctx, runtime, config)
 

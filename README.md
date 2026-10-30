@@ -358,7 +358,7 @@ show up in the Plugin Manager and in the config editor.
 | `continuationText` | `''` | Overrides the default continuation prompt text. |
 | `backupOnRestart` | `true` | Snapshot the profile before every restart, so a restart that leaves the host unable to boot can be rolled back. |
 | `backupIncludePlugins` | `true` | Include the installed plugin tree in that snapshot (about 117 MB here, ~3 s). `false` keeps only the configuration files. |
-| `maxBackups` | `2` | How many snapshots are kept; older ones are deleted when a new one is written. |
+| `maxBackups` | `3` | How many snapshots are kept (the current one plus the two before it); older ones are deleted when a new one is written — **except the newest known-good copy, which is never deleted**. |
 | `rollbackTimeoutMs` | `90000` | How long the detached watcher waits for the new host before it restores the snapshot. |
 | `restartCommandTimeoutMs` | `30000` | How long the restart command may run before the plugin stops waiting for it. A command that starts the host in the foreground never returns — that is reported as "still running", not as a failure. |
 | `rollbackCopyTimeoutMs` | `120000` | How long ONE restore step (the configuration files, then the plugin tree) may take. A restore that does not finish in time is given up and the reason is written into the rollback report. |
@@ -552,8 +552,9 @@ it was started from, so a restart that leaves the host unable to boot can be und
   `backupIncludePlugins` is turned off — the installed plugin tree (`node_modules`). Snapshots live in
   `<storage>/dsh-autorestart/backups/<timestamp>/` with a `manifest.json` next to them. On a profile
   like this one the full snapshot measures about 117 MB and takes under three seconds.
-- **How many are kept:** the newest `maxBackups` snapshots (default `2`); older ones are deleted when
-  a new one is written.
+- **How many are kept:** the newest `maxBackups` snapshots (default `3`: the current one plus the two
+  before it); older ones are deleted when a new one is written. The newest **known-good** copy is
+  never deleted, whatever the limit says — it is the only thing a failed boot can roll back to.
 - **How a failed boot is detected:** a small watcher runs **outside** the host process (so it survives
   the host being killed). It waits for the **new** instance and probes **its** health route for
   `rollbackTimeoutMs` (default `90000`). The new instance publishes its own port and its own boot id

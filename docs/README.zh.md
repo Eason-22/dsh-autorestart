@@ -148,7 +148,7 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 - 拷回本身也有**时间上限**（`rollbackCopyTimeoutMs`，默认 120 秒/步）：拷不完就放弃，并把原因写进报告。
 - **托管模式（`restartMode: command`）也有同一张安全网**：重启命令通常会把插件自己所在的进程一起杀掉，所以看护脚本在命令**之前**就启动了，由它来确认新实例有没有起来。命令起不来或以非零码退出时，插件**如实报错**（带退出码和输出）并把快照拷回去，绝不静默当成功。
 - 下次启动时 `continuum_status` 会报 `lastRollback`（时间、等了多久、是否回滚、**失败原因**、快照路径、崩溃日志名与尾部摘要）。
-- 开关：`backupOnRestart`（默认 `true`）、`backupIncludePlugins`（默认 `true`，关掉就只备配置文件）、`maxBackups`（默认 `2`）、`rollbackTimeoutMs`（默认 `90000`）、`restartCommandTimeoutMs`（默认 `30000`）、`rollbackCopyTimeoutMs`（默认 `120000`）。
+- 开关：`backupOnRestart`（默认 `true`）、`backupIncludePlugins`（默认 `true`，关掉就只备配置文件）、`maxBackups`（默认 `3`：当前一份 + 之前两份；**最新的 known-good 永远不删**）、`rollbackTimeoutMs`（默认 `90000`）、`restartCommandTimeoutMs`（默认 `30000`）、`rollbackCopyTimeoutMs`（默认 `120000`）。
 
 ### 这台电脑不让建计划任务时（自动回滚就没了）
 
@@ -407,7 +407,7 @@ dsh plugin --profile desktop add C:\path\to\dsh-autorestart
 | `continuationText` | `''` | 覆盖默认续接提示文本 |
 | `backupOnRestart` | `true` | 每次重启前给 profile 拍快照；重启后起不来时能自动回退 |
 | `backupIncludePlugins` | `true` | 快照里是否带上已安装插件目录（本机约 117 MB、多约 3 秒）；关掉就只备配置文件 |
-| `maxBackups` | `2` | 保留几份快照；写新的时自动删旧的 |
+| `maxBackups` | `3` | 保留几份快照（当前一份 + 之前两份）；写新的时自动删旧的——但**最新的 known-good 一份永远不删** |
 | `rollbackTimeoutMs` | `90000` | 看护脚本等新宿主多久（毫秒），超时就回退快照（**不会再拉起第二个宿主**） |
 | `restartCommandTimeoutMs` | `30000` | 重启命令最多让插件等多久（毫秒）。前台跑着宿主的命令永远不返回——那会报「还在运行」，不算失败 |
 | `rollbackCopyTimeoutMs` | `120000` | 拷回快照的**每一步**最多花多久（毫秒）：拷不完就放弃，并把原因写进回退报告 |

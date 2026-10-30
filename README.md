@@ -300,12 +300,23 @@ Two blocks of the settings page are worth a word, because they show facts instea
   one, its size, whether the installed plugins are in it and where it lives are all real. Only
   the directory metadata is read — the contents are never walked (one copy can be 150 MB). With no
   backup at all it says: "No backup yet; one is written before every restart."
-  Every copy is **two labelled rows**, so nothing runs into anything else:
+  Every copy leads with **what it is** — its identity — so the list answers the only question that
+  matters ("may this one be restored?"), then two labelled rows, so nothing runs into anything else:
 
   ```
+  Identity  Known good · version 0.8.5
   Backup time 2026-10-29 22:08
   Backup size 156 MB (plugins included)
   ```
+
+  The identity is one of **known good** (a copy a boot has already proven — the only kind an automatic
+  rollback may restore), **this restart's snapshot** (taken right before a restart and not proven yet)
+  or **old backup (unverified)** (written before the identity layer existed, or without an identity
+  file — shown, never rolled back automatically). A short paragraph above the list says the same in
+  plain words, plus the rules behind it (only a known-good copy is rolled back, the first install
+  seeds one, at most three copies are kept, a manual rollback asks for confirmation and then
+  restarts). The identity and the version it was proven with come from the Host
+  (`backups.items[].kind` / `backups.items[].version`) — the browser cannot read `meta.json`.
 
   The time is the local clock of the machine that took the copy, **to the minute and with no
   timezone offset** (a `+08:00` only adds noise — the reader is looking at their own clock). The
@@ -552,6 +563,17 @@ it was started from, so a restart that leaves the host unable to boot can be und
   `backupIncludePlugins` is turned off — the installed plugin tree (`node_modules`). Snapshots live in
   `<storage>/dsh-autorestart/backups/<timestamp>/` with a `manifest.json` next to them. On a profile
   like this one the full snapshot measures about 117 MB and takes under three seconds.
+- **The rollback target is the newest PROVEN copy, not the newest copy** (user decision,
+  2026-10-30). Every copy carries its identity in a `meta.json`: `known-good` (a copy a boot has
+  already survived), `snapshot` (taken right before a restart, not proven yet) or `unknown` (written
+  before the identity layer). The snapshot taken right before THIS restart is never the rollback
+  target — it may be the broken state itself (that is exactly the "I edited a plugin and clicked
+  restart" case). The first install seeds one known-good copy, and every boot that passes its health
+  check promotes the snapshot of that restart to known-good.
+- **No known-good copy, no restore at all.** When nothing has been proven yet, the plugin restores
+  nothing and says why: the report carries `no-known-good: <reason>`, the profile is left exactly as
+  the failed restart left it, and no watcher is armed (a watcher with nothing to restore would only
+  write the broken state back).
 - **How many are kept:** the newest `maxBackups` snapshots (default `3`: the current one plus the two
   before it); older ones are deleted when a new one is written. The newest **known-good** copy is
   never deleted, whatever the limit says — it is the only thing a failed boot can roll back to.

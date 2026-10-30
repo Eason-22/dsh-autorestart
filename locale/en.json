@@ -204,7 +204,15 @@
       "time": "Backup time",
       "size": "Backup size",
       "withPlugins": "(plugins included)",
-      "withoutPlugins": "(plugins excluded)"
+      "withoutPlugins": "(plugins excluded)",
+      "kindLabel": "Identity",
+      "kind": {
+        "known-good": "Known good",
+        "snapshot": "This restart's snapshot",
+        "unknown": "Old backup (unverified)"
+      },
+      "version": "version {v}",
+      "identityHint": "A backup has one of two identities: ① “known good” — the copy a boot has proven; when something breaks, only a known-good copy is rolled back, and the first install creates one automatically. ② “this restart's snapshot” — taken right before every restart and not proven yet; old backups (unverified) and that snapshot are never rolled back automatically. At most {n} copies are kept together (the oldest goes first; a known-good copy is never deleted). A manual rollback asks for confirmation first, then restarts."
     },
     "backupPlugins": {
       "label": "Include the installed plugins in the backup",

@@ -23,7 +23,8 @@ import path from 'node:path'
 import test from 'node:test'
 import vm from 'node:vm'
 
-import { listBackups } from '../lib/backup.js'
+import { createRuntime, normalizeConfig } from '../index.js'
+import { backupsRoot, listBackups, writeBackupMeta } from '../lib/backup.js'
 
 /* ------------------------------------------------------------------ *
  * A tiny React stand-in and the client harness.
@@ -609,6 +610,216 @@ test('two backups are two spaced groups, each with a labelled time row and size 
   const spacing = /\.dsh-autorestart-settings__backup \+ \.dsh-autorestart-settings__backup\{margin-top:(\d+)px;\}/.exec(style.text)
   assert.ok(spacing, `two groups must be spaced on purpose: ${style.text.slice(0, 400)}`)
   assert.ok(Number(spacing[1]) >= 8, `the gap between two backups must be at least 8px: ${spacing[0]}`)
+})
+
+/* ------------------------------------------------------------------ *
+ * THE IDENTITY OF EVERY COPY (user decision, 2026-10-30).
+ *
+ * Only a copy a boot has PROVEN may be rolled back to, so the list cannot
+ * stop at "one more timestamp": every copy says WHAT it is. The identity comes
+ * from the Host (the browser cannot read meta.json), and the words on the row
+ * only mean something next to the rule — hence the paragraph above the list.
+ * ------------------------------------------------------------------ */
+
+/** The three identities as the Host reports them, newest first. */
+function threeIdentities() {
+  const dir = 'C:\\Users\\fg\\.dsh\\storages\\dsh-autorestart\\backups'
+  return {
+    dir,
+    max: 3,
+    count: 3,
+    items: [
+      {
+        name: '2026-10-30T01-00-00-000Z',
+        dir: dir + '\\2026-10-30T01-00-00-000Z',
+        at: 1793325600000,
+        atLocal: '2026-10-30T09:00:00+08:00',
+        bytes: 163577856,
+        files: 42,
+        includePlugins: true,
+        kind: 'known-good',
+        version: '0.8.5',
+      },
+      {
+        name: '2026-10-29T01-00-00-000Z',
+        dir: dir + '\\2026-10-29T01-00-00-000Z',
+        at: 1793239200000,
+        atLocal: '2026-10-29T09:00:00+08:00',
+        bytes: 163577856,
+        files: 42,
+        includePlugins: true,
+        kind: 'snapshot',
+        version: null,
+      },
+      {
+        name: '2026-10-28T01-00-00-000Z',
+        dir: dir + '\\2026-10-28T01-00-00-000Z',
+        at: 1793152800000,
+        atLocal: '2026-10-28T09:00:00+08:00',
+        bytes: 94208,
+        files: 3,
+        includePlugins: false,
+        kind: 'unknown',
+        version: null,
+      },
+    ],
+  }
+}
+
+/** A Cordis context just big enough for `createRuntime`. */
+function hostContext() {
+  return {
+    logger: Object.assign(() => undefined, { info: () => {}, warn: () => {}, error: () => {} }),
+    agents: { list: () => [], roots: () => [], get: () => undefined },
+    goals: {
+      get: () => undefined,
+      disarm: () => undefined,
+      pause: () => undefined,
+      resume: () => undefined,
+    },
+    tools: { register: () => () => {}, guard: () => () => {} },
+    get: () => undefined,
+    on: () => () => {},
+    effect: (fn) => {
+      const disposer = fn()
+      return () => {
+        if (typeof disposer === 'function') disposer()
+      }
+    },
+    interval: () => () => {},
+    timeout: () => () => {},
+    provide: () => {},
+    emit: () => {},
+  }
+}
+
+/** One copy on disk: a manifest and the identity the Host resolves. */
+function identityCopy(backups, stamp, { kind, version = null, bytes = 1024 } = {}) {
+  const dir = path.join(backups, stamp)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify({
+    at: 1793325600000,
+    atLocal: '2026-10-30T09:00:00+08:00',
+    bytes,
+    files: ['cordis.patch.yml'],
+    includePlugins: false,
+  }), 'utf8')
+  if (kind !== undefined) {
+    assert.equal(writeBackupMeta(dir, { kind, at: 1793325600000, version }), true, 'the identity is written')
+  }
+  return dir
+}
+
+test('① every copy reports its own kind — known-good, snapshot or unknown', async (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-ar-kinds-'))
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }))
+  const stateFile = path.join(base, 'state.json')
+  const backups = backupsRoot(base)
+  fs.mkdirSync(backups, { recursive: true })
+  // Newest first on disk, one copy per identity — and the oldest one has NO
+  // meta.json at all, which is exactly what a copy from before the identity
+  // layer looks like.
+  identityCopy(backups, '2026-10-30T01-00-00-000Z', { kind: 'known-good', version: '0.8.5' })
+  identityCopy(backups, '2026-10-29T01-00-00-000Z', { kind: 'snapshot' })
+  identityCopy(backups, '2026-10-28T01-00-00-000Z', {})
+
+  const runtime = createRuntime(hostContext(), normalizeConfig({ stateFile, backupOnRestart: true, maxBackups: 3 }), {
+    env: { isDesktopApp: false, appExePath: null },
+  })
+  const info = runtime.backupsInfo()
+  assert.equal(info.count, 3, 'all three copies are listed')
+  assert.deepEqual(
+    info.items.map((item) => item.kind),
+    ['known-good', 'snapshot', 'unknown'],
+    'each copy carries the identity it really has — never a guess',
+  )
+  assert.equal(info.items[0].version, '0.8.5', 'the version the known-good copy was proven with')
+  assert.equal(info.items[1].version, null, 'a snapshot was proven with nothing')
+  assert.equal(info.items[2].version, null, 'an old copy carries no version')
+  for (const item of info.items) {
+    assert.equal(typeof item.dir, 'string', 'the interface still gets the path')
+    assert.equal(typeof item.bytes, 'number', 'and the size')
+    assert.equal(typeof item.at, 'number', 'and the time')
+  }
+})
+
+test('② the three identities are written out in plain Chinese on every row', async () => {
+  const mounted = mountSettings({
+    info: {
+      instance: { isDesktopApp: true, platform: 'win32' },
+      supervisor: { mode: 'app', installed: false, startup: { mode: 'desktop' } },
+      backups: threeIdentities(),
+    },
+  })
+  const panel = await mounted.settled('dsh-autorestart')
+  assert.deepEqual(
+    backupValues(panel, 'kind'),
+    ['安全份', '本次快照', '旧备份（未验证）'],
+    'the user reads what each copy is, in that order',
+  )
+  assert.deepEqual(
+    backupValues(panel, 'version'),
+    ['版本 0.8.5'],
+    'the version is shown where it exists — and only there',
+  )
+  // The identity leads the group: it decides whether the copy may be restored
+  // at all, so it must not be buried under the numbers.
+  const groups = marked(panel, 'data-dsh-autorestart-backup').filter(
+    (node) => node.props['data-dsh-autorestart-backup'] === 'item',
+  )
+  assert.equal(groups.length, 3, 'three copies, three groups')
+  for (const [index, group] of groups.entries()) {
+    const first = walk(group).find((node) => node.props && node.props['data-dsh-autorestart-backup'] === 'kind')
+    assert.ok(first, `backup ${index + 1} names its identity`)
+    const rows = walk(group).filter((node) => node.props
+      && String(node.props.className).includes('dsh-autorestart-settings__backup-row'))
+    assert.equal(rows.length, 2, `backup ${index + 1} keeps the time row and the size row`)
+  }
+})
+
+test('③ the paragraph above the list spells out the rules: 3 copies, only known-good is rolled back', async () => {
+  const mounted = mountSettings({
+    info: {
+      instance: { isDesktopApp: true, platform: 'win32' },
+      supervisor: { mode: 'app', installed: false, startup: { mode: 'desktop' } },
+      backups: threeIdentities(),
+    },
+  })
+  const panel = await mounted.settled('dsh-autorestart')
+  const hint = marked(panel, 'data-dsh-autorestart-backup').filter(
+    (node) => node.props['data-dsh-autorestart-backup'] === 'identity-hint',
+  )
+  assert.equal(hint.length, 1, 'the explanation exists exactly once')
+  const text = textOf(hint[0])
+  assert.ok(text.includes('保留 3 份'), `the retention rule is stated with the real number: ${text}`)
+  assert.ok(text.includes('只会回滚安全份'), `only a known-good copy is rolled back: ${text}`)
+  assert.ok(text.includes('第一次安装'), 'the first install seeds a known-good copy')
+  assert.ok(text.includes('旧备份（未验证）'), 'an old copy is never rolled back automatically')
+  assert.ok(text.includes('二次确认'), 'a manual rollback asks first')
+  assert.ok(text.includes('重启'), 'and then restarts')
+})
+
+test('④ the identities speak English too, and the paragraph follows the language', async () => {
+  const mounted = mountSettings({
+    language: 'en',
+    info: {
+      instance: { isDesktopApp: true, platform: 'win32' },
+      supervisor: { mode: 'app', installed: false, startup: { mode: 'desktop' } },
+      backups: threeIdentities(),
+    },
+  })
+  const panel = await mounted.settled('dsh-autorestart')
+  assert.deepEqual(
+    backupValues(panel, 'kind'),
+    ['Known good', "This restart's snapshot", 'Old backup (unverified)'],
+    'the English user reads the same three identities',
+  )
+  const hint = marked(panel, 'data-dsh-autorestart-backup').filter(
+    (node) => node.props['data-dsh-autorestart-backup'] === 'identity-hint',
+  )
+  const text = textOf(hint[0])
+  assert.ok(text.includes('known-good copy is rolled back'), `only known-good in English: ${text}`)
+  assert.ok(text.includes('3 copies'), `the retention rule in English: ${text}`)
 })
 
 test('the backup list speaks English too', async () => {

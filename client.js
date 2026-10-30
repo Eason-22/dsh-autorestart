@@ -379,6 +379,14 @@
     'settings.backup.size': '备份大小',
     'settings.backup.withPlugins': '（含已装插件）',
     'settings.backup.withoutPlugins': '（不含已装插件）',
+    // WHAT a copy is (user decision, 2026-10-30). Only a proven copy may be
+    // rolled back to, so the identity is said in plain words on every row.
+    'settings.backup.kindLabel': '身份',
+    'settings.backup.kind.known-good': '安全份',
+    'settings.backup.kind.snapshot': '本次快照',
+    'settings.backup.kind.unknown': '旧备份（未验证）',
+    'settings.backup.version': '版本 {v}',
+    'settings.backup.identityHint': '备份有两种身份：①「安全份」——启动成功后验证过的那一份，出问题只会回滚安全份；第一次安装时会自动生成一份。②「本次快照」——每次重启前刚拍的，还没验证过；旧备份（未验证）和它都不会被自动回滚。两类合计最多保留 {n} 份，超出删最旧的那份（安全份不会被删）。手动回退会先二次确认，然后重启。',
     'settings.groups.report': '报告问题',
     'settings.groups.rescue': '出事了怎么办',
     'settings.rescue.hint': 'DSH 打不开的时候，用下面这两个脚本救自己（都不用 DSH 跑起来）。',
@@ -734,6 +742,14 @@
     'settings.backup.size': 'Backup size',
     'settings.backup.withPlugins': '(plugins included)',
     'settings.backup.withoutPlugins': '(plugins excluded)',
+    // WHAT a copy is (user decision, 2026-10-30). Only a proven copy may be
+    // rolled back to, so the identity is said in plain words on every row.
+    'settings.backup.kindLabel': 'Identity',
+    'settings.backup.kind.known-good': 'Known good',
+    'settings.backup.kind.snapshot': "This restart's snapshot",
+    'settings.backup.kind.unknown': 'Old backup (unverified)',
+    'settings.backup.version': 'version {v}',
+    'settings.backup.identityHint': 'A backup has one of two identities: ① “known good” — the copy a boot has proven; when something breaks, only a known-good copy is rolled back, and the first install creates one automatically. ② “this restart\'s snapshot” — taken right before every restart and not proven yet; old backups (unverified) and that snapshot are never rolled back automatically. At most {n} copies are kept together (the oldest goes first; a known-good copy is never deleted). A manual rollback asks for confirmation first, then restarts.',
     'settings.groups.report': 'Report a problem',
     'settings.groups.rescue': 'If DSH will not start',
     'settings.rescue.hint': 'When DSH does not come up, these two scripts rescue it for you (neither of them needs DSH running).',
@@ -2097,6 +2113,34 @@
       return (Number.isInteger(scaled) ? String(scaled) : scaled.toFixed(1)) + ' ' + unit.suffix
     }
     return Math.round(value) + ' B'
+  }
+
+  /**
+   * WHAT A COPY IS — the identity word of the interface.
+   *
+   * Only a copy a boot has PROVEN may be rolled back to ("安全份" / known-good).
+   * The snapshot of a restart is not proven yet ("本次快照"), and a copy without
+   * an identity file was written before the identity layer ("旧备份（未验证）").
+   * An unknown word is shown as unproven on purpose: never claim more than the
+   * copy itself says.
+   *
+   * @param {string|null|undefined} kind
+   * @returns {'known-good'|'snapshot'|'unknown'}
+   */
+  function backupKindKey(kind) {
+    if (kind === 'known-good') return 'known-good'
+    if (kind === 'snapshot') return 'snapshot'
+    return 'unknown'
+  }
+
+  /**
+   * The version a copy was proven with, or an empty string when it carries none.
+   *
+   * @param {object|null|undefined} item one backup of the state payload
+   * @returns {string}
+   */
+  function backupVersionOf(item) {
+    return item && typeof item.version === 'string' && item.version !== '' ? item.version : ''
   }
 
   /**
@@ -5188,6 +5232,20 @@
         '  line-height:18px;',
         '  color:var(--dsw-alias-label-secondary);',
         '}',
+        // WHAT a copy is (user decision, 2026-10-30): the identity is the first
+        // thing read on a row, so it sits on its own line and is not muted.
+        '.dsh-autorestart-settings__backup-identity{',
+        '  display:flex;',
+        '  flex-wrap:wrap;',
+        '  gap:8px;',
+        '  align-items:baseline;',
+        '}',
+        '.dsh-autorestart-settings__backup-badge{',
+        '  font-size:13px;',
+        '  line-height:18px;',
+        '  font-weight:600;',
+        '  color:var(--dsw-alias-label-primary);',
+        '}',
         // The folded "technical details": the command itself stays out of the
         // way until somebody asks for it.
         '.dsh-autorestart-settings__details{',
@@ -6227,6 +6285,15 @@
                 { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-backup': 'keep' },
                 fill(t('settings.backup.keep'), { n: backupsInfo.max }),
               ),
+              // WHAT THE TWO IDENTITIES MEAN (user decision, 2026-10-30): the
+              // words on the rows below are useless without the rule behind
+              // them — only a proven copy is ever rolled back, and a manual
+              // rollback asks before it restarts.
+              h(
+                'span',
+                { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-backup': 'identity-hint' },
+                fill(t('settings.backup.identityHint'), { n: backupsInfo.max }),
+              ),
               backupItems.length === 0
                 ? h(
                     'span',
@@ -6241,6 +6308,35 @@
                   'data-dsh-autorestart-backup': 'item',
                   key: 'backup-' + index,
                 },
+                // WHAT THIS COPY IS — read first, because the identity decides
+                // whether this copy may be restored at all.
+                h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__backup-identity' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__backup-label' },
+                    t('settings.backup.kindLabel'),
+                  ),
+                  h(
+                    'span',
+                    {
+                      className: 'dsh-autorestart-settings__backup-badge',
+                      'data-dsh-autorestart-backup': 'kind',
+                    },
+                    t('settings.backup.kind.' + backupKindKey(item && item.kind)),
+                  ),
+                  backupVersionOf(item) === ''
+                    ? null
+                    : h(
+                      'span',
+                      {
+                        className: 'dsh-autorestart-settings__backup-note',
+                        'data-dsh-autorestart-backup': 'version',
+                      },
+                      fill(t('settings.backup.version'), { v: backupVersionOf(item) }),
+                    ),
+                ),
                 // WHEN it was taken. No timezone offset: what is shown is
                 // already the local clock of the machine that took the copy.
                 h(

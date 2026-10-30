@@ -80,6 +80,7 @@ import {
   DEFAULT_MAX_BACKUPS,
   KIND_KNOWN_GOOD,
   latestKnownGood,
+  listBackupIdentities,
   listBackups,
   markKnownGood,
   readManifest,
@@ -3112,11 +3113,17 @@ const titleOfSummary = (item) => {
    * even see the disk. Only the DIRECTORY is read — the manifest of every
    * copy — because one copy can be 150 MB and its contents are never walked.
    *
+   * WHAT EACH COPY IS travels with it (user decision, 2026-10-30): only a copy
+   * a boot has proven is a rollback target (`known-good`), the snapshot of a
+   * restart is not (`snapshot`), and a copy without an identity file was never
+   * proven (`unknown`). The browser cannot read `meta.json`, so the identity is
+   * resolved HERE and handed to the interface with the numbers.
+   *
    * @returns {{ dir: string, max: number, count: number, items: Array<object> }}
    */
   const backupsInfo = () => {
     const dir = backupsDirFor(stateDirOf())
-    const items = listBackups(dir).map((item) => ({
+    const items = listBackupIdentities(dir).map((item) => ({
       name: item.name,
       dir: item.dir,
       at: item.at,
@@ -3124,6 +3131,10 @@ const titleOfSummary = (item) => {
       bytes: item.bytes,
       files: item.files,
       includePlugins: item.includePlugins,
+      // 'known-good' | 'snapshot' | 'unknown' — never a guess: it is the
+      // identity the copy itself carries.
+      kind: item.kind,
+      version: item.version,
     }))
     return {
       dir,

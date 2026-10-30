@@ -211,6 +211,14 @@ function mountClient({ health = {}, language = 'zh' } = {}) {
   const dictionaries = {}
   const slots = new Map()
   const pollers = []
+  // The cadence of every timer the store armed, in order: the tests read the last
+  // one (2 s normally, 500 ms while a restart is moving).
+  const periods = []
+  const fetches = { count: 0 }
+  // A held answer: while it is set, the next request stays in flight.
+  let heldAnswer = null
+  // The document listeners the client binds (visibilitychange).
+  const docListeners = {}
   const state = { health: { ...health } }
 
   const sandbox = {
@@ -230,16 +238,29 @@ function mountClient({ health = {}, language = 'zh' } = {}) {
       createElement: (tag) => ({ tag, id: '', textContent: '', parentNode: null, setAttribute: () => {}, appendChild: () => {} }),
       head: { appendChild: (node) => node, removeChild: () => {} },
       querySelector: () => null,
-      addEventListener: () => {},
+      hidden: false,
+      visibilityState: 'visible',
+      addEventListener: (type, handler) => {
+        docListeners[type] = handler
+      },
       removeEventListener: () => {},
     },
-    fetch: () => Promise.resolve({ ok: true, status: 200, json: async () => state.health }),
+    fetch: () => {
+      fetches.count += 1
+      const answer = { ok: true, status: 200, json: async () => state.health }
+      if (heldAnswer !== null) return heldAnswer.then(() => answer)
+      return Promise.resolve(answer)
+    },
     console,
     setTimeout,
     clearTimeout,
     // The shared poll: its interval callback is kept, so a test can move the
     // Host on (a restart does not stand still while a page watches it).
-    setInterval: (fn) => { pollers.push(fn); return pollers.length },
+    setInterval: (fn, ms) => {
+      pollers.push(fn)
+      periods.push(ms)
+      return pollers.length
+    },
     clearInterval: () => {},
     AbortController,
   }
@@ -308,6 +329,35 @@ function mountClient({ health = {}, language = 'zh' } = {}) {
     },
     /** Render without waiting for the poll (the timer tests need the same tree). */
     render: (id, props) => harness.render(componentOf(id), props || {}),
+    /** The cadence of the LAST timer the shared poll armed (ms). */
+    lastPeriod: () => (periods.length === 0 ? 0 : periods[periods.length - 1]),
+    /** Every cadence it ever armed (the tests check the transitions). */
+    periods: () => periods.slice(),
+    /** How many state requests were made. */
+    fetchCount: () => fetches.count,
+    /** Hide or show the page (the browser sets document.hidden). */
+    setHidden: (value) => {
+      sandbox.document.hidden = value === true
+      sandbox.document.visibilityState = value === true ? 'hidden' : 'visible'
+    },
+    /** Fire the visibilitychange the browser would fire. */
+    fireVisibility: () => {
+      const handler = docListeners.visibilitychange
+      if (typeof handler === 'function') handler()
+    },
+    /** Hold the next answer in flight; the returned function releases it. */
+    holdFetch: () => {
+      let release = null
+      heldAnswer = new Promise((resolve) => {
+        release = resolve
+      })
+      return () => {
+        const pending = heldAnswer
+        heldAnswer = null
+        if (pending !== null) release()
+        return pending
+      }
+    },
   }
 }
 
@@ -1009,3 +1059,94 @@ test('the downgrade is visible on the very next render', async () => {
   assert.match(copy, /重启已暂缓/, `the card flips at once: ${copy}`);
   assert.doesNotMatch(copy, /正在重启/, `and the old word does not survive a single frame: ${copy}`);
 })
+
+/* ------------------------------------------------------------------ *
+ * 15. THE POLL FOLLOWS THE STATE: 500 ms while a restart is moving.
+ *
+ * THE REASON (owner's instruction, 2026-10-30): the card now changes its words
+ * the moment the host postpones a restart — but a 2 s cadence still means up to
+ * two seconds of the old word on screen. While a restart is moving the state is
+ * asked four times as often; the moment it is over the shared poll goes back to
+ * its ordinary pace, and a hidden tab asks nothing at all.
+ * ------------------------------------------------------------------ */
+
+test('the cadence is 500 ms while a restart is moving and 2 s otherwise (pure)', () => {
+  const api = globalThis.__dshAutorestartClient;
+  assert.equal(api.POLL_MS, 2000, 'the ordinary cadence is 2 s');
+  assert.equal(api.POLL_FAST_MS, 500, 'the fast one is 500 ms');
+
+  assert.equal(api.pollIntervalFor(statePayload({ phase: 'waiting' })), 500, 'a queued restart is moving');
+  assert.equal(api.pollIntervalFor(statePayload({ phase: 'snapshotting' })), 500);
+  assert.equal(api.pollIntervalFor(statePayload({ phase: 'restarting' })), 500);
+  // The postponed restart is a 'waiting' stage too: that is the state the user
+  // must see within a second.
+  assert.equal(api.pollIntervalFor(statePayload({ phase: 'waiting', reason: 'deferred: conversation-active' })), 500);
+
+  // Nothing moving: the ordinary pace.
+  assert.equal(api.pollIntervalFor(statePayload({ phase: 'waiting', pendingRestart: false })), 2000);
+  assert.equal(api.pollIntervalFor(statePayload({ phase: 'back', pendingRestart: false })), 2000);
+  assert.equal(api.pollIntervalFor(statePayload({ phase: 'restarting', pendingRestart: false })), 2000);
+  assert.equal(api.pollIntervalFor(null), 2000);
+
+  assert.equal(api.isRestartMoving(statePayload({ phase: 'snapshotting' })), true);
+  assert.equal(api.isRestartMoving(statePayload({ phase: 'snapshotting', pendingRestart: false })), false);
+});
+
+test('a restart in progress speeds the poll up to 500 ms, the end puts it back to 2 s', async () => {
+  const mounted = mountClient({ health: statePayload({ phase: 'waiting', pendingRestart: false }) });
+  await mounted.settled('autorestart-restart-overlay');
+  assert.equal(mounted.lastPeriod(), 2000, 'an idle page asks every 2 s');
+
+  // The restart is requested: the stage is 'waiting' and something will happen.
+  mounted.setHealth(statePayload({ phase: 'waiting' }));
+  await mounted.poll('autorestart-restart-overlay');
+  assert.equal(mounted.lastPeriod(), 500, 'a queued restart is watched closely');
+
+  mounted.setHealth(statePayload({ phase: 'snapshotting', progress: { bytes: 1024, total: 4096, percent: 25 } }));
+  await mounted.poll('autorestart-restart-overlay');
+  assert.equal(mounted.lastPeriod(), 500, 'the copy is watched as closely');
+
+  mounted.setHealth(statePayload({ phase: 'restarting' }));
+  await mounted.poll('autorestart-restart-overlay');
+  assert.equal(mounted.lastPeriod(), 500, 'and so is the kill');
+
+  // The restart is over (the page came back / it was withdrawn): ordinary pace.
+  mounted.setHealth(statePayload({ phase: 'back', pendingRestart: false }));
+  await mounted.poll('autorestart-restart-overlay');
+  assert.equal(mounted.lastPeriod(), 2000, 'the end puts the shared poll back to 2 s');
+});
+
+test('a hidden page asks nothing, and asks again the moment it is visible', async () => {
+  const mounted = mountClient({ health: statePayload({ phase: 'restarting' }) });
+  await mounted.settled('autorestart-restart-overlay');
+  const before = mounted.fetchCount();
+  assert.ok(before > 0, 'the first fetch happened');
+
+  mounted.setHidden(true);
+  // The browser keeps firing the timer; the store must not spend a request.
+  await mounted.poll('autorestart-restart-overlay');
+  await mounted.poll('autorestart-restart-overlay');
+  assert.equal(mounted.fetchCount(), before, 'no request while the page is hidden');
+
+  mounted.setHidden(false);
+  mounted.fireVisibility();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(mounted.fetchCount() > before, 'coming back on screen asks at once');
+});
+
+test('one request at a time: a slow answer is never stacked up', async () => {
+  const mounted = mountClient({ health: statePayload({ phase: 'restarting' }) });
+  await mounted.settled('autorestart-restart-overlay');
+  const before = mounted.fetchCount();
+
+  const release = mounted.holdFetch();
+  await mounted.poll('autorestart-restart-overlay');
+  await mounted.poll('autorestart-restart-overlay');
+  await mounted.poll('autorestart-restart-overlay');
+  assert.equal(mounted.fetchCount(), before + 1, 'the ticks behind a slow answer are skipped');
+
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await mounted.poll('autorestart-restart-overlay');
+  assert.equal(mounted.fetchCount(), before + 2, 'and the poll continues after the answer landed');
+});

@@ -2219,6 +2219,59 @@
   const RESTART_SNAPSHOT_FRESH_MS = 10000
 
   /**
+   * THE TWO CADENCES OF THE SHARED POLL (milliseconds).
+   *
+   * 2 s is right for a page that merely shows whether a restart is pending: a
+   * pending restart sits there for minutes. While a restart is MOVING, though,
+   * the stage can flip at any moment (a conversation starts, the host postpones
+   * the restart, the card has to change its words) — and 2 s of the wrong word is
+   * exactly what the owner complained about. So the cadence follows the state.
+   */
+  const POLL_MS = 2000
+  const POLL_FAST_MS = 500
+
+  /**
+   * IS A RESTART MOVING RIGHT NOW?
+   *
+   * 'waiting' counts as well: the restart is requested and the gate may open (or
+   * a conversation may appear) at any moment — that is exactly when the card must
+   * change its words within a second.
+   *
+   * @param {object|null} info the state payload of the Host
+   * @returns {boolean}
+   */
+  function isRestartMoving(info) {
+    if (!info || typeof info !== 'object') return false
+    if (info.pendingRestart !== true) return false
+    const stage = info.restartPhase
+    const phase = stage && typeof stage.phase === 'string' ? stage.phase : ''
+    return phase === 'waiting' || phase === 'snapshotting' || phase === 'restarting'
+  }
+
+  /**
+   * The cadence the CURRENT state asks for.
+   *
+   * @param {object|null} info the state payload of the Host
+   * @returns {number} milliseconds
+   */
+  function pollIntervalFor(info) {
+    return isRestartMoving(info) ? POLL_FAST_MS : POLL_MS
+  }
+
+  /**
+   * Is the page on screen? A hidden tab has nobody to tell, so it must not spin
+   * (and it asks once more as soon as it is visible again).
+   *
+   * @returns {boolean}
+   */
+  function isPageVisible() {
+    if (typeof document === 'undefined' || !document) return true
+    if (document.hidden === true) return false
+    if (typeof document.visibilityState === 'string') return document.visibilityState !== 'hidden'
+    return true
+  }
+
+  /**
    * IS THE RESTART POSTPONED BY A CONVERSATION? (the Host says so in `reason`)
    *
    * A postponed restart is a stage of 'waiting' with a reason that starts with
@@ -2348,6 +2401,13 @@
     // Is the reported stage still worth a card? (a stale stage cannot hang it)
     isRestartStageLive,
     isRestartStageDeferred,
+    // The cadence of the shared poll: fast while a restart is moving, and no
+    // polling at all in a hidden tab.
+    isRestartMoving,
+    pollIntervalFor,
+    isPageVisible,
+    POLL_MS,
+    POLL_FAST_MS,
     RESTART_STAGE_STALE_MS,
     RESTART_SNAPSHOT_FRESH_MS,
     restartPillStageText,
@@ -2404,7 +2464,8 @@
        * the fallback for a Host that is older than the supervisor.
        */
       const DEFAULT_SUPERVISOR_URL = '/__dsh_autorestart/supervisor'
-      const POLL_MS = 2000
+      // The cadence lives with the state it follows (see POLL_MS/POLL_FAST_MS
+      // above): the shared poll speeds up while a restart is moving.
       // The brand accent (blue-purple). The pending-restart marker is a brand
       // signal, not a warning: no warning/yellow token is used here.
       const BRAND = 'var(--dsw-alias-brand-primary, #5b8def)'
@@ -2480,11 +2541,15 @@
         info: null,
         listeners: new Set(),
         timer: null,
+        // The cadence the current timer was armed with (0 = not armed).
+        interval: 0,
         inFlight: false,
         controller: null,
         // When the pending state was FIRST observed, so the details panel can
         // say how long this session has been waiting.
         pendingSince: null,
+        // The visibility listener is bound once, on the first subscriber.
+        visibilityBound: false,
       }
 
       function notifyListeners() {
@@ -2517,8 +2582,63 @@
         }
       }
 
+      /**
+       * (Re-)arm the shared timer with the cadence the state asks for.
+       *
+       * THE CADENCE IS RE-DECIDED AFTER EVERY ANSWER: a restart that starts makes
+       * the next tick 500 ms away, a restart that ends puts it back to 2 s, and a
+       * hidden page is not polled at all (an interval in a background tab only
+       * spends battery — it asks once as soon as it is visible again).
+       *
+       * Re-arming only happens when the cadence really changed, so the ticks stay
+       * evenly spaced and never pile up.
+       */
+      function armPoll() {
+        if (stateStore.listeners.size === 0) return
+        const wanted = isPageVisible() ? pollIntervalFor(stateStore.info) : 0
+        if (wanted === 0) {
+          if (stateStore.timer !== null) {
+            clearInterval(stateStore.timer)
+            stateStore.timer = null
+          }
+          stateStore.interval = 0
+          return
+        }
+        if (stateStore.timer !== null && stateStore.interval === wanted) return
+        if (stateStore.timer !== null) clearInterval(stateStore.timer)
+        stateStore.interval = wanted
+        stateStore.timer = setInterval(() => {
+          pollOnce().then(armPoll)
+        }, wanted)
+      }
+
+      /**
+       * Ask once more as soon as the page is back on screen.
+       *
+       * A hidden tab stops polling; coming back must not wait for the next tick of
+       * a timer that was stopped, so the visibility event polls immediately and
+       * then re-arms the cadence.
+       */
+      function bindVisibility() {
+        if (stateStore.visibilityBound) return
+        if (typeof document === 'undefined' || !document || typeof document.addEventListener !== 'function') return
+        stateStore.visibilityBound = true
+        document.addEventListener('visibilitychange', () => {
+          if (stateStore.listeners.size === 0) return
+          if (!isPageVisible()) {
+            armPoll()
+            return
+          }
+          pollOnce().then(armPoll)
+          armPoll()
+        })
+      }
+
       async function pollOnce() {
+        // ONE REQUEST AT A TIME: a slow answer must never stack up a queue.
         if (stateStore.inFlight) return
+        // Nobody is looking at a hidden tab; the next visible moment asks.
+        if (!isPageVisible()) return
         stateStore.inFlight = true
         try {
           const response = await fetch(HEALTH_URL, {
@@ -2557,8 +2677,9 @@
         stateStore.listeners.add(listener)
         if (stateStore.listeners.size === 1) {
           stateStore.controller = new AbortController()
-          pollOnce()
-          stateStore.timer = setInterval(pollOnce, POLL_MS)
+          bindVisibility()
+          pollOnce().then(armPoll)
+          armPoll()
         }
         return () => {
           stateStore.listeners.delete(listener)
@@ -2567,6 +2688,7 @@
               clearInterval(stateStore.timer)
               stateStore.timer = null
             }
+            stateStore.interval = 0
             if (stateStore.controller) {
               stateStore.controller.abort()
               stateStore.controller = null

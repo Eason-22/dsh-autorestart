@@ -17,12 +17,14 @@
   - 这时浮层**留着**（它说的是真话），文案换成「**有新会话在跑，重启已暂缓**」+ 第二行小字「等它结束会自动继续 · 已等 N 个会话」（英文：A conversation just started — restart postponed / It will retry automatically when idle）。
   - 渲染优先级上暂缓卡片高于其它一切：即使同一次渲染里阶段还写着 restarting，也直接画暂缓文案，旧词一帧都不留。
   - 「正在重启…」只在真的进入杀进程阶段才出现。
+  - **状态轮询跟着状态提速**：重启进行中（`pendingRestart` 且阶段是等待 / 备份中 / 正在重启）时，共享轮询从 2 秒临时降到 **500ms**，于是「被打断」这件事一秒内就能反映到浮层上；重启一旦结束（`pendingRestart` 变 false 或回到「已回来」）立刻恢复 2 秒。页面隐藏时不轮询（后台标签不空转），可见性恢复时立刻补查一次；同一时刻只允许一个在途请求，慢响应不会堆积。
 
 ### 验证
 
 - node --test plugins/dsh-autorestart/test/*.test.mjs → **822 / 822 全绿**（0.8.5 的 815 + 新增 7 条）。
 - 新用例（宿主侧 2 条）：备份完成后会话立刻变忙 → **同一次 tick** 就已经是等待（命令行没跑、watchdog 没 arm、reason 是 conversation-active after snapshot）；restarting 期间会话变忙 → 守卫回调一触发就降级，并断言复查周期落在 300–500ms。
 - 新用例（界面侧 5 条）：waiting + deferred: → 渲染「重启已暂缓」且**不含**「正在重启」；英文同款；真 restarting 仍显示「正在重启…」且不是暂缓卡片；普通 waiting（无 reason）仍然什么都不画；从 restarting 降到 waiting+deferred 后**下一次渲染**就换文案。
+- 新用例（轮询 4 条）：重启进行中 → 轮询周期 500ms；结束后 → 回到 2000ms；页面隐藏 → 一个请求都不发、恢复可见立刻补查；慢响应在途时后续 tick 被跳过（单飞）。
 - 真机复现路径由主会话验证（打断一次重启，看浮层是否立刻改口）。
 
 ## 0.8.5 — 2026-10-30

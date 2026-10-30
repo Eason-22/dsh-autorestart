@@ -386,7 +386,20 @@
     'settings.backup.kind.snapshot': '本次快照',
     'settings.backup.kind.unknown': '旧备份（未验证）',
     'settings.backup.version': '版本 {v}',
-    'settings.backup.identityHint': '备份有两种身份：①「安全份」——启动成功后验证过的那一份，出问题只会回滚安全份；第一次安装时会自动生成一份。②「本次快照」——每次重启前刚拍的，还没验证过；旧备份（未验证）和它都不会被自动回滚。两类合计最多保留 {n} 份，超出删最旧的那份（安全份不会被删）。手动回退会先二次确认，然后重启。',
+    'settings.backup.identityHint': '备份有两种身份：①「安全份」——启动成功后验证过的那一份，出问题只会回滚安全份；第一次安装时会自动生成一份。②「本次快照」——每次重启前刚拍的，还没验证过；旧备份（未验证）和它都不会被自动回滚。两类合计最多保留 {n} 份，超出删最旧的那份（安全份不会被删）。手动回退会先二次确认，然后会自动重启。',
+    // THE MANUAL ROLLBACK (user decision, 2026-10-30): the user may know better
+    // than "the newest proven copy", so ANY copy can be restored — but only
+    // after a card that says which one, what it replaces, and that a restart
+    // follows.
+    'settings.backup.rollback': '回退到这一份',
+    'settings.backup.rollbackConfirmTitle': '确定回退到这一份？',
+    'settings.backup.rollbackConfirmBody': '会把 {time} 的那份备份还原到现在——**当前状态会被它覆盖**（覆盖前会先自动存一份当前快照，所以这次回退还能再退回来）。',
+    'settings.backup.rollbackConfirmRestart': '还原完成后会自动重启一次；重启期间这个页面会断开，回来后接着用。',
+    'settings.backup.rollbackConfirmYes': '确认回退',
+    'settings.backup.rollbackConfirmNo': '取消',
+    'settings.backup.rollbackBusy': '正在回退…',
+    'settings.backup.rollbackDone': '已回退，正在重启…',
+    'settings.backup.rollbackFailed': '回退没成功：{message}',
     'settings.groups.report': '报告问题',
     'settings.groups.rescue': '出事了怎么办',
     'settings.rescue.hint': 'DSH 打不开的时候，用下面这两个脚本救自己（都不用 DSH 跑起来）。',
@@ -749,7 +762,19 @@
     'settings.backup.kind.snapshot': "This restart's snapshot",
     'settings.backup.kind.unknown': 'Old backup (unverified)',
     'settings.backup.version': 'version {v}',
-    'settings.backup.identityHint': 'A backup has one of two identities: ① “known good” — the copy a boot has proven; when something breaks, only a known-good copy is rolled back, and the first install creates one automatically. ② “this restart\'s snapshot” — taken right before every restart and not proven yet; old backups (unverified) and that snapshot are never rolled back automatically. At most {n} copies are kept together (the oldest goes first; a known-good copy is never deleted). A manual rollback asks for confirmation first, then restarts.',
+    'settings.backup.identityHint': 'A backup has one of two identities: ① “known good” — the copy a boot has proven; when something breaks, only a known-good copy is rolled back, and the first install creates one automatically. ② “this restart\'s snapshot” — taken right before every restart and not proven yet; old backups (unverified) and that snapshot are never rolled back automatically. At most {n} copies are kept together (the oldest goes first; a known-good copy is never deleted). A manual rollback asks for confirmation first, then restarts automatically.',
+    // THE MANUAL ROLLBACK (user decision, 2026-10-30): any copy can be restored
+    // — but only after a card that says which one, what it replaces, and that
+    // a restart follows.
+    'settings.backup.rollback': 'Roll back to this copy',
+    'settings.backup.rollbackConfirmTitle': 'Roll back to this copy?',
+    'settings.backup.rollbackConfirmBody': 'The backup from {time} will be restored over the current state — **what you have now is replaced** (a snapshot of it is taken first, so this rollback can be undone).',
+    'settings.backup.rollbackConfirmRestart': 'A restart follows automatically; this page disconnects during it and works again afterwards.',
+    'settings.backup.rollbackConfirmYes': 'Roll back',
+    'settings.backup.rollbackConfirmNo': 'Cancel',
+    'settings.backup.rollbackBusy': 'Rolling back…',
+    'settings.backup.rollbackDone': 'Rolled back — restarting…',
+    'settings.backup.rollbackFailed': 'The rollback did not work: {message}',
     'settings.groups.report': 'Report a problem',
     'settings.groups.rescue': 'If DSH will not start',
     'settings.rescue.hint': 'When DSH does not come up, these two scripts rescue it for you (neither of them needs DSH running).',
@@ -2510,6 +2535,8 @@
       const ROUTE_PREFIX = HEALTH_URL.split('?')[0].replace(/\/[^/]*$/, '')
       const DEFAULT_PARK_URL = ROUTE_PREFIX + '/park'
       const DEFAULT_CANCEL_URL = ROUTE_PREFIX + '/cancel'
+      // The route of the MANUAL ROLLBACK (restore ONE copy the user picked).
+      const DEFAULT_ROLLBACK_URL = ROUTE_PREFIX + '/rollback-to'
       // The route that persists the one-time install choice.
       const DEFAULT_CHOICE_URL = ROUTE_PREFIX + '/choice'
       // The browser-side record of the one-time install choice. The prompt is
@@ -2942,6 +2969,17 @@
         const sent = info && typeof info.cancelUrl === 'string' ? info.cancelUrl.trim() : ''
         if (sent.startsWith('/')) return sent
         return DEFAULT_CANCEL_URL
+      }
+
+      /**
+       * The route that restores ONE backup the user picked (the manual
+       * rollback): the one the Host sent with the state payload, or the derived
+       * default. It never carries a path — only a backup NAME goes in the body.
+       */
+      function rollbackUrlFor(info) {
+        const sent = info && typeof info.rollbackUrl === 'string' ? info.rollbackUrl.trim() : ''
+        if (sent.startsWith('/')) return sent
+        return DEFAULT_ROLLBACK_URL
       }
 
       /**
@@ -5246,6 +5284,23 @@
         '  font-weight:600;',
         '  color:var(--dsw-alias-label-primary);',
         '}',
+        '.dsh-autorestart-settings__backup-actions{',
+        '  display:flex;',
+        '  flex-wrap:wrap;',
+        '  gap:8px;',
+        '  align-items:baseline;',
+        '}',
+        // THE SECOND CONFIRMATION of a manual rollback: a block that stands
+        // apart from the list, because it is a question, not a fact.
+        '.dsh-autorestart-settings__confirm{',
+        '  display:flex;',
+        '  flex-direction:column;',
+        '  gap:6px;',
+        '  padding:10px 12px;',
+        '  border:1px solid var(--dsw-alias-border-l1);',
+        '  border-radius:8px;',
+        '  background:var(--dsw-alias-bg-l1);',
+        '}',
         // The folded "technical details": the command itself stays out of the
         // way until somebody asks for it.
         '.dsh-autorestart-settings__details{',
@@ -5757,6 +5812,13 @@
         // a fresh page starts closed, so nobody leaves technical text open by
         // accident.
         const [detailsOpen, setDetailsOpen] = useState(false)
+        // THE MANUAL ROLLBACK (user decision, 2026-10-30). Asking is a STATE,
+        // not a `window.confirm`: the card has to say WHICH copy, that the
+        // current state is replaced, and that a restart follows. `null` = nobody
+        // is asking, and only a confirmation ever calls the route.
+        const [rollbackAsk, setRollbackAsk] = useState(null)
+        const [rollbackBusy, setRollbackBusy] = useState(false)
+        const [rollbackNote, setRollbackNote] = useState('')
         const t = makeTranslate(props && typeof props.t === 'function' ? props.t : translate)
         // THE RECEIPT OF A SETTINGS CHANGE, on screen right now. It belongs to
         // THIS panel (it is not a window overlay), so it is read here and
@@ -5985,6 +6047,46 @@
          *
          * @param {object} changes the keys to write
          */
+        /**
+         * THE MANUAL ROLLBACK (user decision, 2026-10-30).
+         *
+         * It is ONLY ever called from the confirmation card: the button on a row
+         * opens the question, and nothing is posted until the user says yes. The
+         * route takes a backup NAME (never a path) and does the rest on the Host
+         * — save the current state, restore that copy, request a restart.
+         *
+         * @param {{ name?: string, atLocal?: string|null }|null} ask what the user picked
+         */
+        const rollbackTo = async (ask) => {
+          const name = ask && typeof ask.name === 'string' ? ask.name : ''
+          if (name === '' || rollbackBusy === true) return
+          setRollbackBusy(true)
+          setRollbackNote('')
+          try {
+            const response = await fetch(rollbackUrlFor(info), {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ name }),
+            })
+            const body = await response.json().catch(() => null)
+            if (!response.ok || !body || typeof body !== 'object' || body.ok !== true) {
+              const message = body && typeof body === 'object'
+                ? String(body.error || body.message || response.status)
+                : String(response.status)
+              setRollbackNote(fill(t('settings.backup.rollbackFailed'), { message }))
+              return
+            }
+            // The copy is back and a restart has been requested: the card goes
+            // away, and the panel says what is happening right now.
+            setRollbackAsk(null)
+            setRollbackNote(t('settings.backup.rollbackDone'))
+          } catch (failure) {
+            setRollbackNote(fill(t('settings.backup.rollbackFailed'), { message: describeError(failure) }))
+          } finally {
+            setRollbackBusy(false)
+          }
+        }
+
         const save = async (changes) => {
           if (busy) return
           setBusy(true)
@@ -6376,7 +6478,99 @@
                       : t('settings.backup.withoutPlugins'),
                   ),
                 ),
+                // ROLL BACK TO THIS COPY. The button only OPENS the question —
+                // the route is called from the confirmation card and nowhere
+                // else, so a click alone never restores anything.
+                h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__backup-actions' },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-autorestart-settings__button',
+                      disabled: busy === true || rollbackBusy === true,
+                      'data-dsh-autorestart-backup': 'rollback',
+                      'data-backup-name': item && typeof item.name === 'string' ? item.name : '',
+                      onClick: () => {
+                        setRollbackNote('')
+                        setRollbackAsk({
+                          name: item && typeof item.name === 'string' ? item.name : '',
+                          atLocal: item && typeof item.atLocal === 'string' ? item.atLocal : null,
+                        })
+                      },
+                    },
+                    t('settings.backup.rollback'),
+                  ),
+                ),
               )),
+              // THE SECOND CONFIRMATION OF A MANUAL ROLLBACK (user decision,
+              // 2026-10-30): it names the copy, says that the current state is
+              // replaced (and that it is saved first), and says that a restart
+              // follows. Nothing is posted until the confirm button is pressed.
+              rollbackAsk === null
+                ? null
+                : h(
+                  'div',
+                  {
+                    className: 'dsh-autorestart-settings__confirm',
+                    'data-dsh-autorestart-backup': 'rollback-confirm',
+                  },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__label' },
+                    t('settings.backup.rollbackConfirmTitle'),
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-backup': 'rollback-confirm-body' },
+                    fill(t('settings.backup.rollbackConfirmBody'), { time: formatBackupTime(rollbackAsk.atLocal) }),
+                  ),
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-backup': 'rollback-confirm-restart' },
+                    t('settings.backup.rollbackConfirmRestart'),
+                  ),
+                  h(
+                    'div',
+                    { className: 'dsh-autorestart-settings__backup-actions' },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-autorestart-settings__button',
+                        disabled: rollbackBusy === true,
+                        'data-dsh-autorestart-backup': 'rollback-confirm-yes',
+                        onClick: () => void rollbackTo(rollbackAsk),
+                      },
+                      rollbackBusy === true
+                        ? t('settings.backup.rollbackBusy')
+                        : t('settings.backup.rollbackConfirmYes'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-autorestart-settings__button',
+                        disabled: rollbackBusy === true,
+                        'data-dsh-autorestart-backup': 'rollback-confirm-no',
+                        onClick: () => {
+                          // Cancel: nothing was posted, nothing is restored.
+                          setRollbackAsk(null)
+                          setRollbackNote('')
+                        },
+                      },
+                      t('settings.backup.rollbackConfirmNo'),
+                    ),
+                  ),
+                ),
+              rollbackNote === ''
+                ? null
+                : h(
+                  'span',
+                  { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-backup': 'rollback-note' },
+                  rollbackNote,
+                ),
               backupsInfo.dir === ''
                 ? null
                 : h(

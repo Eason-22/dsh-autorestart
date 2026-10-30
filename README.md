@@ -592,6 +592,14 @@ it was started from, so a restart that leaves the host unable to boot can be und
   usually kills the very process the plugin runs in, so the plugin cannot confirm anything itself.
   The watcher is therefore started **before** the command runs, and it is the one that decides
   whether the new instance came up.
+- **A manual rollback to ANY copy** (user decision, 2026-10-30): the settings page offers
+  "roll back to this copy" on every row, so a copy from last week — even an unverified one — can be
+  restored on purpose. It asks first (which copy, that the current state is replaced, that a restart
+  follows); the Host saves the current state as a fresh snapshot BEFORE it restores anything, writes
+  `last-manual-rollback.json`, and only then requests a normal restart (the plugin never kills the
+  host itself). The route (`POST /__dsh_autorestart/rollback-to`) takes a backup NAME only — a path
+  or a traversal is refused before anything is read — and it stands down when the watchdog already
+  holds the rollback lock.
 - **The command is judged, not assumed.** A restart command that cannot be started, or that exits
   with an error, is reported as a failure (with its exit code and output) and the snapshot is
   restored — it is never reported as a successful restart.

@@ -150,6 +150,7 @@ session resume on boot, durable-goal re-arm, and an agent-callable idle-aware gr
 - 下次启动时 `continuum_status` 会报 `lastRollback`（时间、等了多久、是否回滚、**失败原因**、快照路径、崩溃日志名与尾部摘要）。
 - **回滚目标是「最新的安全份」，不是「最新的一份」**（用户决定，2026-10-30）：每份备份旁边有一张 `meta.json` 记着身份——`known-good`（安全份，已经有一次启动成功验证过）、`snapshot`（本次快照，重启前刚拍、还没验证）、`unknown`（身份层之前的旧备份）。**这次重启前拍的那份永远不是回滚目标**，因为它可能正是坏掉的那一份（「改坏了插件再点重启」就是这个场景）。第一次安装时会种子一份安全份；每次启动成功（健康检查通过）后，把那次重启前的快照提升为安全份。
 - **没有安全份就一份都不还原**：找不到 latest known-good 时，回滚什么都不做，报告里写 `no-known-good: <原因>`，profile 保持失败重启后的原样，看门狗也**不挂**（没有可还原的目标，挂上去只会再把坏配置写一遍）。
+- **可以手动回退到任意一份备份**（含更早、未验证的那份，用户决定 2026-10-30）：设置页每行都有「回退到这一份」，点了先弹**二次确认**（写清还原哪一份、当前状态会被覆盖、还原后会自动重启），确认后才动，取消则什么都不发。服务端 `POST /__dsh_autorestart/rollback-to` 只收**备份目录名**（必须是本机列表里的那一份，路径 / 路径穿越直接拒绝），顺序是先存一份当前快照（`reason: before-manual-rollback`，所以这次回退本身还能再退回来）→ 再还原选中的那份 → 写 `last-manual-rollback.json` 回执 → 走既有重启流程请求重启（插件自己绝不 kill 进程）；当前状态存不下来、或看门狗正持有回滚锁时直接拒绝（409），不会出现还原了一半。
 - 开关：`backupOnRestart`（默认 `true`）、`backupIncludePlugins`（默认 `true`，关掉就只备配置文件）、`maxBackups`（默认 `3`：当前一份 + 之前两份；**最新的 known-good 永远不删**）、`rollbackTimeoutMs`（默认 `90000`）、`restartCommandTimeoutMs`（默认 `30000`）、`rollbackCopyTimeoutMs`（默认 `120000`）。
 
 ### 这台电脑不让建计划任务时（自动回滚就没了）

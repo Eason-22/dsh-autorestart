@@ -79,6 +79,7 @@ import {
   createBackup,
   DEFAULT_MAX_BACKUPS,
   KIND_KNOWN_GOOD,
+  KIND_SNAPSHOT,
   latestKnownGood,
   listBackupIdentities,
   listBackups,
@@ -914,6 +915,20 @@ function resolveHandoffPath(config) {
   const index = healthPath.lastIndexOf('/')
   const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
   return `${prefix}/handoff`
+}
+
+/**
+ * Resolve the manual-rollback route path: a sibling of the health route, under
+ * the same prefix (`POST /rollback-to` restores ONE backup the user picked).
+ *
+ * @param {object} config
+ * @returns {string}
+ */
+function resolveManualRollbackPath(config) {
+  const healthPath = resolveHealthPath(config)
+  const index = healthPath.lastIndexOf('/')
+  const prefix = index > 0 ? healthPath.slice(0, index) : '/__dsh_autorestart'
+  return `${prefix}/rollback-to`
 }
 
 /**
@@ -3144,6 +3159,149 @@ const titleOfSummary = (item) => {
     }
   }
 
+  /** The receipt of the last manual rollback, next to the checkpoint. */
+  const MANUAL_ROLLBACK_RECEIPT = 'last-manual-rollback.json'
+
+  /**
+   * RESTORE ONE BACKUP THE USER PICKED (user decision, 2026-10-30).
+   *
+   * The automatic rollback only ever restores the newest PROVEN copy — but the
+   * user may know better ("the version from last week worked"). So they may pick
+   * any copy in the list, and the plugin restores exactly that one. Three rules
+   * keep that safe:
+   *
+   *   1. THE INPUT IS A NAME, NOT A PATH. It has to match a name this host
+   *      reports from `listBackupIdentities()`, so `../`, a drive letter or any
+   *      separator is refused before anything is read — a traversal never even
+   *      becomes a lookup.
+   *   2. THE CURRENT STATE IS SAVED FIRST. A snapshot of the profile as it is
+   *      right now is written before anything is overwritten, so a manual
+   *      rollback is itself undoable. Without that snapshot nothing is restored.
+   *   3. THE RESTART IS THE NORMAL ONE. The plugin never kills the host itself:
+   *      it writes the receipt and requests a restart, exactly like the pill.
+   *
+   * @param {{ name?: string }} [request]
+   * @returns {Promise<{ ok: boolean, status: number, error?: string|null, receipt?: object }>}
+   */
+  const manualRollback = async ({ name } = {}) => {
+    const requested = typeof name === 'string' ? name.trim() : ''
+    if (requested === '') {
+      return { ok: false, status: 400, error: 'a backup name is required' }
+    }
+    // ① A PLAIN NAME, on purpose: the list is the allow-list.
+    if (
+      requested.includes('/')
+      || requested.includes('\\')
+      || requested.includes('..')
+      || path.isAbsolute(requested)
+      || requested !== path.basename(requested)
+    ) {
+      log.warn('the manual rollback was refused: the name is not a plain backup name:', requested)
+      return { ok: false, status: 400, error: 'the name is not a backup name' }
+    }
+    const backupsDir = backupsDirFor(stateDirOf())
+    const target = listBackupIdentities(backupsDir).find((entry) => entry.name === requested)
+    if (!target || typeof target.dir !== 'string' || target.dir === '') {
+      log.warn('the manual rollback was refused: there is no such backup:', requested)
+      return { ok: false, status: 404, error: 'there is no such backup' }
+    }
+    const profile = resolveProfileDirDetailed()
+    const profileDir = typeof profile.dir === 'string' ? profile.dir : ''
+    if (profileDir === '') {
+      log.warn('the manual rollback was refused: the profile directory is unknown')
+      return { ok: false, status: 409, error: 'the profile directory is unknown' }
+    }
+    // ② THE WAY BACK, taken first. A manual rollback that cannot save the
+    // current state is not offered at all.
+    let safety = null
+    try {
+      safety = await createBackup({
+        profileDir,
+        backupsDir,
+        includePlugins: config.backupIncludePlugins !== false,
+        maxBackups: config.maxBackups,
+        kind: KIND_SNAPSHOT,
+        reason: 'before-manual-rollback',
+        version: ownVersion(),
+        bootId,
+      })
+    } catch (error) {
+      safety = { ok: false, error: String(error) }
+    }
+    if (!safety || safety.ok !== true) {
+      const reason = safety && safety.error ? safety.error : 'unknown error'
+      log.error('the manual rollback was refused: the current state could not be saved first:', reason)
+      return { ok: false, status: 409, error: 'the current state could not be saved first: ' + reason }
+    }
+    // ONE restore at a time: the detached watchdog takes the same lock.
+    const lock = claimRollbackLock(stateDirOf())
+    if (!lock.ok) {
+      log.warn('the manual rollback stands down: another rollback is already running:', lock.error)
+      return { ok: false, status: 409, error: 'another rollback is already running' }
+    }
+    let restored = null
+    try {
+      // ③ THE COPY THE USER PICKED — not the newest, not the proven one.
+      restored = restoreBackup({ backupDir: target.dir, profileDir })
+    } catch (error) {
+      restored = { ok: false, restored: [], error: String(error) }
+    } finally {
+      releaseRollbackLock(stateDirOf())
+    }
+    const ok = Boolean(restored && restored.ok === true)
+    const receipt = {
+      at: new Date().toISOString(),
+      name: target.name,
+      dir: target.dir,
+      kind: target.kind,
+      version: target.version ?? null,
+      restored: restored && Array.isArray(restored.restored) ? restored.restored : [],
+      ok,
+      error: ok ? null : ((restored && restored.error) || 'the restore failed'),
+      // The copy taken right before the restore: the manual rollback can be
+      // undone with it, even if the picked one was older than the hardware.
+      safetySnapshot: typeof safety.dir === 'string' ? safety.dir : null,
+      restartRequested: false,
+    }
+    const writeReceipt = () => {
+      try {
+        fs.writeFileSync(
+          path.join(stateDirOf(), MANUAL_ROLLBACK_RECEIPT),
+          JSON.stringify(receipt, null, 2),
+          'utf8',
+        )
+      } catch (error) {
+        log.warn('could not write the manual rollback receipt:', String(error))
+      }
+    }
+    // ④ THE RECEIPT, before anything else happens: the next boot reads it.
+    writeReceipt()
+    if (!ok) {
+      log.error('the manual rollback could not restore the copy:', receipt.error)
+      return { ok: false, status: 500, error: receipt.error, receipt }
+    }
+    // ⑤ A NORMAL RESTART (the same request the pill makes). The plugin does not
+    // kill anything itself; the restored profile is what comes back up.
+    requestRestart(state, {
+      reason: 'manual rollback to ' + target.name,
+      bySessionId: 'settings',
+      resume: false,
+      now: Date.now(),
+    })
+    markRestartStage('waiting')
+    persist()
+    startPolling()
+    receipt.restartRequested = true
+    writeReceipt()
+    log.warn('the manual rollback was done; a restart was requested', {
+      name: target.name,
+      kind: target.kind,
+      restored: receipt.restored,
+      safetySnapshot: receipt.safetySnapshot,
+    })
+    return { ok: true, status: 200, receipt }
+  }
+
   /**
    * WHERE THE RESCUE SCRIPTS ARE.
    *
@@ -4873,6 +5031,10 @@ const titleOfSummary = (item) => {
      * WHAT IS ON DISK RIGHT NOW: the backups of this host.
      */
     backupsInfo,
+    // RESTORE ONE COPY THE USER PICKED (they may know better than "the newest
+    // proven one"): save the current state, restore the picked copy, request a
+    // normal restart.
+    manualRollback,
     // Where the rescue scripts are, and whether the desktop shortcut exists.
     rescueKitInfo,
     // What this machine can do: can it create a one-off scheduled task? (The
@@ -7132,6 +7294,70 @@ function buildHandoffRoute(ctx, runtime, config) {
 }
 
 /**
+ * Build the POST `/rollback-to` route: restore ONE backup the user picked.
+ *
+ * It sits next to the health route and uses the same authentication rule
+ * (loopback OR a request the connection service admits). Body:
+ * `{ "name": "<backup directory name>" }`. The name has to be one this host
+ * reports from the backup list — the route never takes a path, so `../` and
+ * absolute paths are refused before anything is read. The answer carries the
+ * receipt (what was restored, and the snapshot taken right before it):
+ *
+ *   - 400 when no name / not a plain backup name was given,
+ *   - 404 when there is no such backup,
+ *   - 409 when the current state could not be saved first, or when another
+ *     rollback (the detached watchdog) holds the lock,
+ *   - 500 when the restore itself failed,
+ *   - 200 with `{ ok: true, receipt }` when the copy is back AND a normal
+ *     restart has been requested.
+ */
+function buildManualRollbackRoute(ctx, runtime, config) {
+  const routePath = resolveManualRollbackPath(config)
+  return {
+    kind: 'exact',
+    path: routePath,
+    handler: (req, res) => {
+      const remote = req && req.socket ? req.socket.remoteAddress : undefined
+      const loopback = remote === undefined
+        || remote === '127.0.0.1'
+        || remote === '::1'
+        || remote === '::ffff:127.0.0.1'
+      if (!loopback && !admittedByConnection(ctx, req)) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"loopback-only"}')
+        return
+      }
+      if (!req || req.method !== 'POST') {
+        res.statusCode = 405
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('allow', 'POST')
+        res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      void readJsonBody(req).then(async (payload) => {
+        const body = payload && typeof payload === 'object' ? payload : {}
+        const result = await runtime.manualRollback({ name: body.name })
+        const status = result && Number.isFinite(result.status) ? result.status : 400
+        res.statusCode = status
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.setHeader('cache-control', 'no-store')
+        res.end(JSON.stringify({
+          ok: result ? result.ok === true : false,
+          error: result && result.error ? result.error : null,
+          receipt: result && result.receipt ? result.receipt : null,
+          restartRequested: Boolean(result && result.receipt && result.receipt.restartRequested),
+        }))
+      }).catch((error) => {
+        res.statusCode = 400
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end(JSON.stringify({ ok: false, error: describeError(error) }))
+      })
+    },
+  }
+}
+
+/**
  * Build the announcements route: the one-time announcement of a new feature.
  *
  * It sits next to the health route and uses the same authentication rule
@@ -8366,6 +8592,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             // The route that withdraws ONE session's own restart request (the
             // manual "cancel my restart" of the pill).
             cancelUrl: resolveCancelPath(config),
+            // THE ROUTE OF THE MANUAL ROLLBACK: POST a backup NAME and this
+            // host saves the current state, restores that copy and restarts.
+            rollbackUrl: resolveManualRollbackPath(config),
             // The route that persists the one-time install choice, plus the
             // value that is effective right now.
             choiceUrl: resolveChoicePath(config),
@@ -8463,6 +8692,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             parkUrl: resolveParkPath(config),
             recoverUrl: resolveRecoverPath(config),
             cancelUrl: resolveCancelPath(config),
+            // THE ROUTE OF THE MANUAL ROLLBACK: POST a backup NAME and this
+            // host saves the current state, restores that copy and restarts.
+            rollbackUrl: resolveManualRollbackPath(config),
             choiceUrl: resolveChoicePath(config),
             announcementsUrl: resolveAnnouncementsPath(config),
             backupOnRestart: config.backupOnRestart !== false,
@@ -8596,6 +8828,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
     const handoffRoute = buildHandoffRoute(ctx, runtime, config)
     const choiceRoute = buildChoiceRoute(ctx, runtime, config)
     const cancelRoute = buildCancelRoute(ctx, runtime, config)
+    const manualRollbackRoute = buildManualRollbackRoute(ctx, runtime, config)
     const announcementsRoute = buildAnnouncementsRoute(ctx, runtime, config)
     const supervisorRoute = buildSupervisorRoute(ctx, runtime, config)
     const rescueRoute = buildRescueRoute(ctx, runtime, config)
@@ -8622,6 +8855,7 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       { name: 'handoff', route: handoffRoute },
       { name: 'choice', route: choiceRoute },
       { name: 'cancel', route: cancelRoute },
+      { name: 'manual-rollback', route: manualRollbackRoute },
       { name: 'announcements', route: announcementsRoute },
       { name: 'supervisor', route: supervisorRoute },
       { name: 'rescue', route: rescueRoute },

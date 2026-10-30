@@ -330,7 +330,7 @@ agent/status(running) ──► 写 checkpoint（<DSH_HOME>\storages\dsh-autores
 
 ## 安装
 
-当前版本：**0.8.5**。
+当前版本：**0.8.6**。
 
 ```powershell
 # 在 dsh 里（或对 Agent 说）：把工作区里的这个包安装为 profile bundle
@@ -552,7 +552,7 @@ restart gate: action=wait reason=agents-busy-within-soft-window busyCount=1 quie
 `{ "sessionId": "…", "scope": "mine" }`）：别的会话照样重启。面板里**没有**"全撤"——那种操作只留给
 工具显式调用（`continuum_cancel_restart` 带 `scope: "all"`）。
 
-**浮层不会悬停**：重启被打断退回等待时，浮层立即消失（阶段会被重置）；阶段超过 15 秒无更新视为过期，不再显示，胶囊仍显示等待数。
+**浮层不会悬停，也不说假话**：重启被新会话打断时，浮层立刻从「正在重启…」换成「**有新会话在跑，重启已暂缓**」，第二行小字「等它结束会自动继续 · 已等 N 个会话」——这时候说「正在重启」就是假话。宿主每 350ms 复查一次空闲门，那句假话最多只存在一个心跳；备份一结束、进入「正在重启」阶段之前也会当场复查一次，被挡就在同一次 tick 退回等待。阶段超过 15 秒无更新视为过期，不再显示，胶囊仍显示等待数。
 
 ## 收工关机（Graceful shutdown）
 

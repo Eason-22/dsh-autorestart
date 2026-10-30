@@ -339,6 +339,9 @@
       "size": "{done} / {total}",
       "sizeDone": "{done}",
       "restarting": "正在重启…",
+      "deferred": "有新会话在跑，重启已暂缓",
+      "deferredNote": "等它结束会自动继续 · 已等 {count} 个会话",
+      "deferredNoteZero": "等它结束会自动继续",
       "back": "已回来"
     }
   },

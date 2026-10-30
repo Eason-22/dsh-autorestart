@@ -168,6 +168,10 @@ function statePayload({
   // When the Host last touched the stage: the staleness tests need a stage that
   // was last refreshed N seconds ago.
   at = Date.now(),
+  // WHY the stage is what it is ("deferred: …" = the restart was postponed).
+  reason = null,
+  // The number of conversations that hold the gate (the Host publishes it).
+  busyCount = null,
 } = {}) {
   return {
     ok: true,
@@ -179,6 +183,7 @@ function statePayload({
     ],
     allowRestart: false,
     reason: 'blocked',
+    busyCount,
     restartPhase: {
       phase,
       at,
@@ -190,6 +195,7 @@ function statePayload({
       // The size of the pre-restart snapshot, carried on EVERY stage (the Host
       // keeps it so a page that missed the copy can still report it).
       snapshotBytes,
+      reason,
       slow: null,
       cancellable: phase === 'waiting' || phase === 'snapshotting',
       cancelReason: null,
@@ -927,4 +933,79 @@ test('a stale snapshot stage draws NOTHING, a fresh one draws the card', async (
   const card = await fresh.settled('autorestart-restart-overlay');
   assert.equal(card.props['data-dsh-autorestart-restart-overlay-phase'], 'snapshotting');
   assert.match(textOf(card), /DSH 重启前备份中/);
+})
+
+/* ------------------------------------------------------------------ *
+ * 14. A POSTPONED RESTART SAYS SO — AND NEVER SAYS "正在重启".
+ *
+ * THE REPORT (user, 2026-10-30): after the backup the card claimed "正在重启…" for
+ * 25 s while the host was only waiting for a conversation to end. Now the Host
+ * degrades the stage within 350 ms and the card turns into the honest sentence.
+ * ------------------------------------------------------------------ */
+
+test('a postponed restart draws the honest card, never "正在重启"', async () => {
+  const mounted = mountClient({
+    health: statePayload({
+      phase: 'waiting',
+      blocking: 1,
+      busyCount: 1,
+      reason: 'deferred: conversation-active after snapshot: conversation-active',
+    }),
+  });
+  const card = await mounted.settled('autorestart-restart-overlay');
+  assert.ok(card, 'the postponed card is drawn (it is telling the truth)');
+  assert.equal(card.props['data-dsh-autorestart-restart-overlay-phase'], 'waiting');
+  assert.equal(card.props['data-dsh-autorestart-restart-overlay-card'], 'deferred', 'the card names the postponement');
+  const copy = textOf(card);
+  assert.match(copy, /有新会话在跑，重启已暂缓/, `the interruption is named: ${copy}`);
+  assert.match(copy, /等它结束会自动继续/, `and the retry is promised: ${copy}`);
+  assert.match(copy, /已等 1 个会话/, `with the number of conversations in the way: ${copy}`);
+  assert.doesNotMatch(copy, /正在重启/, `the old word must be gone: ${copy}`);
+})
+
+test('the postponed card is English too', async () => {
+  const mounted = mountClient({
+    language: 'en',
+    health: statePayload({
+      phase: 'waiting',
+      busyCount: 2,
+      reason: 'deferred: conversation-active while restarting',
+    }),
+  });
+  const card = await mounted.settled('autorestart-restart-overlay');
+  const copy = textOf(card);
+  assert.match(copy, /A conversation just started — restart postponed/, `${copy}`);
+  assert.match(copy, /It will retry automatically when idle/, `${copy}`);
+  assert.doesNotMatch(copy, /Restarting/, `no "Restarting…" for a postponed restart: ${copy}`);
+})
+
+test('a real restarting stage still says "正在重启…"', async () => {
+  const mounted = mountClient({
+    health: statePayload({ phase: 'restarting' }),
+  });
+  const card = await mounted.settled('autorestart-restart-overlay');
+  const copy = textOf(card);
+  assert.match(copy, /正在重启/, `a real kill still says so: ${copy}`);
+  assert.doesNotMatch(copy, /重启已暂缓/, `and it is not the postponed card: ${copy}`);
+  assert.equal(card.props['data-dsh-autorestart-restart-overlay-card'], 'restarting');
+})
+
+test('a waiting stage WITHOUT the deferred reason still draws nothing', async () => {
+  const mounted = mountClient({
+    health: statePayload({ phase: 'waiting', reason: null }),
+  });
+  assert.equal(await mounted.settled('autorestart-restart-overlay'), null, 'ordinary waiting has no card');
+})
+
+test('the downgrade is visible on the very next render', async () => {
+  const mounted = mountClient({ health: statePayload({ phase: 'restarting' }) });
+  let card = await mounted.settled('autorestart-restart-overlay');
+  assert.match(textOf(card), /正在重启/);
+
+  // The Host now says the restart was postponed (its own re-check found a session).
+  mounted.setHealth(statePayload({ phase: 'waiting', reason: 'deferred: conversation-active while restarting' }));
+  card = await mounted.poll('autorestart-restart-overlay');
+  const copy = textOf(card);
+  assert.match(copy, /重启已暂缓/, `the card flips at once: ${copy}`);
+  assert.doesNotMatch(copy, /正在重启/, `and the old word does not survive a single frame: ${copy}`);
 })

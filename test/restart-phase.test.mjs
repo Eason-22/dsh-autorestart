@@ -488,3 +488,112 @@ test('a stage left by the same process is reset on a plugin reload', async (t) =
   assert.equal(runtime.restartStageInfo().phase, 'waiting', 'the reload does not inherit the stage');
   assert.match(String(runtime.restartStageInfo().reason), /^boot: /);
 });
+
+// (7) A RESTART THAT IS NOT HAPPENING MAY NOT BE CALLED "restarting" --------------
+//
+// THE REPORT (user, 2026-10-30, with a screenshot): after the backup the card said
+// "正在重启…" for 25 s while nothing was restarting — the helper was still waiting
+// for its own idle re-check. 'restarting' may only mean "the kill is under way".
+
+test('a conversation that starts right after the copy postpones the restart in the same tick', async (t) => {
+  const root = tempDir(t, 'busy-after-copy');
+  const profile = makeProfile(root, { count: 8 });
+  const stateFile = path.join(root, 'state.json');
+  const backups = path.join(root, 'backups');
+  const commands = [];
+  // The agents the gate sees: empty at the click, busy the moment the copy starts
+  // (which is exactly "another conversation began during the backup").
+  const agents = [];
+  const ctx = fakeContext();
+  ctx.agents.list = () => agents.map((id) => ({ id, status: 'running' }));
+  const config = normalizeConfig({
+    stateFile,
+    restartMode: 'command',
+    restartCommand: 'restart-the-host',
+    settleMs: 0,
+    restartGraceMs: 0,
+    backupOnRestart: true,
+    backupIncludePlugins: true,
+  });
+  const stageWhenArming = [];
+  const runtime = createRuntime(ctx, config, {
+    env: { isDesktopApp: false, appExePath: null },
+    snapshot: async () => {
+      // A conversation became active WHILE the files were copied.
+      agents.push('sess-arrived-during-copy');
+      return { ok: true, backup: { ok: true, dir: backups }, profileDir: profile, files: 8, bytes: 30 * 1024, total: 30 * 1024 };
+    },
+    runCommand: async ({ command }) => {
+      commands.push(command);
+      return { ok: true, command, exitCode: 0, timedOut: false };
+    },
+    launchWatcher: () => ({ ok: true, method: 'test', error: null }),
+    armWatchdog: () => {
+      stageWhenArming.push(runtime.restartStageInfo().phase);
+      return { ok: false, tier: 'none', reason: 'the test arms nothing' };
+    },
+    probeInstance: async () => ({ ok: true, reason: 'unused' }),
+  });
+
+  requestRestart(runtime.state, { reason: 'phase test', bySessionId: 'sess-busy' });
+  await runtime.executeRestart();
+
+  // NOT ONE TICK of "restarting": the gate is re-checked the moment the copy ends.
+  assert.deepEqual(commands, [], 'the restart command was never run');
+  assert.deepEqual(stageWhenArming, [], 'the watchdog was never armed');
+  const stage = runtime.restartStageInfo();
+  assert.equal(stage.phase, 'waiting', 'the stage is waiting, not restarting');
+  assert.match(String(stage.reason), /^deferred: conversation-active after snapshot/);
+  assert.equal(runtime.state.phase, 'deferred');
+  // The interface reads the same thing off the wire.
+  assert.equal(runtime.restartStageBrief().phase, 'waiting');
+});
+
+test('a conversation that starts while the kill is being carried out degrades within 500 ms', async (t) => {
+  const root = tempDir(t, 'busy-while-restarting');
+  const profile = makeProfile(root, { count: 5 });
+  const stateFile = path.join(root, 'state.json');
+  const backups = path.join(root, 'backups');
+  const agents = [];
+  const intervals = [];
+  const ctx = fakeContext();
+  ctx.agents.list = () => agents.map((id) => ({ id, status: 'running' }));
+  // The re-check of the idle gate is an interval: capture it (and its period).
+  ctx.interval = (fn, ms) => {
+    intervals.push({ fn, ms });
+    return () => {};
+  };
+  const config = normalizeConfig({
+    stateFile,
+    restartMode: 'app',
+    settleMs: 0,
+    restartGraceMs: 0,
+    backupOnRestart: true,
+    backupIncludePlugins: true,
+  });
+  const runtime = createRuntime(ctx, config, {
+    env: { isDesktopApp: true, appExePath: 'C:\\fake\\DeepSeek Harness.exe' },
+    snapshot: async () => ({ ok: true, backup: { ok: true, dir: backups }, profileDir: profile, files: 5, bytes: 20 * 1024, total: 20 * 1024 }),
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test arms nothing' }),
+    scheduleDetached: () => ({ ok: true, pid: 4321 }),
+    launchWatcher: () => ({ ok: true, method: 'test', error: null }),
+    probeInstance: async () => ({ ok: true, reason: 'unused' }),
+  });
+
+  requestRestart(runtime.state, { reason: 'phase test', bySessionId: 'sess-restarting' });
+  await runtime.executeRestart();
+  assert.equal(runtime.restartStageInfo().phase, 'restarting', 'the host is on its way out');
+
+  // The idle gate is watched while the helper waits — 300–500 ms is the window.
+  const watch = intervals.find((entry) => entry.ms >= 300 && entry.ms <= 500);
+  assert.ok(watch, `the gate is re-checked every 300–500 ms, saw ${intervals.map((e) => e.ms).join('/')}`);
+
+  // …and a conversation starts right then.
+  agents.push('sess-arrived-while-restarting');
+  watch.fn();
+
+  const stage = runtime.restartStageInfo();
+  assert.equal(stage.phase, 'waiting', 'the false "restarting" is withdrawn at once');
+  assert.match(String(stage.reason), /^deferred: conversation-active while restarting/);
+  assert.equal(runtime.state.phase, 'deferred', 'the retry is scheduled again');
+});

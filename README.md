@@ -201,7 +201,7 @@ what it adds before you install it.
 
 ## Install
 
-Current version: **0.8.5**.
+Current version: **0.8.6**.
 
 From npm — the package is published under the name `dsh-autorestart`:
 
@@ -440,9 +440,9 @@ with its plugins is ~150 MB). The button looked dead. It is not — and now it s
 
 | Stage | What the interface shows | Where the data comes from |
 |---|---|---|
-| `waiting` | Nothing on the overlay — the **centered overlay card does not appear at all** while the gate only waits (no backup is running, nothing happens but waiting). The capsule says it in one short line ("pending restart · waiting for N sessions"). | the idle gate's blockers |
+| `waiting` | Nothing on the overlay — the **centered overlay card does not appear at all** while the gate only waits (no backup is running, nothing happens but waiting). The capsule says it in one short line ("pending restart · waiting for N sessions"). **One exception (0.8.6):** when a restart was interrupted by a new conversation, the card stays and says so — "A conversation just started — restart postponed" + "It will retry automatically when idle" — instead of claiming "Restarting…". | the idle gate's blockers |
 | `snapshotting` | The **centered overlay card in the middle of the shell**: "Backing up before DSH restart" + a real progress bar, "12.3 MB / 40 MB" and a percentage; the settings page and the tooltip keep the long line, in the same words ("Backing up before DSH restart (about 12s, 78 MB done)…"). The card has NO minimum shown time: it lives exactly as long as the Host reports the stage (a 92 KB copy is gone in about 5 ms, a slow one stays as long as it runs); the size picks its own unit (`92 KB` / `156 MB`) so a small backup never reads "0 MB" | the REAL copy loop: files and bytes written, measured total |
-| `restarting` | "Restarting; the work continues by itself in a moment…" | the host is on its way out |
+| `restarting` | "Restarting…" — and ONLY while the process is really being killed: the idle gate is re-checked every 350 ms, so a conversation that starts here turns the card into the postponed one above instead of leaving a false "Restarting…" on screen | the host is on its way out |
 | `back` | "Back — carrying on where we left off", for **1.5 seconds**, then the card is gone | the new host, once it boots |
 
 **The overlay never hangs.** When a restart is postponed back to waiting, the stage is reset and the

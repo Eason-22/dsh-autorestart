@@ -339,6 +339,9 @@
       "size": "{done} / {total}",
       "sizeDone": "{done}",
       "restarting": "Restarting…",
+      "deferred": "A conversation just started — restart postponed",
+      "deferredNote": "It will retry automatically when idle · {count} waiting",
+      "deferredNoteZero": "It will retry automatically when idle",
       "back": "Back again"
     }
   },

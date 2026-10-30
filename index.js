@@ -387,7 +387,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.8.5'
+const PLUGIN_VERSION_FALLBACK = '0.8.6'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -2673,6 +2673,70 @@ const titleOfSummary = (item) => {
    * @param {{ blocked?: number, now?: number }} [options]
    * @returns {object|null} the recorded stage
    */
+  /**
+   * HOW OFTEN THE IDLE GATE IS RE-CHECKED WHILE THE HOST WAITS TO BE KILLED.
+   *
+   * THE REPORT (user, 2026-10-30): after the backup the card said "正在重启…" for
+   * 25 s while nothing was restarting — the helper was still waiting for its own
+   * idle re-check, and only THEN did the stage go back to 'waiting'. 300–500 ms
+   * is the window the owner asked for: a restart that is not going to happen must
+   * be downgraded before anybody reads the old word.
+   */
+  const RESTART_BUSY_CHECK_MS = 350
+  let restartBusyTimer = null
+
+  /** Stop the re-check of the idle gate (idempotent). */
+  const stopRestartBusyWatch = () => {
+    if (restartBusyTimer === null) return
+    try {
+      restartBusyTimer()
+    } catch {
+      // The timer belongs to a disposed fiber already.
+    }
+    restartBusyTimer = null
+  }
+
+  /**
+   * WHILE THE STAGE SAYS 'restarting', NOBODY MAY BECOME BUSY UNNOTICED.
+   *
+   * 'restarting' is a CLAIM: from here on the only thing left is the process
+   * being killed. A conversation that starts while the helper waits makes that
+   * claim false, so it is withdrawn at once (the gate is re-checked four times a
+   * second) instead of being discovered by the helper half a minute later.
+   */
+  const armRestartBusyWatch = () => {
+    stopRestartBusyWatch()
+    restartBusyTimer = ctx.interval(() => {
+      if (disposed) return stopRestartBusyWatch()
+      const record = state.restartPhase
+      // Only a stage that still claims 'restarting' is watched: every other
+      // stage already says the truth.
+      if (!record || typeof record !== 'object' || record.phase !== 'restarting') {
+        return stopRestartBusyWatch()
+      }
+      if (!state.restart) return stopRestartBusyWatch()
+      let verdict
+      try {
+        verdict = gate()
+      } catch {
+        return undefined
+      }
+      if (verdict && verdict.allow === true) return undefined
+      log.warn('a conversation became active while the restart was being carried out; the stage goes back to waiting', {
+        reason: verdict ? verdict.reason : null,
+        blockedBy: verdict ? verdict.blockedBy : null,
+      })
+      deferRestartStage('conversation-active while restarting', {
+        blocked: verdict && Array.isArray(verdict.blockedBy) ? countBlockerTasks(verdict.blockedBy) : 0,
+      })
+      setPhase(state, 'deferred')
+      persist()
+      startPolling()
+      return stopRestartBusyWatch()
+    }, RESTART_BUSY_CHECK_MS)
+    return restartBusyTimer
+  }
+
   const markRestartStage = (phase, { blocked = 0, now = Date.now(), reason = null } = {}) => {
     if (!RESTART_PHASES.includes(phase)) return null
     const record = setRestartPhase(state, { phase, blocked, now, reason })
@@ -3758,6 +3822,28 @@ const titleOfSummary = (item) => {
         stopPolling()
         return
       }
+      // A COPY THAT IS DONE IS NOT A RESTART YET (user report, 2026-10-30): "the
+      // backup finished, and then the card said 正在重启 for 25 s while nothing was
+      // restarting". The gate is re-checked HERE, in the same tick, so a
+      // conversation that started during the copy postpones the restart at once
+      // instead of being discovered by the helper half a minute later.
+      const afterCopy = gate()
+      if (!afterCopy || afterCopy.allow !== true) {
+        const why = afterCopy && typeof afterCopy.reason === 'string' && afterCopy.reason !== ''
+          ? afterCopy.reason
+          : 'conversation-active'
+        log.info('restart deferred right after the snapshot: a conversation is active again', {
+          reason: why,
+          blockedBy: afterCopy ? afterCopy.blockedBy : null,
+        })
+        deferRestartStage('conversation-active after snapshot: ' + why, {
+          blocked: afterCopy && Array.isArray(afterCopy.blockedBy) ? countBlockerTasks(afterCopy.blockedBy) : 0,
+        })
+        setPhase(state, 'deferred')
+        persist()
+        startPolling()
+        return
+      }
       // THE INVARIANT (user report, 2026-10-29): 'snapshotting' exists ONLY while
       // files are being copied. The moment the copy returns — copied, cancelled
       // or thrown — the stage leaves it. Everything after this point (arming the
@@ -3898,6 +3984,10 @@ const titleOfSummary = (item) => {
           // FROM HERE ON THE RESTART CANNOT BE CANCELLED, and the interface says
           // so: the host is on its way out.
           markRestartStage('restarting')
+          // A command that takes a while must not keep claiming "restarting" once
+          // a conversation is active again (the reason is remembered and the card
+          // turns into "restart postponed").
+          armRestartBusyWatch()
           const outcome = await runCommandFn({
             command,
             timeoutMs: config.restartCommandTimeoutMs,
@@ -4042,6 +4132,10 @@ const titleOfSummary = (item) => {
           // The helper is scheduled: the host is going down, and from here on a
           // cancel would be a promise this plugin cannot keep.
           markRestartStage('restarting')
+          // THE 25-SECOND LIE (user report, 2026-10-30): the helper waits for its
+          // own idle re-check, so this is exactly the window in which a
+          // conversation can start. Watch it every 350 ms.
+          armRestartBusyWatch()
           armGateWatchdog()
         }
       }
@@ -4736,6 +4830,7 @@ const titleOfSummary = (item) => {
     flushSessions,
     releaseRequesters,
     markDisposed: () => {
+    stopRestartBusyWatch()
       disposed = true
     },
     noteActivity,

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.6 — 2026-10-30
+
+### 现场
+
+备份做完之后，主界面浮层和底部胶囊**一起说了 25 秒的「正在重启…」**，而实际上什么都没在重启：宿主已经把重启交给 detached helper，helper 还在等它自己的空闲复查；这期间又有会话忙起来，helper 复查被拒之后宿主才把阶段改回等待。于是一整段时间里界面在说假话。用户原话：「实际并不是正在重启」。
+
+### 改
+
+- **宿主：「restarting」只表示「即将 / 正在杀进程」。**
+  - 备份一结束、在标记「restarting」**之前**先当场复查一次空闲门：被挡就在同一次 tick 退回等待，reason 写成「deferred: conversation-active after snapshot: <原因>」，不等到 helper 才发现（那 25 秒的第一段就是这么没的）。
+  - 进入「restarting」之后（等 helper / 等调度）**每 350ms 复查一次**空闲门，一旦有会话忙立刻降级回等待（reason「deferred: conversation-active while restarting」）并把重试重新排上——几十秒的假 restarting 窗口没有了。
+  - 其余一切等待态仍然只能是等待（带 reason），restarting 的语义收窄。
+- **界面：被暂缓就说被暂缓，绝不说「正在重启」。**
+  - 新增 isRestartStageDeferred(stage)：阶段是 waiting 且 reason 以「deferred:」开头。
+  - 这时浮层**留着**（它说的是真话），文案换成「**有新会话在跑，重启已暂缓**」+ 第二行小字「等它结束会自动继续 · 已等 N 个会话」（英文：A conversation just started — restart postponed / It will retry automatically when idle）。
+  - 渲染优先级上暂缓卡片高于其它一切：即使同一次渲染里阶段还写着 restarting，也直接画暂缓文案，旧词一帧都不留。
+  - 「正在重启…」只在真的进入杀进程阶段才出现。
+
+### 验证
+
+- node --test plugins/dsh-autorestart/test/*.test.mjs → **822 / 822 全绿**（0.8.5 的 815 + 新增 7 条）。
+- 新用例（宿主侧 2 条）：备份完成后会话立刻变忙 → **同一次 tick** 就已经是等待（命令行没跑、watchdog 没 arm、reason 是 conversation-active after snapshot）；restarting 期间会话变忙 → 守卫回调一触发就降级，并断言复查周期落在 300–500ms。
+- 新用例（界面侧 5 条）：waiting + deferred: → 渲染「重启已暂缓」且**不含**「正在重启」；英文同款；真 restarting 仍显示「正在重启…」且不是暂缓卡片；普通 waiting（无 reason）仍然什么都不画；从 restarting 降到 waiting+deferred 后**下一次渲染**就换文案。
+- 真机复现路径由主会话验证（打断一次重启，看浮层是否立刻改口）。
+
 ## 0.8.5 — 2026-10-30
 
 ### 现场

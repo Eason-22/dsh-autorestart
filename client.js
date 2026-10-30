@@ -497,6 +497,12 @@
     'restart.overlay.size': '{done} / {total}',
     'restart.overlay.sizeDone': '{done}',
     'restart.overlay.restarting': '正在重启…',
+    // THE HONEST CARD (user report, 2026-10-30): a restart that was interrupted
+    // by a new conversation said "正在重启…" for 25 s, which was not true. It now
+    // says what actually happened — and it may stay, because it IS the truth.
+    'restart.overlay.deferred': '有新会话在跑，重启已暂缓',
+    'restart.overlay.deferredNote': '等它结束会自动继续 · 已等 {count} 个会话',
+    'restart.overlay.deferredNoteZero': '等它结束会自动继续',
     'restart.overlay.back': '已回来',
   }
 
@@ -837,6 +843,9 @@
     'restart.overlay.size': '{done} / {total}',
     'restart.overlay.sizeDone': '{done}',
     'restart.overlay.restarting': 'Restarting…',
+    'restart.overlay.deferred': 'A conversation just started — restart postponed',
+    'restart.overlay.deferredNote': 'It will retry automatically when idle · {count} waiting',
+    'restart.overlay.deferredNoteZero': 'It will retry automatically when idle',
     'restart.overlay.back': 'Back again',
   }
 
@@ -2210,6 +2219,23 @@
   const RESTART_SNAPSHOT_FRESH_MS = 10000
 
   /**
+   * IS THE RESTART POSTPONED BY A CONVERSATION? (the Host says so in `reason`)
+   *
+   * A postponed restart is a stage of 'waiting' with a reason that starts with
+   * "deferred:" (see the Host's deferRestartStage). That state is NOT an activity,
+   * so it is drawn differently: the card names the interruption and promises the
+   * retry, and the word "正在重启" never appears for it.
+   *
+   * @param {object|null} stage the `restartPhase` of the state route
+   * @returns {boolean}
+   */
+  function isRestartStageDeferred(stage) {
+    if (!stage || typeof stage !== 'object') return false
+    if (stage.phase !== 'waiting') return false
+    return typeof stage.reason === 'string' && stage.reason.indexOf('deferred:') === 0
+  }
+
+  /**
    * Is the reported stage still something the card may draw?
    *
    * The card is an ALARM about something happening right now: 'snapshotting'
@@ -2321,6 +2347,7 @@
     isRestartOverlayPhase,
     // Is the reported stage still worth a card? (a stale stage cannot hang it)
     isRestartStageLive,
+    isRestartStageDeferred,
     RESTART_STAGE_STALE_MS,
     RESTART_SNAPSHOT_FRESH_MS,
     restartPillStageText,
@@ -3870,6 +3897,11 @@
         // postponed and the Host did not say so) cannot leave a card on screen
         // for ever; the pill still says the restart is pending.
         const running = pending && isRestartStageLive(stage, Date.now())
+        // A POSTPONED RESTART IS NOT A RUNNING ONE (user report, 2026-10-30): when
+        // the Host says the restart went back to waiting because a conversation
+        // started, the card says exactly that. It may stay on screen — it is the
+        // truth — and it can never claim "正在重启".
+        const postponed = pending && isRestartStageDeferred(stage)
 
         useEffect(() => {
           if (running) setSawRunning(true)
@@ -3885,8 +3917,9 @@
           return () => clearTimeout(timer)
         }, [phase])
 
-        // THE CARD IS ONLY DRAWN WHILE SOMETHING IS REALLY IN PROGRESS.
-        const visible = running || (phase === 'back' && sawRunning && !backGone)
+        // THE CARD IS ONLY DRAWN WHILE SOMETHING IS REALLY IN PROGRESS — or while
+        // the restart is honestly postponed.
+        const visible = running || postponed || (phase === 'back' && sawRunning && !backGone)
         if (!visible) return null
 
         const progress = stage.progress && typeof stage.progress === 'object' ? stage.progress : null
@@ -3896,11 +3929,32 @@
           ? Math.max(0, Math.min(100, Math.round(Number(progress.percent))))
           : null
 
-        const title = restartOverlayTitle(stage, t)
+        // The postponed card wins over everything else: even a stage that still
+        // says 'restarting' in the same render is downgraded here, so the old word
+        // can never survive a single frame once the Host said "deferred".
+        const deferredCount = postponed ? waitingTaskCount(info, info && Array.isArray(info.blockedBy) ? info.blockedBy : []) : 0
+        const title = postponed
+          ? t('restart.overlay.deferred')
+          : restartOverlayTitle(stage, t)
 
         let bar = null
         let detail = null
-        if (phase === 'snapshotting') {
+        if (postponed) {
+          // A second, smaller line: what happens next, and how many conversations
+          // are in the way (the same number the capsule shows).
+          detail = h(
+            'p',
+            { className: 'dsh-autorestart-restart-overlay__size' },
+            h(
+              'span',
+              { 'data-dsh-autorestart-restart-overlay-deferred': 'true' },
+              deferredCount > 0
+                ? fill(t('restart.overlay.deferredNote'), { count: deferredCount })
+                : t('restart.overlay.deferredNoteZero'),
+            ),
+          )
+        }
+        if (!postponed && phase === 'snapshotting') {
           // The numbers are the ones the copy loop really measured; when there is
           // no measurement yet, the card shows no number at all (an invented
           // progress bar is worse than none). The unit fits the size, so a 92 KB
@@ -3945,6 +3999,9 @@
             'aria-live': 'polite',
             'data-dsh-autorestart-restart-overlay': 'true',
             'data-dsh-autorestart-restart-overlay-phase': phase,
+            // WHAT THE CARD SAYS, independent of the Host phase: a postponed
+            // restart is drawn from 'waiting'.
+            'data-dsh-autorestart-restart-overlay-card': postponed ? 'deferred' : phase,
           },
           h(
             'p',

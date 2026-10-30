@@ -2202,6 +2202,20 @@
    * @returns {string}
    */
   /**
+   * HOW LONG THE "RESTART POSTPONED" CARD STAYS ON SCREEN (milliseconds).
+   *
+   * THE REPORT (user, 2026-10-30): "after the interruption I still have a lot of
+   * work to do — a card hovering for ever is in the way". The postponed card is an
+   * ANNOUNCEMENT, not a progress bar: it says what happened for four seconds and
+   * then folds away, while the capsule keeps saying "pending restart · waiting for
+   * N sessions". A NEW postponement (a new stage timestamp) announces itself again.
+   *
+   * The stages that really are running ('snapshotting', 'restarting') are not
+   * affected: they stay while the work lasts.
+   */
+  const RESTART_DEFERRED_CARD_MS = 4000
+
+  /**
    * HOW LONG A STAGE MAY GO UNMENTIONED BEFORE THE CARD STOPS TRUSTING IT.
    *
    * WHY (user report, 2026-10-29): a restart was postponed (a conversation
@@ -2401,6 +2415,7 @@
     // Is the reported stage still worth a card? (a stale stage cannot hang it)
     isRestartStageLive,
     isRestartStageDeferred,
+    RESTART_DEFERRED_CARD_MS,
     // The cadence of the shared poll: fast while a restart is moving, and no
     // polling at all in a hidden tab.
     isRestartMoving,
@@ -4019,15 +4034,52 @@
         // postponed and the Host did not say so) cannot leave a card on screen
         // for ever; the pill still says the restart is pending.
         const running = pending && isRestartStageLive(stage, Date.now())
-        // A POSTPONED RESTART IS NOT A RUNNING ONE (user report, 2026-10-30): when
-        // the Host says the restart went back to waiting because a conversation
-        // started, the card says exactly that. It may stay on screen — it is the
-        // truth — and it can never claim "正在重启".
-        const postponed = pending && isRestartStageDeferred(stage)
 
         useEffect(() => {
           if (running) setSawRunning(true)
         }, [running])
+
+        // THE POSTPONED CARD IS AN ANNOUNCEMENT, NOT A PROGRESS BAR (user report,
+        // 2026-10-30): "after the interruption I still have a lot of work to do — a
+        // card hovering for ever is in the way". It says what happened for four
+        // seconds and then folds away; the capsule keeps saying the restart is
+        // pending. A NEW postponement (a new stage timestamp) announces itself
+        // again. Hooks live up here, with the others, because they must run on
+        // every render — including the renders that draw nothing.
+        const deferredKey = pending && isRestartStageDeferred(stage)
+          ? (Number.isFinite(Number(stage.at)) ? Number(stage.at) : 0)
+          : null
+        const [announcedKey, setAnnouncedKey] = useState(null)
+        const [folded, setFolded] = useState(false)
+
+        useEffect(() => {
+          if (deferredKey === null) {
+            if (announcedKey !== null) {
+              setAnnouncedKey(null)
+              setFolded(false)
+            }
+            return undefined
+          }
+          if (announcedKey === deferredKey) return undefined
+          setAnnouncedKey(deferredKey)
+          setFolded(false)
+          return undefined
+        }, [deferredKey, announcedKey])
+
+        // The four seconds of THIS announcement.
+        useEffect(() => {
+          if (announcedKey === null || folded) return undefined
+          const timer = setTimeout(() => setFolded(true), RESTART_DEFERRED_CARD_MS)
+          return () => clearTimeout(timer)
+        }, [announcedKey, folded])
+
+        // A POSTPONED RESTART IS NOT A RUNNING ONE (user report, 2026-10-30): when
+        // the Host says the restart went back to waiting because a conversation
+        // started, the card says exactly that. It is drawn AT ONCE (a fresh
+        // postponement must not wait for a second render) and the hook above
+        // records which postponement has been announced, so its four seconds can
+        // run out; every new stage timestamp resets the clock.
+        const postponed = deferredKey !== null && !folded
 
         // "已回来" is a MOMENT, not a state: 1.5s and then the card is gone.
         useEffect(() => {

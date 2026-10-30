@@ -1150,3 +1150,53 @@ test('one request at a time: a slow answer is never stacked up', async () => {
   await mounted.poll('autorestart-restart-overlay');
   assert.equal(mounted.fetchCount(), before + 2, 'and the poll continues after the answer landed');
 });
+
+/* ------------------------------------------------------------------ *
+ * 16. THE POSTPONED CARD IS AN ANNOUNCEMENT: FOUR SECONDS, THEN IT FOLDS.
+ *
+ * THE REPORT (user, 2026-10-30): "after the interruption I still have a lot of
+ * work to do — a card hovering for ever is in the way". The capsule keeps saying
+ * the restart is pending; the card only announces the interruption.
+ * ------------------------------------------------------------------ */
+
+test('the postponed card folds away after 4 s (the capsule keeps the count)', async () => {
+  const api = globalThis.__dshAutorestartClient;
+  assert.equal(api.RESTART_DEFERRED_CARD_MS, 4000, 'the announcement lasts four seconds');
+
+  const mounted = mountClient({
+    health: statePayload({ phase: 'waiting', blocking: 1, busyCount: 1, reason: 'deferred: conversation-active after snapshot', at: 1000 }),
+  });
+  let card = await mounted.settled('autorestart-restart-overlay');
+  assert.ok(card, 'the announcement is drawn at once');
+  assert.match(textOf(card), /有新会话在跑，重启已暂缓/);
+
+  // One more pass, so the announcement hook arms its four-second timer (in the
+  // browser the setState of that hook re-renders by itself; the harness renders
+  // only when it is asked to).
+  card = mounted.render('autorestart-restart-overlay');
+  assert.ok(card, 'the announcement is still there right after it was recorded');
+
+  // …four seconds and a bit later it is gone, while the restart is STILL pending
+  // (the capsule is what keeps saying so).
+  await new Promise((resolve) => setTimeout(resolve, 4150));
+  assert.equal(mounted.render('autorestart-restart-overlay'), null, 'the card folded away');
+  assert.equal(mounted.pillText ? mounted.pillText() : '', '', 'the pill is a separate surface');
+
+  // A NEW postponement (a new stage timestamp) announces itself again.
+  mounted.setHealth(statePayload({ phase: 'waiting', busyCount: 1, reason: 'deferred: conversation-active while restarting', at: 2000 }));
+  await mounted.poll('autorestart-restart-overlay');
+  card = mounted.render('autorestart-restart-overlay');
+  assert.ok(card, 'a second interruption announces itself again');
+  assert.equal(card.props['data-dsh-autorestart-restart-overlay-card'], 'deferred');
+})
+
+test('a running stage is NOT folded away (only the announcement is)', async () => {
+  const mounted = mountClient({
+    health: statePayload({ phase: 'snapshotting', progress: { bytes: 2048, total: 4096, percent: 50 } }),
+  });
+  await mounted.settled('autorestart-restart-overlay');
+  await new Promise((resolve) => setTimeout(resolve, 4200));
+  const card = mounted.render('autorestart-restart-overlay');
+  assert.ok(card, 'a copy that is still running keeps its card');
+  assert.match(textOf(card), /DSH 重启前备份中/);
+})

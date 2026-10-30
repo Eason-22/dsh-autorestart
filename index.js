@@ -78,6 +78,7 @@ import {
   clearRollbackReport,
   createBackup,
   listBackups,
+  readManifest,
   readRollbackReport,
   releaseRollbackLock,
   restoreBackup,
@@ -387,7 +388,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.8.6'
+const PLUGIN_VERSION_FALLBACK = '0.8.5'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -2737,11 +2738,82 @@ const titleOfSummary = (item) => {
     return restartBusyTimer
   }
 
-  const markRestartStage = (phase, { blocked = 0, now = Date.now(), reason = null } = {}) => {
+  const markRestartStage = (phase, { blocked = 0, now = Date.now(), reason = null, snapshotBytes } = {}) => {
     if (!RESTART_PHASES.includes(phase)) return null
-    const record = setRestartPhase(state, { phase, blocked, now, reason })
+    const record = setRestartPhase(state, { phase, blocked, now, reason, snapshotBytes })
     persist()
     return record
+  }
+
+  /**
+   * REMEMBER THE SNAPSHOT THIS REQUEST ALREADY TOOK.
+   *
+   * THE REPORT (user, 2026-10-30): the copy finished, a conversation postponed the
+   * restart, and the retry started copying the whole 205 MB again. The snapshot is
+   * the rollback point of THIS restart; it does not get stale because the restart
+   * had to wait. It is stored on the request, so withdrawing or carrying out the
+   * request throws it away by itself.
+   *
+   * @param {object} snapshot the value the snapshot entry returned
+   */
+  const rememberSnapshot = (snapshot) => {
+    if (!state.restart || typeof state.restart !== 'object') return
+    const backup = snapshot && typeof snapshot === 'object' && snapshot.backup && typeof snapshot.backup === 'object'
+      ? snapshot.backup
+      : null
+    if (!backup || backup.ok !== true || typeof backup.dir !== 'string' || backup.dir === '') return
+    const number = (value) => (Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0)
+    state.restart.snapshot = {
+      // The request this copy belongs to: a different request must start over.
+      requestedAt: Number.isFinite(state.restart.requestedAt) ? state.restart.requestedAt : 0,
+      dir: backup.dir,
+      profileDir: typeof snapshot.profileDir === 'string' && snapshot.profileDir !== '' ? snapshot.profileDir : null,
+      files: number(backup.files),
+      bytes: number(backup.bytes),
+      total: number(backup.totalBytes) || number(backup.bytes),
+      at: Date.now(),
+    }
+    persist()
+    log.info('the pre-restart snapshot of this request is remembered; a retry reuses it', {
+      dir: backup.dir,
+      bytes: state.restart.snapshot.bytes,
+    })
+  }
+
+  /**
+   * THE SNAPSHOT THIS REQUEST ALREADY PAID FOR, if it is still usable.
+   *
+   * All three conditions must hold, or the restart copies again:
+   *   1. it belongs to THE SAME request (same `requestedAt`),
+   *   2. the backup directory is still there,
+   *   3. its manifest is readable and reports the size that was recorded — a
+   *      half-deleted or replaced directory never passes for a rollback point.
+   *
+   * @returns {object|null}
+   */
+  const reusableSnapshot = () => {
+    const request = state.restart
+    if (!request || typeof request !== 'object') return null
+    const saved = request.snapshot
+    if (!saved || typeof saved !== 'object') return null
+    if (!Number.isFinite(saved.requestedAt) || !Number.isFinite(request.requestedAt)) return null
+    if (saved.requestedAt !== request.requestedAt) return null
+    if (typeof saved.dir !== 'string' || saved.dir === '') return null
+    try {
+      if (!fs.existsSync(saved.dir)) return null
+      const manifest = readManifest(saved.dir)
+      if (!manifest || typeof manifest !== 'object') return null
+      if (Number.isFinite(manifest.bytes) && Number.isFinite(saved.bytes) && manifest.bytes !== saved.bytes) return null
+    } catch {
+      return null
+    }
+    return saved
+  }
+
+  /** The size this request's snapshot already has, for the stage record. */
+  const knownSnapshotBytes = () => {
+    const saved = state.restart && state.restart.snapshot
+    return saved && typeof saved === 'object' && Number.isFinite(saved.bytes) ? saved.bytes : null
   }
 
   /**
@@ -2761,7 +2833,9 @@ const titleOfSummary = (item) => {
   const deferRestartStage = (reason, { blocked = 0 } = {}) => {
     const text = typeof reason === 'string' && reason !== '' ? 'deferred: ' + reason : 'deferred'
     const count = Number.isFinite(blocked) ? blocked : 0
-    return markRestartStage('waiting', { blocked: count, reason: text })
+    // A request that already took its snapshot keeps saying how big it is: the
+    // number is a fact of this restart and does not expire while it waits.
+    return markRestartStage('waiting', { blocked: count, reason: text, snapshotBytes: knownSnapshotBytes() })
   }
 
   /**
@@ -3785,29 +3859,60 @@ const titleOfSummary = (item) => {
       // and now they say so.
       const stateDir = path.dirname(stateFile)
       resetSnapshotCancel()
-      markRestartStage('snapshotting')
+      // HAS THIS REQUEST ALREADY PAID FOR ITS SNAPSHOT? (user report, 2026-10-30:
+      // the copy finished, a conversation postponed the restart, and the retry
+      // copied all 205 MB again.) Then it is reused as it is: same request, same
+      // directory, same manifest.
+      const paid = reusableSnapshot()
       let cancelled = false
-      let snapshot
-      try {
-        snapshot = await snapshotFn({
-          config,
-          stateDir,
-          log,
-          profile: resolveProfileDirDetailed(),
-          onProgress: (progress) => {
-            recordSnapshotProgress(progress)
-          },
-          shouldCancel: () => snapshotCancelled(),
+      let snapshot = null
+      if (paid !== null) {
+        log.warn('reusing the snapshot this restart already took; not copying the profile again', {
+          dir: paid.dir,
+          bytes: paid.bytes,
         })
-      } finally {
-        // The flag belongs to ONE snapshot; a stale `true` would cancel the
-        // next restart before it began.
-        const wasCancelled = snapshotCancelled()
-        resetSnapshotCancel()
-        // Two ways a copy can be called off: the flag this process set (the
-        // cancel route) or the snapshot reporting it itself. Both mean the same
-        // thing, and both must stop the restart.
-        cancelled = wasCancelled || (snapshot !== null && typeof snapshot === 'object' && snapshot.cancelled === true)
+        snapshot = {
+          backup: {
+            ok: true,
+            dir: paid.dir,
+            bytes: paid.bytes,
+            totalBytes: paid.total,
+            fileCount: paid.files,
+            reused: true,
+          },
+          profileDir: paid.profileDir,
+          profile: { dir: paid.profileDir, source: 'reused' },
+          requested: true,
+          durationMs: 0,
+          error: null,
+          reused: true,
+        }
+      } else {
+        markRestartStage('snapshotting')
+        try {
+          snapshot = await snapshotFn({
+            config,
+            stateDir,
+            log,
+            profile: resolveProfileDirDetailed(),
+            onProgress: (progress) => {
+              recordSnapshotProgress(progress)
+            },
+            shouldCancel: () => snapshotCancelled(),
+          })
+        } finally {
+          // The flag belongs to ONE snapshot; a stale `true` would cancel the
+          // next restart before it began.
+          const wasCancelled = snapshotCancelled()
+          resetSnapshotCancel()
+          // Two ways a copy can be called off: the flag this process set (the
+          // cancel route) or the snapshot reporting it itself. Both mean the same
+          // thing, and both must stop the restart.
+          cancelled = wasCancelled || (snapshot !== null && typeof snapshot === 'object' && snapshot.cancelled === true)
+        }
+        // Remember it: if this restart is postponed now, the retry must not copy
+        // the profile a second time.
+        if (!cancelled) rememberSnapshot(snapshot)
       }
       if (cancelled) {
         // The user called it off while the files were being copied: the

@@ -23,7 +23,7 @@ import test from 'node:test';
 
 import { apply, createRuntime, normalizeConfig, takePreRestartSnapshot } from '../index.js';
 import { createBackup, listBackups } from '../lib/backup.js';
-import { createEmptyState, readState, requestRestart, setRestartPhase, writeState } from '../lib/checkpoint.js';
+import { cancelRestart, createEmptyState, readState, requestRestart, setRestartPhase, writeState } from '../lib/checkpoint.js';
 import {
   describeRestartPhase,
   SLOW_STALL_MS,
@@ -596,4 +596,119 @@ test('a conversation that starts while the kill is being carried out degrades wi
   assert.equal(stage.phase, 'waiting', 'the false "restarting" is withdrawn at once');
   assert.match(String(stage.reason), /^deferred: conversation-active while restarting/);
   assert.equal(runtime.state.phase, 'deferred', 'the retry is scheduled again');
+});
+
+// (8) ONE REQUEST, ONE SNAPSHOT ------------------------------------------------------
+//
+// THE REPORT (user, 2026-10-30): the copy finished, a conversation postponed the
+// restart, and the retry copied the whole 205 MB again. The snapshot is the
+// rollback point of THIS restart and does not expire while the restart waits.
+
+/** A runtime whose snapshot really writes a backup into `<root>/backups`. */
+function makeReuseRuntime(t, { root, profile, stateFile, backups, agents, counter }) {
+  const ctx = fakeContext();
+  ctx.agents.list = () => agents.map((id) => ({ id, status: 'running' }));
+  const config = normalizeConfig({
+    stateFile,
+    restartMode: 'app',
+    settleMs: 0,
+    restartGraceMs: 0,
+    backupOnRestart: true,
+    backupIncludePlugins: true,
+  });
+  const runtime = createRuntime(ctx, config, {
+    env: { isDesktopApp: true, appExePath: 'C:\\fake\\DeepSeek Harness.exe' },
+    snapshot: async ({ onProgress }) => {
+      counter.copies += 1;
+      const backup = await createBackup({
+        profileDir: profile,
+        backupsDir: backups,
+        includePlugins: true,
+        now: 1_700_000_000_000 + counter.copies * 1000,
+      });
+      if (typeof onProgress === 'function') onProgress({ files: backup.fileCount, bytes: backup.bytes, total: backup.totalBytes });
+      // A conversation starts WHILE the files are copied: the restart will be
+      // postponed right after the copy.
+      agents.push('sess-arrived-during-copy-' + counter.copies);
+      return { backup, profileDir: profile, profile: { dir: profile, source: 'test' }, requested: true, durationMs: 0, error: null };
+    },
+    armWatchdog: () => ({ ok: false, tier: 'none', reason: 'the test arms nothing' }),
+    scheduleDetached: () => ({ ok: true, pid: 4242 }),
+    launchWatcher: () => ({ ok: true, method: 'test', error: null }),
+    probeInstance: async () => ({ ok: true, reason: 'unused' }),
+  });
+  return runtime;
+}
+
+test('a postponed restart reuses the snapshot it already took (no second copy)', async (t) => {
+  const root = tempDir(t, 'reuse-snapshot');
+  const profile = makeProfile(root, { count: 8 });
+  const stateFile = path.join(root, 'state.json');
+  const backups = path.join(root, 'backups');
+  const agents = [];
+  const counter = { copies: 0 };
+  const runtime = makeReuseRuntime(t, { root, profile, stateFile, backups, agents, counter });
+
+  requestRestart(runtime.state, { reason: 'phase test', bySessionId: 'sess-reuse' });
+  await runtime.executeRestart();
+  assert.equal(counter.copies, 1, 'the first attempt copied the profile');
+  const firstSnapshot = runtime.state.restart && runtime.state.restart.snapshot;
+  assert.ok(firstSnapshot && typeof firstSnapshot.dir === 'string', 'the snapshot of this request is remembered');
+  assert.equal(runtime.restartStageInfo().phase, 'waiting', 'the restart was postponed after the copy');
+  const bytesAfterDeferral = runtime.restartStageInfo().snapshotBytes;
+  assert.equal(bytesAfterDeferral, firstSnapshot.bytes, 'the stage keeps the size of that snapshot');
+
+  // The conversation ends: the retry must NOT copy again.
+  agents.length = 0;
+  await runtime.executeRestart();
+  assert.equal(counter.copies, 1, 'the retry did not copy the profile a second time');
+  assert.equal(listBackups(backups).length, 1, 'no second snapshot directory was produced');
+  assert.equal(runtime.restartStageInfo().snapshotBytes, bytesAfterDeferral, 'and the size did not change');
+  const stage = runtime.restartStageInfo();
+  assert.ok(stage.phase === 'restarting' || stage.phase === 'waiting', `the retry went on, got ${stage.phase}`);
+});
+
+test('after the request is withdrawn, the next restart copies again', async (t) => {
+  const root = tempDir(t, 'reuse-cancel');
+  const profile = makeProfile(root, { count: 5 });
+  const stateFile = path.join(root, 'state.json');
+  const backups = path.join(root, 'backups');
+  const agents = [];
+  const counter = { copies: 0 };
+  const runtime = makeReuseRuntime(t, { root, profile, stateFile, backups, agents, counter });
+
+  requestRestart(runtime.state, { reason: 'phase test', bySessionId: 'sess-cancel' });
+  await runtime.executeRestart();
+  assert.equal(counter.copies, 1);
+
+  // The user calls the pending restart off.
+  cancelRestart(runtime.state, { now: Date.now() });
+  assert.equal(runtime.state.restart, null, 'the request is gone');
+  assert.equal(listBackups(backups).length, 1, 'the snapshot of the withdrawn request stays on disk');
+
+  // A NEW request starts from scratch: nothing of the old one is reused.
+  agents.length = 0;
+  requestRestart(runtime.state, { reason: 'phase test again', bySessionId: 'sess-cancel' });
+  await runtime.executeRestart();
+  assert.equal(counter.copies, 2, 'the new request copied the profile again');
+});
+
+test('a snapshot directory that disappeared is not reused', async (t) => {
+  const root = tempDir(t, 'reuse-deleted');
+  const profile = makeProfile(root, { count: 5 });
+  const stateFile = path.join(root, 'state.json');
+  const backups = path.join(root, 'backups');
+  const agents = [];
+  const counter = { copies: 0 };
+  const runtime = makeReuseRuntime(t, { root, profile, stateFile, backups, agents, counter });
+
+  requestRestart(runtime.state, { reason: 'phase test', bySessionId: 'sess-deleted' });
+  await runtime.executeRestart();
+  assert.equal(counter.copies, 1);
+  const saved = runtime.state.restart.snapshot;
+  fs.rmSync(saved.dir, { recursive: true, force: true });
+
+  agents.length = 0;
+  await runtime.executeRestart();
+  assert.equal(counter.copies, 2, 'the missing directory forced a fresh copy');
 });

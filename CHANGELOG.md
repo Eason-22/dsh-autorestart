@@ -1,57 +1,38 @@
 # Changelog
 
-## 0.8.6 — 2026-10-30
-
-### 现场
-
-备份做完之后，主界面浮层和底部胶囊**一起说了 25 秒的「正在重启…」**，而实际上什么都没在重启：宿主已经把重启交给 detached helper，helper 还在等它自己的空闲复查；这期间又有会话忙起来，helper 复查被拒之后宿主才把阶段改回等待。于是一整段时间里界面在说假话。用户原话：「实际并不是正在重启」。
-
-### 改
-
-- **宿主：「restarting」只表示「即将 / 正在杀进程」。**
-  - 备份一结束、在标记「restarting」**之前**先当场复查一次空闲门：被挡就在同一次 tick 退回等待，reason 写成「deferred: conversation-active after snapshot: <原因>」，不等到 helper 才发现（那 25 秒的第一段就是这么没的）。
-  - 进入「restarting」之后（等 helper / 等调度）**每 350ms 复查一次**空闲门，一旦有会话忙立刻降级回等待（reason「deferred: conversation-active while restarting」）并把重试重新排上——几十秒的假 restarting 窗口没有了。
-  - 其余一切等待态仍然只能是等待（带 reason），restarting 的语义收窄。
-- **界面：被暂缓就说被暂缓，绝不说「正在重启」。**
-  - 新增 isRestartStageDeferred(stage)：阶段是 waiting 且 reason 以「deferred:」开头。
-  - 这时浮层**留着**（它说的是真话），文案换成「**有新会话在跑，重启已暂缓**」+ 第二行小字「等它结束会自动继续 · 已等 N 个会话」（英文：A conversation just started — restart postponed / It will retry automatically when idle）。
-  - 渲染优先级上暂缓卡片高于其它一切：即使同一次渲染里阶段还写着 restarting，也直接画暂缓文案，旧词一帧都不留。
-  - 「正在重启…」只在真的进入杀进程阶段才出现。
-  - **状态轮询跟着状态提速**：重启进行中（`pendingRestart` 且阶段是等待 / 备份中 / 正在重启）时，共享轮询从 2 秒临时降到 **500ms**，于是「被打断」这件事一秒内就能反映到浮层上；重启一旦结束（`pendingRestart` 变 false 或回到「已回来」）立刻恢复 2 秒。页面隐藏时不轮询（后台标签不空转），可见性恢复时立刻补查一次；同一时刻只允许一个在途请求，慢响应不会堆积。
-
-### 验证
-
-- node --test plugins/dsh-autorestart/test/*.test.mjs → **822 / 822 全绿**（0.8.5 的 815 + 新增 7 条）。
-- 新用例（宿主侧 2 条）：备份完成后会话立刻变忙 → **同一次 tick** 就已经是等待（命令行没跑、watchdog 没 arm、reason 是 conversation-active after snapshot）；restarting 期间会话变忙 → 守卫回调一触发就降级，并断言复查周期落在 300–500ms。
-- 新用例（界面侧 5 条）：waiting + deferred: → 渲染「重启已暂缓」且**不含**「正在重启」；英文同款；真 restarting 仍显示「正在重启…」且不是暂缓卡片；普通 waiting（无 reason）仍然什么都不画；从 restarting 降到 waiting+deferred 后**下一次渲染**就换文案。
-- 新用例（轮询 4 条）：重启进行中 → 轮询周期 500ms；结束后 → 回到 2000ms；页面隐藏 → 一个请求都不发、恢复可见立刻补查；慢响应在途时后续 tick 被跳过（单飞）。
-- 真机复现路径由主会话验证（打断一次重启，看浮层是否立刻改口）。
-
 ## 0.8.5 — 2026-10-30
 
 ### 现场
 
-重启点下去、备份做完了，可就在这一刻又有会话忙起来，重启被推迟回等待。**主界面中央的「DSH 重启前备份中」浮层从此一直挂着**，不消失也不更新，直到下一次重启才换掉——备份早就结束了，卡片却还在说正在备份。事后读状态文件看到的是 `phase=back`、`snapshotBytes=205494778`，那个中间态已经被后来的一次重启覆盖掉了。
+三次真机反馈说的是同一件事：**浮层说的不是真话**。先是重启被打断、备份早就结束了，「DSH 重启前备份中」却一直挂着不消失；修完这个，又出现备份做完后**整整 25 秒**界面（浮层和底部胶囊）一起说「正在重启…」而实际什么都没在重启——宿主把重启交给了 detached helper，helper 还在等自己的空闲复查，被拒之后才把阶段改回等待；再后来是「被打断之后我还有大活要干，一直悬浮很烦人」。
 
-### 改
+### 修复
 
-- **阶段必须有去有回**：宿主新增 `deferRestartStage()`，把「重启被推迟」的每一条路径都写成 `waiting`：闸门回收（又有会话忙）、detached helper 拒绝杀进程、重排重试、helper 调度失败。记录里带上 `reason`（`deferred: conversation-active` 之类），事后能看出是推迟而不是在跑。
-- **`snapshotting` 只在真拷贝期间存在**：备份函数一返回（拷完 / 取消 / 抛错），阶段立刻离开 `snapshotting`——拷完就标 `restarting`（回滚点已生成，从这里不能取消），取消就清空，抛错就走推迟。以前从拷贝结束到真正执行重启之间那一整段（arm watchdog、写判定记录、调度 helper）都还挂着 `snapshotting`，一旦推迟就再也回不来。
-- **残留中间态不许跨进程继承**：启动时读到 `snapshotting` / `restarting` 一律改写——新进程起来是 `back`，同一进程里插件重载则是 `waiting`（`reason: boot: …`）。阶段描述的是「正在做的事」，做事的那条进程没了，阶段也就不该在。
-- **界面兜底（陈旧保护）**：浮层现在要求阶段是「新鲜」的——`snapshotting` 必须 10 秒内有过更新（拷贝期间每个进度 tick 都会刷新 `at`），任何中间阶段 15 秒内 `at` 没变就当过期，**直接不画**；胶囊照旧显示「待重启 · 等待 N 个会话」。宿主修好了，界面也不再可能被一个陈旧阶段挂住。
+- **阶段必须有去有回**：新增 `deferRestartStage()`，把「重启被推迟」的每一条路径都写成 `waiting`：闸门回收（又有会话忙）、detached helper 拒绝杀进程、重排重试、helper 调度失败；记录里带 `reason`（`deferred: conversation-active` 之类），事后能看出是推迟而不是在跑。放弃重启时一并清掉阶段。
+- **`snapshotting` 只在真拷贝期间存在**：备份函数一返回（拷完 / 取消 / 抛错），阶段立刻离开 `snapshotting`——拷完就标 `restarting`，取消就清空，抛错就走推迟。以前从拷贝结束到真正执行重启之间那一整段（arm watchdog、写判定记录、调度 helper）都还挂着 `snapshotting`，一旦推迟就再也回不来。
+- **`restarting` 只表示「即将 / 正在杀进程」**：备份一结束、标记它**之前**先当场复查一次空闲门，被挡就在同一次 tick 退回等待（`deferred: conversation-active after snapshot: …`），命令行不跑、watchdog 不 arm；进入 `restarting` 之后（等 helper / 等调度）**每 350ms** 复查一次，一有会话忙立刻降级回等待（`deferred: conversation-active while restarting`）并重新排上——几十秒的假 `restarting` 窗口没有了。
+- **残留中间态不许跨进程继承**：启动时读到 `snapshotting` / `restarting` 一律改写——新进程起来是 `back`，同一进程里插件重载则是 `waiting`（`reason: boot: …`）。
+- **同一次重启请求不重复备份**：快照是这次重启的回滚点，不因为重启要等待就作废。请求里记下本次已完成快照（`state.restart.snapshot`：请求时刻 + 目录 + 体积/文件数），重试时三个条件都满足就直接复用——**同一请求**、**目录还在**、**manifest 体积对得上**；任一不满足才重新拷贝。请求被取消 / 完成，标记随请求对象一起消失，下次重新备份。用户那次 205 MB 白拷一遍的事故不会再有。
 - 新增 `restartPhase.reason`（状态路由与 health 简报都带）。
+
+### 界面
+
+- **被暂缓就说被暂缓，绝不说「正在重启」**：`waiting` 且 `reason` 以 `deferred:` 开头时，浮层文案是「**有新会话在跑，重启已暂缓**」+ 小字「等它结束会自动继续 · 已等 N 个会话」（英文 `A conversation just started — restart postponed` / `It will retry automatically when idle`）；渲染优先级最高，同一次渲染里阶段还写着 `restarting` 也直接画暂缓文案，旧词一帧不留。「正在重启…」只在真的进入杀进程阶段才出现。
+- **暂缓卡片是通知，不是进度条**：显示 **4 秒**后自动收起（胶囊继续显示「待重启 · 等待 N 个会话」），新的暂缓（新的阶段时间戳）会再通知 4 秒；「备份中」「正在重启…」不受影响，活儿还在就一直显示。
+- **陈旧保护**：`snapshotting` 必须 10 秒内有过更新（拷贝期间每个进度 tick 都刷新 `at`），任何中间阶段 15 秒内 `at` 没变就当过期，**直接不画**。
+- **状态轮询跟着状态提速**：重启进行中（`pendingRestart` 且阶段是等待 / 备份中 / 正在重启）时，共享轮询从 2 秒临时降到 **500ms**，被新会话打断这件事一秒内就能反映到浮层；重启结束立刻恢复 2 秒。页面隐藏时不轮询，可见性恢复立刻补查一次；同一时刻只允许一个在途请求。
 
 ### 文档
 
-- **npm 一句话描述换成新口径**（`package.json` 的 `description`）：原来只讲「等空闲→重启→续跑」，现在把「重启前快照 + 起不来自动还原 + 倒计时关机 + Windows 桌面 / 托管 dsh web（Windows / WSL / Linux）都可用」一起讲清；这句是 npm 搜索结果那一行，**必须随新版本发布才生效**（0.8.4 之前一直显示旧描述就是这个原因）。
-- **README（英）/ docs/README.zh.md 补 0.8.5 的行为修正**：重启被打断退回等待时浮层立即消失（阶段会被重置）、阶段超过 15 秒无更新视为过期不再显示（胶囊仍显示等待数）——「浮层不会悬停」这件事在文档里也有据可查。
+- **npm 一句话描述换成新口径**（`package.json` 的 `description`）：原来只讲「等空闲→重启→续跑」，现在把「重启前快照 + 起不来自动还原 + 倒计时关机 + Windows 桌面 / 托管 dsh web（Windows / WSL / Linux）都可用」一起讲清；这句是 npm 搜索结果那一行，**必须随新版本发布才生效**。
+- **README（英）/ docs/README.zh.md 补行为说明**：被打断时显示「重启已暂缓」而不是「正在重启」、暂缓卡片 4 秒后收起、阶段超过 15 秒无更新视为过期不再显示（胶囊仍显示等待数）。
 
 ### 验证
 
-- `node --test plugins/dsh-autorestart/test/*.test.mjs` → **815 / 815 全绿**（0.8.4 的 809 + 新增 6 条）。
-- 新用例（宿主侧 4 条）：拷完被拒的重启最终是 `waiting`、且 arm watchdog 那一刻已经是 `restarting`；helper 门禁拒绝（手动触发守卫回调）后阶段回到 `waiting`；另一进程残留的 `snapshotting` 不会带到新进程；同进程重载残留的 `restarting` 被重置为 `waiting`。
-- 新用例（界面侧 2 条，假时钟）：`isRestartStageLive` 的 15 秒 / 10 秒边界；`snapshotting` 且 15 秒无更新 → 浮层不渲染，3 秒内有更新 → 正常渲染，`waiting` → 永不渲染。
-- 真机复现路径由主会话验证（打断一次重启，看浮层是否随阶段退回而消失）。
+- `node --test plugins/dsh-autorestart/test/*.test.mjs` → **全绿**（细节见本次提交说明）。
+- 宿主侧新增用例：拷完被拒的重启最终是 `waiting` 且 arm watchdog 那一刻已是 `restarting`；helper 门禁拒绝后阶段回到 `waiting`；另一进程残留的 `snapshotting` 不带进新进程；同进程重载残留的 `restarting` 被重置；备份完成后会话立刻变忙 → 同一次 tick 就是等待；`restarting` 期间会话变忙 → 守卫回调一触发即降级（复查周期断言落在 300–500ms）；备份完成 → 暂缓 → 重试**不产生第二个快照目录**且 `snapshotBytes` 不变；取消后重新请求 → 重新备份；快照目录被删 → 重新备份。
+- 界面侧新增用例：15 秒 / 10 秒陈旧边界；`snapshotting` 15 秒无更新不渲染、3 秒内有更新正常渲染；`waiting` + `deferred:` 渲染「重启已暂缓」且不含「正在重启」（中英各一条）；真 `restarting` 仍「正在重启…」；降级后下一次渲染即改口；暂缓卡片 4 秒后收起、再暂缓再出现；运行中的卡片不会被收起；轮询 500ms / 2000ms 切换、隐藏页不发请求、慢响应单飞。
+- 真机复现路径由主会话验证（打断一次重启，看浮层是否立刻改口、是否 4 秒后收起、重试是否不再拷一遍）。
 
 ## 0.8.4 — 2026-10-29
 

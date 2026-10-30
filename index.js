@@ -3761,10 +3761,15 @@ const titleOfSummary = (item) => {
    */
   const rollbackInProcess = ({ backup, profileDir, reason }) => {
     const restored = []
-    if (!backup || backup.ok !== true || typeof backup.dir !== 'string' || backup.dir === '') {
-      log.error('the restart failed and there is no snapshot to roll back to:', reason)
-      writeRestartReport({ rolledBack: false, reason, backupDir: null, restored })
-      return { rolledBack: false, restored, error: 'no snapshot to roll back to' }
+    // ONLY a backup that a boot has already proven may be rolled back to. The
+    // snapshot taken right before THIS restart may be the broken state itself
+    // (the user edited a plugin and then restarted), so it is never the target.
+    const knownGood = latestKnownGood(backupsDirFor(stateDirOf()))
+    const targetDir = knownGood && typeof knownGood.dir === 'string' ? knownGood.dir : ''
+    if (targetDir === '') {
+      log.error('the restart failed and there is no known-good backup to roll back to:', reason)
+      writeRestartReport({ rolledBack: false, reason: 'no-known-good: ' + reason, backupDir: null, restored })
+      return { rolledBack: false, restored, error: 'no-known-good' }
     }
     if (typeof profileDir !== 'string' || profileDir === '') {
       log.error('the restart failed and the profile directory is unknown:', reason)
@@ -3781,24 +3786,24 @@ const titleOfSummary = (item) => {
     }
     let result = null
     try {
-      result = restoreBackup({ backupDir: backup.dir, profileDir })
+      result = restoreBackup({ backupDir: targetDir, profileDir })
     } catch (error) {
       result = { ok: false, restored: [], error: String(error) }
     } finally {
       releaseRollbackLock(stateDirOf())
     }
     if (result && result.ok === true) {
-      log.warn('the pre-restart snapshot was restored:', {
+      log.warn('the known-good backup was restored:', {
         reason,
         restored: result.restored,
-        backupDir: backup.dir,
+        backupDir: targetDir,
       })
-      writeRestartReport({ rolledBack: true, reason, backupDir: backup.dir, restored: result.restored })
+      writeRestartReport({ rolledBack: true, reason, backupDir: targetDir, restored: result.restored })
       return { rolledBack: true, restored: result.restored, error: null }
     }
     const error = (result && result.error) || 'the restore failed'
-    log.error('the pre-restart snapshot could not be restored:', reason, error)
-    writeRestartReport({ rolledBack: false, reason, backupDir: backup.dir, restored })
+    log.error('the known-good backup could not be restored:', reason, error)
+    writeRestartReport({ rolledBack: false, reason, backupDir: targetDir, restored })
     return { rolledBack: false, restored, error }
   }
 
@@ -3814,9 +3819,13 @@ const titleOfSummary = (item) => {
    * @returns {{ ok: boolean, method: string, error: string|null, scriptPath: string|null }}
    */
   const armRollbackWatcher = ({ backup, profileDir, gateScriptPath = null }) => {
-    if (!backup || backup.ok !== true || typeof backup.dir !== 'string' || backup.dir === '') {
-      log.warn('no pre-restart snapshot: the automatic rollback is not armed')
-      return { ok: false, method: 'none', error: 'no snapshot', scriptPath: null }
+    // The watcher must restore a state a boot has already proven. The snapshot
+    // of the restart it is guarding may be the broken state itself.
+    const knownGood = latestKnownGood(backupsDirFor(stateDirOf()))
+    const targetDir = knownGood && typeof knownGood.dir === 'string' ? knownGood.dir : ''
+    if (targetDir === '') {
+      log.warn('no known-good backup: the automatic rollback is not armed')
+      return { ok: false, method: 'none', error: 'no-known-good', scriptPath: null }
     }
     if (typeof profileDir !== 'string' || profileDir === '') {
       log.warn('the profile directory is unknown: the automatic rollback is not armed')
@@ -3833,7 +3842,7 @@ const titleOfSummary = (item) => {
       portFile: accessFilePath(stateDir),
       expectedBootId: bootId,
       outcomeFile: path.join(stateDir, RESTART_OUTCOME_FILE),
-      backupDir: backup.dir,
+      backupDir: targetDir,
       profileDir,
       reportPath: path.join(stateDir, ROLLBACK_REPORT_NAME),
       lockFile: path.join(stateDir, ROLLBACK_LOCK_NAME),
@@ -4066,9 +4075,14 @@ const titleOfSummary = (item) => {
       // old one (v1) is NOT started next to it — they take the same lock, and
       // the one that loses it gives up. If v2 lost, the profile would be
       // restored but nothing would be running any more.
-      const watchdogArm = backup && backup.ok === true && profileDir !== null
+      // The watchdog restores a state a boot has already proven, NOT the
+      // snapshot of this restart (which may be the broken state itself).
+      const knownGoodForWatchdog = backup && backup.ok === true && profileDir !== null
+        ? latestKnownGood(backupsDirFor(stateDirOf()))
+        : null
+      const watchdogArm = knownGoodForWatchdog && typeof knownGoodForWatchdog.dir === 'string' && profileDir !== null
         ? armWatchdogFn({
-          snapshotDir: backup.dir,
+          snapshotDir: knownGoodForWatchdog.dir,
           profileDir,
           relaunchCommand: useCustomCommand && typeof config.restartCommand === 'string' && config.restartCommand.trim() !== ''
             ? {

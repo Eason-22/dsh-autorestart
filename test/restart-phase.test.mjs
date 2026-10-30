@@ -22,7 +22,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { apply, createRuntime, normalizeConfig, takePreRestartSnapshot } from '../index.js';
-import { createBackup, listBackups } from '../lib/backup.js';
+import { backupStamp, createBackup, listBackups, markKnownGood } from '../lib/backup.js';
 import { cancelRestart, createEmptyState, readState, requestRestart, setRestartPhase, writeState } from '../lib/checkpoint.js';
 import {
   describeRestartPhase,
@@ -371,6 +371,20 @@ test('a copy that is followed by a refused restart goes back to waiting', async 
   });
   // What the stage was at the moments that matter: arming the watchdog happens
   // IMMEDIATELY after the copy, so 'snapshotting' must already be over there.
+  //
+  // THE WATCHDOG NEEDS A KNOWN-GOOD COPY (user decision, 2026-10-30): it restores
+  // a state a boot has already proven, never the snapshot of this restart. The
+  // runtime therefore only reaches `armWatchdog` when one exists - so the test
+  // lays one down first, exactly the way `markKnownGood` marks it after a boot.
+  const knownGoodDir = path.join(backups, backupStamp(Date.now() - 60 * 60 * 1000));
+  fs.mkdirSync(path.join(knownGoodDir, 'config'), { recursive: true });
+  fs.writeFileSync(path.join(knownGoodDir, 'config', 'cordis.patch.yml'), 'plugins: []\n', 'utf8');
+  fs.writeFileSync(
+    path.join(knownGoodDir, 'manifest.json'),
+    JSON.stringify({ at: Date.now() - 60 * 60 * 1000, bytes: 12, files: ['cordis.patch.yml'], includePlugins: false }),
+    'utf8',
+  );
+  assert.equal(markKnownGood(knownGoodDir, { reason: 'test' }), true, 'the test copy is marked known-good');
   const stageWhenArming = [];
   let copyFinished = 0;
   const runtime = createRuntime(ctx, config, {

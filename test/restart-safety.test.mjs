@@ -38,7 +38,16 @@ import test from 'node:test'
 
 import { createRuntime, normalizeConfig, takePreRestartSnapshot } from '../index.js'
 import { requestRestart } from '../lib/checkpoint.js'
-import { claimRollbackLock, releaseRollbackLock } from '../lib/backup.js'
+import {
+  backupStamp,
+  claimRollbackLock,
+  KIND_KNOWN_GOOD,
+  KIND_SNAPSHOT,
+  latestKnownGood,
+  listBackupIdentities,
+  markKnownGood,
+  releaseRollbackLock,
+} from '../lib/backup.js'
 import { ACCESS_FILE_NAME, readAccessRecord, resolveAccessUrl, writeAccessRecord } from '../lib/access.js'
 import { healthUrlForPort, probeHealth, waitForHealthyInstance } from '../lib/health.js'
 import { buildWatcherCommandLine, launchDetachedWatcher, runCommandNow } from '../lib/restart.js'
@@ -104,6 +113,42 @@ function stateDir(base, label) {
   const dir = path.join(base, `state-${label}`)
   fs.mkdirSync(dir, { recursive: true })
   return { dir, file: path.join(dir, 'state.json') }
+}
+
+/**
+ * ONE KNOWN-GOOD COPY in the backups directory of a state directory.
+ *
+ * The rollback target is NOT "the snapshot taken right before this restart" any
+ * more (user decision, 2026-10-30): that snapshot may be the broken state itself
+ * — the user edits a plugin and then clicks restart. What is restored is the
+ * newest copy a boot has already PROVEN. A test that expects a rollback (or a
+ * watchdog) therefore has to hand the runtime such a copy first, exactly the way
+ * `markKnownGood` marks it once a boot came up.
+ *
+ * @param {{ dir: string }} state the state directory the backups hang off
+ * @param {{ patch?: string, at?: number, version?: string }} [options]
+ * @returns {string} the directory of the known-good copy
+ */
+function seedKnownGood(state, options = {}) {
+  const patch = typeof options.patch === 'string' ? options.patch : 'rows:\n  - id: known-good\n'
+  const at = Number.isFinite(options.at) ? options.at : Date.now() - 60 * 60 * 1000
+  const version = typeof options.version === 'string' ? options.version : '0.8.5'
+  const dir = path.join(state.dir, 'backups', backupStamp(at))
+  fs.mkdirSync(path.join(dir, 'config'), { recursive: true })
+  fs.writeFileSync(path.join(dir, 'config', 'cordis.patch.yml'), patch, 'utf8')
+  fs.writeFileSync(
+    path.join(dir, 'manifest.json'),
+    JSON.stringify({
+      at,
+      atLocal: new Date(at).toISOString(),
+      bytes: patch.length,
+      files: ['cordis.patch.yml'],
+      includePlugins: false,
+    }),
+    'utf8',
+  )
+  assert.equal(markKnownGood(dir, { reason: 'test', version }), true, 'the test copy is marked known-good')
+  return dir
 }
 
 /** The config of a hosted host that is restarted by a custom command. */
@@ -229,6 +274,12 @@ test('the time limit of the restart command is bounded', async () => {
 async function runHostedRestart(t, options = {}) {
   const { base, profile } = fixture(t, options.label || 'hosted')
   const state = stateDir(base, options.label || 'hosted')
+  // THE ROLLBACK NET HAS TO HAVE SOMETHING TO RESTORE: a known-good copy is laid
+  // down first, exactly as a boot that came up would leave it. `knownGood: null`
+  // is the "nothing was ever proven" case, where nothing may be restored.
+  const knownGoodDir = options.knownGood === null
+    ? null
+    : seedKnownGood(state, options.knownGood === undefined ? {} : options.knownGood)
   const fake = fakeContext()
   const commands = []
   const watchers = []
@@ -239,6 +290,9 @@ async function runHostedRestart(t, options = {}) {
     snapshot: (options_) => takePreRestartSnapshot(options_),
     runCommand: async ({ command }) => {
       commands.push(command)
+      // The restart command is free to break the profile on its way out; the
+      // rollback has to undo whatever it did.
+      if (typeof options.onCommand === 'function') options.onCommand({ command, profile })
       return options.commandOutcome || { ok: true, command, exitCode: 0, timedOut: false }
     },
     launchWatcher: (options_) => {
@@ -259,17 +313,23 @@ async function runHostedRestart(t, options = {}) {
   })
   requestRestart(runtime.state, { reason: 'test', bySessionId: 'sess-safety' })
   await runtime.executeRestart()
-  return { base, profile, state, runtime, fake, commands, watchers, probes, watchdogArms }
+  return { base, profile, state, runtime, fake, commands, watchers, probes, watchdogArms, knownGoodDir }
 }
 
 test('the hosted branch arms the rollback watcher BEFORE the restart command runs', async (t) => {
-  const { commands, watchers, probes, state } = await runHostedRestart(t, { label: 'armed' })
+  const { commands, watchers, probes, state, knownGoodDir } = await runHostedRestart(t, { label: 'armed' })
   assert.equal(commands.length, 1, 'the restart command ran exactly once')
   assert.equal(watchers.length, 1, 'the rollback watcher was armed exactly once')
   assert.equal(typeof watchers[0].watchScriptPath, 'string')
   assert.ok(
     fs.existsSync(watchers[0].watchScriptPath),
     'the watcher script is written before the command kills the host',
+  )
+  // THE ROLLBACK TARGET IS THE KNOWN-GOOD COPY, not the snapshot of this restart
+  // (which may be the broken state itself): the script has to carry that path.
+  assert.ok(
+    fs.readFileSync(watchers[0].watchScriptPath, 'utf8').includes(knownGoodDir),
+    'the watcher restores the known-good copy',
   )
   assert.equal(probes.length, 1, 'the new instance is confirmed once')
   assert.ok(fs.existsSync(path.join(state.dir, 'access.json')), 'the instance record exists')
@@ -278,11 +338,13 @@ test('the hosted branch arms the rollback watcher BEFORE the restart command run
 test('when the watchdog v2 is armed, the old watcher is NOT started', async (t) => {
   // The two watchdogs take the same lock: the one that loses it gives up. If
   // v2 lost, the profile would be restored and nothing would be running.
-  const { commands, watchers, probes, state, watchdogArms } = await runHostedRestart(t, {
+  const { commands, watchers, probes, state, watchdogArms, knownGoodDir } = await runHostedRestart(t, {
     label: 'v2-wins',
     watchdogArm: { ok: true, tier: 'scheduled-task', reason: '' },
   })
   assert.equal(watchdogArms.length, 1, 'the new watchdog was armed once')
+  // v2 rolls back the PROVEN state, not the snapshot this restart just took.
+  assert.equal(watchdogArms[0].snapshotDir, knownGoodDir, 'v2 watches the known-good copy')
   assert.equal(watchers.length, 0, 'the old watcher is NOT started next to v2')
   assert.equal(commands.length, 1, 'the restart command still ran exactly once')
   assert.equal(probes.length, 1, 'the new instance is confirmed once')
@@ -291,24 +353,31 @@ test('when the watchdog v2 is armed, the old watcher is NOT started', async (t) 
 })
 
 test('the hosted branch rolls the snapshot back ONCE when the new instance never answers', async (t) => {
-  const { profile, state, runtime, fake, commands, watchers } = await runHostedRestart(t, {
+  const broken = 'rows:\n  - id: broken\n'
+  const { profile, state, runtime, fake, commands, watchers, knownGoodDir } = await runHostedRestart(t, {
     label: 'failed',
+    knownGood: { patch: 'rows:\n  - id: known-good\n' },
+    // The restart command breaks the configuration on its way out; the rollback
+    // has to undo that — with the KNOWN-GOOD copy, the only proven state.
+    onCommand: ({ profile: where }) => fs.writeFileSync(path.join(where, 'cordis.patch.yml'), broken, 'utf8'),
     probeOutcome: { ok: false, reason: 'the new instance never answered' },
   })
 
-  // The profile is changed AFTER the snapshot — the rollback has to undo it.
-  fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), 'rows:\n  - id: broken\n', 'utf8')
-
-  // Hmm: the change has to happen BEFORE the restart to be rolled back, so the
-  // test drives the runtime again with the change already in place.
   assert.equal(commands.length, 1)
 
   const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-rollback.json'), 'utf8'))
   assert.equal(report.ok, false, 'the report says the restart failed')
-  assert.equal(report.rolledBack, true, 'the snapshot was restored')
+  assert.equal(report.rolledBack, true, 'the known-good copy was restored')
+  assert.equal(report.backupDir, knownGoodDir, 'the KNOWN-GOOD copy is the rollback target')
   assert.match(String(report.reason), /never answered/, 'the report says WHY')
   assert.equal(report.appStarted, false, 'no second copy of the host was started')
   assert.equal(watchers.length, 1, 'the watcher was armed exactly once — no second rollback')
+  assert.equal(
+    fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'),
+    'rows:\n  - id: known-good\n',
+    'the profile holds the known-good state again',
+  )
+  assert.ok(Array.isArray(report.restored) && report.restored.includes('cordis.patch.yml'))
 
   const marker = JSON.parse(fs.readFileSync(path.join(state.dir, 'restart-outcome.json'), 'utf8'))
   assert.equal(marker.decided, true)
@@ -322,11 +391,13 @@ test('the hosted branch rolls the snapshot back ONCE when the new instance never
   assert.match(String(runtime.lastRollback.reason), /never answered/)
 })
 
-test('the hosted branch restores the snapshot of the profile it took', async (t) => {
+test('the hosted branch restores the KNOWN-GOOD copy, never the snapshot of this restart', async (t) => {
   const { base, profile } = fixture(t, 'restore')
   const state = stateDir(base, 'restore')
+  const knownGoodDir = seedKnownGood(state, { patch: 'rows:\n  - id: known-good\n' })
   const fake = fakeContext()
-  // A profile that the restart command breaks BEFORE the restart happens.
+  // A profile that is ALREADY broken when the snapshot is taken: the snapshot of
+  // this restart is the broken state itself, so it must never be the target.
   fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), 'rows:\n  - id: broken\n', 'utf8')
   const runtime = createRuntime(fake.ctx, hostedConfig(state.file), {
     env: { isDesktopApp: false, appExePath: null },
@@ -346,17 +417,25 @@ test('the hosted branch restores the snapshot of the profile it took', async (t)
   const restored = fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8')
   assert.equal(
     restored,
-    'rows:\n  - id: broken\n',
-    'the snapshot is put back (the content of the snapshot is what was broken here)',
+    'rows:\n  - id: known-good\n',
+    'the KNOWN-GOOD content is put back — NOT the broken snapshot of this restart',
   )
   const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-rollback.json'), 'utf8'))
   assert.equal(report.rolledBack, true)
+  assert.equal(report.backupDir, knownGoodDir, 'the report names the known-good copy')
   assert.ok(Array.isArray(report.restored) && report.restored.includes('cordis.patch.yml'))
+  // And the copy this restart took stays a plain, unproven snapshot on disk: it
+  // is never a rollback target, precisely because it may be the broken state.
+  const snapshotOfThisRestart = listBackupIdentities(path.join(state.dir, 'backups'))
+    .find((entry) => entry.dir !== knownGoodDir)
+  assert.ok(snapshotOfThisRestart, 'this restart took its own snapshot')
+  assert.equal(snapshotOfThisRestart.kind, KIND_SNAPSHOT, 'the snapshot of this restart is not a target')
 })
 
 test('the hosted branch does NOT roll back when the new instance answers', async (t) => {
-  const { profile, state, runtime, fake, commands, watchers, probes } = await runHostedRestart(t, {
+  const { profile, state, runtime, fake, commands, watchers, probes, knownGoodDir } = await runHostedRestart(t, {
     label: 'healthy',
+    knownGood: { patch: 'rows:\n  - id: old-known-good\n' },
     probeOutcome: { ok: true, reason: 'the new instance answered its health route' },
   })
 
@@ -370,6 +449,16 @@ test('the hosted branch does NOT roll back when the new instance answers', async
   )
   assert.equal(runtime.lastRollback, null)
 
+  // THE PROMOTION (user decision, 2026-10-30): a boot that really came up proves
+  // the snapshot taken before it, so THAT copy becomes the next known-good one.
+  const newestKnownGood = latestKnownGood(path.join(state.dir, 'backups'))
+  assert.ok(newestKnownGood, 'a restart that came up leaves a known-good copy')
+  assert.equal(newestKnownGood.kind, KIND_KNOWN_GOOD)
+  assert.notEqual(newestKnownGood.dir, knownGoodDir, 'the snapshot of THIS restart is the new known-good')
+
+  // The profile is left exactly as the restart command left it.
+  assert.equal(fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'), 'rows:\n  - id: demo\n')
+
   const marker = JSON.parse(fs.readFileSync(path.join(state.dir, 'restart-outcome.json'), 'utf8'))
   assert.equal(marker.decided, true, 'the watcher is told to stand down')
   assert.equal(marker.ok, true)
@@ -382,14 +471,16 @@ test('the hosted branch does NOT roll back when the new instance answers', async
 })
 
 test('a restart command that fails is reported and rolls the snapshot back', async (t) => {
-  const { state, fake, commands } = await runHostedRestart(t, {
+  const { state, fake, commands, knownGoodDir } = await runHostedRestart(t, {
     label: 'bad-command',
+    knownGood: { patch: 'rows:\n  - id: known-good\n' },
     commandOutcome: { ok: false, error: 'the restart command exited with code 3' },
   })
   assert.equal(commands.length, 1, 'the command ran exactly once')
   const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-rollback.json'), 'utf8'))
   assert.equal(report.ok, false)
-  assert.equal(report.rolledBack, true)
+  assert.equal(report.rolledBack, true, 'the known-good copy was restored')
+  assert.equal(report.backupDir, knownGoodDir, 'the KNOWN-GOOD copy is the rollback target')
   assert.match(String(report.reason), /exited with code 3/)
   assert.ok(
     fake.logs.some((entry) => entry.level === 'error' && entry.text.includes('restart command failed')),
@@ -613,6 +704,9 @@ test('a lock of a process that died does not block the rollback for ever', (t) =
 test('the hosted branch stands down when the watcher is already restoring', async (t) => {
   const { base, profile } = fixture(t, 'locked')
   const state = stateDir(base, 'locked')
+  // A known-good copy exists, so the rollback gets as far as the lock: it is the
+  // LOCK — not a missing target — that makes this restart stand down.
+  seedKnownGood(state, { patch: 'rows:\n  - id: known-good\n' })
   const fake = fakeContext()
   // The detached watcher holds the lock: it is already restoring the snapshot.
   const lock = claimRollbackLock(state.dir)
@@ -645,6 +739,9 @@ test('the hosted branch stands down when the watcher is already restoring', asyn
 test('a marker of an EARLIER decision does not stop the new watcher', async (t) => {
   const { base } = fixture(t, 'stale-marker')
   const state = stateDir(base, 'stale-marker')
+  // The watcher is only armed for a PROVEN copy, so the known-good one has to
+  // exist for this test to be about the marker at all.
+  seedKnownGood(state)
   const fake = fakeContext()
   // The marker of a previous restart is still in the state directory.
   fs.writeFileSync(
@@ -672,6 +769,93 @@ test('a marker of an EARLIER decision does not stop the new watcher', async (t) 
   const marker = JSON.parse(fs.readFileSync(path.join(state.dir, 'restart-outcome.json'), 'utf8'))
   assert.equal(marker.ok, true, 'the marker is the decision of THIS restart')
   assert.notEqual(marker.reason, 'the previous restart failed')
+})
+
+// ---------------------------------------------------------------------------
+// 5b. THE ROLLBACK TARGET IS THE NEWEST PROOF, NOT THE NEWEST COPY
+//     (user decision, 2026-10-30).
+// ---------------------------------------------------------------------------
+
+test('a known-good copy OLDER than the snapshot of this restart is the one that is restored', async (t) => {
+  const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000
+  const { profile, state, commands, watchers, knownGoodDir } = await runHostedRestart(t, {
+    label: 'older-known-good',
+    // Two days old on purpose: the snapshot of this restart is NEWER, and the
+    // newer copy is exactly the one that must NOT be trusted.
+    knownGood: { patch: 'rows:\n  - id: two-days-ago\n', at: twoDaysAgo },
+    probeOutcome: { ok: false, reason: 'the new instance never answered' },
+  })
+  assert.equal(commands.length, 1, 'the restart command ran exactly once')
+  assert.equal(watchers.length, 1, 'the watcher was armed exactly once')
+
+  const backups = listBackupIdentities(path.join(state.dir, 'backups'))
+  const snapshotOfThisRestart = backups.find((entry) => entry.dir !== knownGoodDir)
+  assert.ok(snapshotOfThisRestart, 'this restart took its own snapshot')
+  assert.equal(snapshotOfThisRestart.kind, KIND_SNAPSHOT, 'and it is unproven')
+  assert.ok(
+    snapshotOfThisRestart.name > path.basename(knownGoodDir),
+    'the snapshot of this restart really is the NEWER copy',
+  )
+
+  const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-rollback.json'), 'utf8'))
+  assert.equal(report.rolledBack, true)
+  assert.equal(report.backupDir, knownGoodDir, 'the OLDER known-good copy is the rollback target')
+  assert.equal(
+    fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'),
+    'rows:\n  - id: two-days-ago\n',
+    'the profile holds the older, proven state again',
+  )
+})
+
+test('a rollback without a known-good copy restores NOTHING and says no-known-good', async (t) => {
+  const brokenByCommand = 'rows:\n  - id: broken-by-command\n'
+  const { profile, state, runtime, fake, watchers, watchdogArms, knownGoodDir } = await runHostedRestart(t, {
+    label: 'no-known-good',
+    knownGood: null,
+    onCommand: ({ profile: where }) => fs.writeFileSync(path.join(where, 'cordis.patch.yml'), brokenByCommand, 'utf8'),
+    probeOutcome: { ok: false, reason: 'the new instance never answered' },
+  })
+  assert.equal(knownGoodDir, null, 'the fixture really has no known-good copy')
+  assert.equal(watchers.length, 0, 'nothing was armed to restore a copy that does not exist')
+  assert.equal(watchdogArms.length, 0, 'and the v2 watchdog was not armed either')
+
+  const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-rollback.json'), 'utf8'))
+  assert.equal(report.ok, false, 'the report says the restart failed')
+  assert.equal(report.rolledBack, false, 'NOTHING was restored')
+  assert.equal(report.backupDir, null, 'the report names no rollback target')
+  assert.match(String(report.reason), /^no-known-good: /, 'the report says WHY nothing was restored')
+  assert.match(String(report.reason), /never answered/, 'and it still says what went wrong')
+  assert.deepEqual(report.restored, [], 'not a single file was touched')
+  assert.equal(
+    fs.readFileSync(path.join(profile, 'cordis.patch.yml'), 'utf8'),
+    brokenByCommand,
+    'the profile is left exactly as the restart command left it',
+  )
+  assert.equal(runtime.lastRollback.rolledBack, false)
+  assert.equal(runtime.lastRollback.backupDir, null, 'the interface is told there is no rollback target')
+  assert.ok(
+    fake.logs.some((entry) => entry.level === 'error' && entry.text.includes('no known-good backup to roll back to')),
+    'the failure is logged, never swallowed',
+  )
+})
+
+test('without a known-good copy the watchdog v2 is NOT armed and reports no-known-good', async (t) => {
+  const { state, fake, watchers, watchdogArms } = await runHostedRestart(t, {
+    label: 'no-known-good-v2',
+    knownGood: null,
+    // The injected v2 WOULD say yes: the plugin must not even ask it, because a
+    // watchdog with nothing proven to restore would restore the broken state.
+    watchdogArm: { ok: true, tier: 'scheduled-task', reason: '' },
+    probeOutcome: { ok: false, reason: 'the new instance never answered' },
+  })
+  assert.equal(watchdogArms.length, 0, 'v2 is not armed: there is nothing proven to restore')
+  assert.equal(watchers.length, 0, 'the old watcher is not armed either')
+  assert.ok(
+    fake.logs.some((entry) => entry.level === 'warn' && entry.text.includes('no known-good backup')),
+    'the plugin says that it did not arm a watcher',
+  )
+  const report = JSON.parse(fs.readFileSync(path.join(state.dir, 'last-rollback.json'), 'utf8'))
+  assert.match(String(report.reason), /^no-known-good: /, 'and the report says no-known-good')
 })
 
 // ---------------------------------------------------------------------------

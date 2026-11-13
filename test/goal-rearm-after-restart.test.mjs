@@ -484,3 +484,119 @@ test('a record without a session is an orphan: it is dropped, not adopted', asyn
   assert.deepEqual(resumed, [], 'and nothing is re-armed')
   assert.deepEqual(injected, [], 'and no continuation message is injected')
 })
+
+// ---------------------------------------------------------------------------
+// THE DISARM BELONGS TO THE WHOLE CYCLE, NOT TO ONE REQUEST (bug, 2026-11-12).
+//
+// The boot adopted a disarm only when its timestamp was not older than
+// `restart.requestedAt` — and that field is rewritten by every requester that
+// comes later (and pushed into the future by `defer_seconds`). So the disarm
+// that happened FIRST looked like history: the boot had nothing to adopt and
+// the goal stayed disarmed for ever.
+//
+// The record now carries the OWNERSHIP of the disarm (why it happened, which
+// cycle, which revision of the goal), and the boot reads that instead of a
+// timestamp that moves.
+// ---------------------------------------------------------------------------
+
+/**
+ * The checkpoint of a host that restarted with a disarm of THIS cycle behind —
+ * the disarm happened BEFORE the requester that the request record names.
+ *
+ * @param {number} now
+ * @returns {object} the state of the previous boot
+ */
+function bootStateOfTheCycle(now) {
+  return {
+    version: 1,
+    // A DIFFERENT pid: the host really restarted.
+    bootPid: 1,
+    generation: 4,
+    phase: 'running',
+    // The cycle started before the disarm, and the request record names a
+    // requester that asked LATER than the disarm. The cycle start is a fact
+    // about the state — that is where `requestRestart` writes it.
+    restart: {
+      generation: 4,
+      requestedAt: now - 5000,
+      attempt: 0,
+      notBefore: 0,
+      parkGoals: true,
+    },
+    restartCycleStartedAt: now - 9000,
+    sessions: {
+      'session-x': { sessionId: 'session-x', running: false, updatedAt: now },
+    },
+    disarmedGoals: {
+      'session-x': {
+        goalId: 'goal-1',
+        disarmedAt: now - 8000,
+        resumedAt: null,
+        reason: 'restart-blocking',
+        cycle: 3,
+        goalRevision: 2,
+      },
+    },
+  }
+}
+
+test('the boot gives back the goal a later requester took with it', async () => {
+  const now = Date.now()
+  const stateFile = tempStateFile('cycle-own', bootStateOfTheCycle(now))
+  const resumed = []
+  const injected = []
+  const { ctx, timeouts } = createContext({
+    agent: { id: 'session-x', status: 'idle' },
+    // The goal the plugin disarmed before the restart: it is still durably
+    // active, it only lost its activation.
+    goal: { id: 'goal-1', revision: 3, phase: 'active', activation: 'disarmed', roundsStarted: 1, maxGoalRounds: 10 },
+    resumed,
+    injected,
+  })
+  const runtime = apply(ctx, {
+    stateFile,
+    recoveryDelayMs: 0,
+    enabled: true,
+    resumeOnBoot: true,
+    maxSessions: 4,
+  })
+
+  await runBoot(runtime, timeouts)
+
+  const entry = runtime.state.sessions['session-x']
+  assert.ok(entry, 'the session of the disarmed goal is in the checkpoint after the boot')
+  assert.equal(resumed.length, 1, 'the goal is given back: the disarm belonged to this cycle')
+  assert.equal(entry.lastRecoveryAction, 'resume-disarmed-goal', 'and the recovery says what it did')
+  assert.notEqual(runtime.state.disarmedGoals['session-x'].resumedAt, null, 'the record says the goal came back')
+  assert.ok(
+    Array.isArray(entry.reasons) && entry.reasons.some((reason) => /disarmed this goal/.test(String(reason))),
+    'the session was pending work: the boot adopted the disarm of the cycle',
+  )
+})
+
+test('a goal the user PAUSED is not woken up by the boot (a record of this cycle)', async () => {
+  const now = Date.now()
+  const stateFile = tempStateFile('cycle-paused', bootStateOfTheCycle(now))
+  const resumed = []
+  const injected = []
+  const { ctx, timeouts } = createContext({
+    agent: { id: 'session-x', status: 'idle' },
+    // The user stopped this goal after the plugin disarmed it.
+    goal: { id: 'goal-1', revision: 3, phase: 'paused', activation: 'armed', roundsStarted: 1, maxGoalRounds: 10 },
+    resumed,
+    injected,
+  })
+  const runtime = apply(ctx, {
+    stateFile,
+    recoveryDelayMs: 0,
+    enabled: true,
+    resumeOnBoot: true,
+    maxSessions: 4,
+  })
+
+  await runBoot(runtime, timeouts)
+
+  const entry = runtime.state.sessions['session-x']
+  assert.equal(entry === undefined || entry.pendingResume !== true, true, 'a paused goal must not become pending work')
+  assert.deepEqual(resumed, [], 'and it is not re-armed')
+})

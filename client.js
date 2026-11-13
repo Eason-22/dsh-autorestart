@@ -182,7 +182,6 @@
     busyPrefix: ' · 等待 ',
     busySuffix: ' 个会话',
     idle: ' · 空闲后自动重启',
-    goalActive: ' · 被某个自动续跑的 goal 占着',
     goalExhausted: ' · 某个任务的 goal 轮次额度已用完，无法续跑',
     settling: ' · 还在等这段安静期',
     parkedGoals: ' · 已停泊 {n} 个 goal，重启后自动继续',
@@ -229,6 +228,11 @@
     marketInstallTooltip: '插件市场正在安装/更新插件：等插件市场装完插件后再重启。',
     pluginFilesPill: ' · 等插件装完再重启',
     pluginFilesTooltip: '检测到插件目录正在被修改（手动安装插件也会这样）：等它改完、安静下来再重启。',
+    // THE USER GAVE THE GOAL BACK (2026-11-13): the plugin does not take such
+    // a goal away a second time in this cycle. ONE line, and the Chinese part
+    // stays at 14 characters — the capsule is a clipped 22px line.
+    manualResumePill: ' · 目标被手动恢复，不再停止',
+    manualResumeTooltip: '被停止的目标已被人工恢复，插件不再二次停止，需人工停止',
     // The blockers of one list. They are grouped by the session that created
     // them (N subagents of one session are ONE item), the tooltip names them
     // ALL and the shutdown card lists them. One rule, two surfaces: the
@@ -715,7 +719,6 @@
     busyPrefix: ' · waiting for ',
     busySuffix: ' session(s)',
     idle: ' · restarts once idle',
-    goalActive: ' · held by a self-continuing goal',
     goalExhausted: ' · a goal ran out of rounds',
     settling: ' · still waiting for the quiet window',
     parkedGoals: ' · {n} goal(s) parked, they continue after the restart',
@@ -764,6 +767,10 @@
     marketInstallTooltip: 'The plugin market is installing plugins: waiting for the plugin market to finish before restarting.',
     pluginFilesPill: ' · waiting for a plugin install to finish',
     pluginFilesTooltip: 'The plugin files are being changed (a manual plugin install does this too): waiting for them to settle before restarting.',
+    // THE USER GAVE THE GOAL BACK (2026-11-13): the plugin does not take such
+    // a goal away a second time in this cycle.
+    manualResumePill: ' · a goal was restored by hand, it will not be stopped again',
+    manualResumeTooltip: 'A stopped goal was restored by hand: the plugin will not stop it a second time. Stop it yourself if you want that.',
     // The blockers of one list: they are grouped by the session that created
     // them (N subagents of one session are ONE item), the tooltip names them
     // ALL and the shutdown card lists them. One rule, two surfaces.
@@ -4327,6 +4334,21 @@
         // and the ONE thing the user cannot see for himself.
         const market = marketInstallCopy(info, t)
 
+        // THE USER GAVE A GOAL BACK (2026-11-13): the plugin does not take such
+        // a goal away a second time in this cycle. The capsule says so —
+        // otherwise the user watches the goal he restored disappear again.
+        // The Host publishes the records with `tookBackAt` (the USER gave it
+        // back) and `resumedAt` (it is back); both must be there.
+        const manualResumed = Array.isArray(info && info.parkedGoals)
+          ? info.parkedGoals.some((entry) => entry && entry.tookBackAt != null && entry.resumedAt != null)
+          : false
+
+        // THE GOALS THAT ARE PARKED (2026-11-13). The old `goal-active`
+        // sentence is retired: the capsule names the parked goals instead — and
+        // the count may be 0, because the plugin does not park anything while
+        // the sessions that asked for the restart are still running.
+        const parkedCount = Array.isArray(info && info.parkedGoals) ? info.parkedGoals.length : 0
+
         // The long wait: the Host says that the restart is still waiting while a
         // conversation runs on. The capsule shows one
         // more line about it — how long it has been waiting and how many tasks
@@ -4360,12 +4382,14 @@
           : longWait.hasLongWait
             ? ''
             : goalActive.length > 0
-              ? t('goalActive')
+              ? fill(t('parkedGoals'), { n: parkedCount })
               : goalExhausted.length > 0
                 ? t('goalExhausted')
-                : otherBusy > 0
-                  ? `${t('busyPrefix')}${otherBusy}${t('busySuffix')}`
-                  : (gateReason === 'settling' ? t('settling') : t('idle'))
+                : manualResumed
+                  ? t('manualResumePill')
+                  : otherBusy > 0
+                    ? `${t('busyPrefix')}${otherBusy}${t('busySuffix')}`
+                    : (gateReason === 'settling' ? t('settling') : t('idle'))
 
         // THE MARKET IS NOT A CONVERSATION, so its sentence REPLACES the
         // "waiting for the other sessions" sentence instead of being appended to
@@ -4374,7 +4398,8 @@
         // 2026-11-10: the bubble was right, the floating panel was not).
         const tooltipText = market.installing
           ? market.tooltip
-          : otherBusy > 0 ? t('tooltipBusy') : t('tooltip')
+          : manualResumed ? t('manualResumeTooltip')
+            : otherBusy > 0 ? t('tooltipBusy') : t('tooltip')
         // The tooltip carries the COMPLETE list of the blockers: the capsule
         // shows numbers only, the tooltip every name.
         const blockersLine = longWait.hasLongWait

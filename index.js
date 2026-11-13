@@ -47,13 +47,17 @@ import {
   entryFor,
   handoffRecord,
   isForbiddenSessionId,
+  isGoalTakenBackByUser,
+  markGoalTookBack,
   markIdle,
   markPendingResume,
   markRunning,
   parkedRecord,
+  pendingSourceOf,
   pruneSessions,
   readState,
   recordOnboarding,
+  RESTART_DISARM_REASONS,
   recoverableSessions,
   requestRestart,
   sessionEntry,
@@ -81,11 +85,12 @@ import {
   describeState,
   GOAL_BLOCK_REASONS,
   HANDOFF_DEFAULT_MAX_CHARS,
-  isGoalStopped,
+  PENDING_SOURCES,
   restartDecision,
   restartGate,
   selectBusyGoals,
   selectGoalDisarms,
+  shouldStayQuiet,
 } from './lib/lifecycle.js'
 import {
   applyMarketSample,
@@ -453,7 +458,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.9.6'
+const PLUGIN_VERSION_FALLBACK = '0.9.7'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -630,6 +635,15 @@ const RESOLVE_RETRY_ATTEMPTS = 2
 
 /** Default pause between two `resolveAgent` attempts (ms). */
 const DEFAULT_RESUME_RETRY_DELAY_MS = 1000
+
+/**
+ * THE ACTIONS THAT MEAN "THE GOAL WAS GIVEN BACK" (bug, 2026-11-13).
+ *
+ * They are the three ways the recovery puts a goal back: the goal this plugin
+ * disarmed before the restart, the goal the previous (pause-based) build
+ * paused, and the goal the host disarmed on its own.
+ */
+const MANUAL_RESUME_ACTIONS = new Set(['resume-disarmed-goal', 'resume-paused-goal', 'rearm-goal'])
 
 /**
  * How long a session-title lookup stays cached (ms).
@@ -1451,7 +1465,7 @@ function goalAwareBlockingDetails(runtime, blockedBy) {
  * working; `kind` tells the two shapes apart.
  *
  * @param {object} runtime
- * @returns {{sessionId: string, kind: 'disarmed'|'parked', goalId: string|null, disarmedAt: number|null, parkedAt: number|null, resumedAt: number|null, resumed: boolean}[]}
+ * @returns {{sessionId: string, kind: 'disarmed'|'parked', goalId: string|null, disarmedAt: number|null, parkedAt: number|null, resumedAt: number|null, resumed: boolean, tookBackAt: number|null}[]}
  */
 function parkedGoalList(runtime) {
   const out = []
@@ -1466,6 +1480,10 @@ function parkedGoalList(runtime) {
         parkedAt: kind === 'parked' && Number.isFinite(record[atKey]) ? record[atKey] : null,
         resumedAt: record.resumedAt != null ? record.resumedAt : null,
         resumed: record.resumedAt != null,
+        // THE USER GAVE THE GOAL BACK (bug, 2026-11-13): the plugin does not
+        // take such a goal away a second time in this cycle, and the interface
+        // says so.
+        tookBackAt: record.tookBackAt != null ? record.tookBackAt : null,
       })
     }
   }
@@ -3807,7 +3825,7 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
    * Never throws: a failed disarm is reported instead of propagated, so it can
    * never break the restart gate.
    */
-  const disarmGoal = (sessionId, agent) => {
+  const disarmGoal = (sessionId, agent, { reason } = {}) => {
     // A session id like `__proto__` would land on the prototype of the
     // session map: it is refused, and NOTHING is written.
     if (isForbiddenSessionId(sessionId)) {
@@ -3820,14 +3838,23 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
     const goal = goalFor(sessionId, target)
     if (!goal || typeof goal !== 'object') return { sessionId, disarmed: false, reason: 'no-goal' }
     const goalId = goal.id == null ? null : String(goal.id)
+    // THE OWNERSHIP OF THE DISARM (bug, 2026-11-12).
+    //
+    // The revision is read BEFORE the disarm: the write of `ctx.goals.disarm`
+    // may land later, and the record has to carry the revision the goal had
+    // when this plugin took it away — that is the revision the boot compares
+    // the live goal with to see whether somebody armed it again.
+    const goalRevision = Number.isFinite(goal.revision) ? goal.revision : null
+    // Which restart cycle this disarm belongs to.
+    const cycle = Number.isFinite(state.restart?.generation) ? state.restart.generation : null
     const { disarms, reported } = selectGoalDisarms([{ sessionId }], {
       getGoal: () => goal,
       disarmedGoals: disarmedGoalRecords(),
       parkedGoals: parkedGoalRecords(),
     })
     if (disarms.length === 0) {
-      const reason = reported.length > 0 ? reported[0].reason : 'goal-not-disarmable'
-      return { sessionId, disarmed: false, goalId, reason }
+      const blockReason = reported.length > 0 ? reported[0].reason : 'goal-not-disarmable'
+      return { sessionId, disarmed: false, goalId, reason: blockReason }
     }
     const goals = ctx.goals
     if (!goals || typeof goals.disarm !== 'function') {
@@ -3840,7 +3867,10 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
       return { sessionId, disarmed: false, goalId, reason: 'disarm-failed', error: describeError(error) }
     }
     const onDisarmed = () => {
-      setDisarmedGoal(state, sessionId, { goalId, disarmedAt: Date.now() })
+      // WHY, WHICH CYCLE AND WHICH REVISION, all in one write: the record is
+      // the OWNERSHIP of this disarm, and the boot has to be able to tell it
+      // apart from the disarms of days ago without reading a clock.
+      setDisarmedGoal(state, sessionId, { goalId, disarmedAt: Date.now(), reason, cycle, goalRevision })
       persist()
       log.info(`disarmed goal ${goalId} of session ${sessionId}; the running round still finishes and the goal is re-armed after the restart`)
     }
@@ -4045,7 +4075,9 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
     // (e) the over-limit session must stop issuing doomed requests.
     let disarmedGoal = false
     try {
-      const result = disarmGoal(sourceId, requested === null ? callerAgent : undefined)
+      // A HANDOFF IS NOT A RESTART: the record must not say that a restart
+      // took this goal away, or the boot would give it back.
+      const result = disarmGoal(sourceId, requested === null ? callerAgent : undefined, { reason: null })
       disarmedGoal = result.disarmed === true
     } catch (error) {
       log.warn(`could not disarm the goal of the handed-off session ${sourceId}:`, describeError(error))
@@ -4071,13 +4103,81 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
    * normally, no new round starts, the session goes idle and the next poll sees
    * a quiet host. Goals are never paused and no turn is ever cancelled.
    */
+  /**
+   * DID THE USER ARM THIS GOAL AGAIN WHILE THE RESTART WAS WAITING?
+   *
+   * The record of the session says a restart took the goal away, and the live
+   * goal says it is armed again and newer than the disarm: somebody armed it.
+   * The plugin did not (it stamps `resumedAt` when it gives a goal back), so
+   * it was the user.
+   *
+   * @param {string} sessionId
+   * @returns {boolean}
+   */
+  const goalTakenBackByUser = (sessionId) => {
+    const record = disarmedGoalEntry(state, sessionId)
+    if (!record || typeof record !== 'object') return false
+    const goal = goalFor(sessionId)
+    if (!goal || typeof goal !== 'object') return false
+    return isGoalTakenBackByUser(record, goal)
+  }
+
   const disarmBlockingGoals = (busy) => {
     const restart = state.restart
     if (!restart) return { disarmed: [], reported: [] }
     if (restart.parkGoals === false) return { disarmed: [], reported: [], skipped: 'park-goals-disabled' }
     const list = Array.isArray(busy) ? busy : []
     if (list.length === 0) return { disarmed: [], reported: [] }
-    const { disarms, reported } = selectGoalDisarms(list, {
+    // THE REQUESTERS ARE STILL RUNNING — NOTHING ELSE IS TOUCHED (bug, 2026-11-13).
+    //
+    // While a session that ASKED for the restart is still running, the restart
+    // cannot happen at all. Disarming the goals of the sessions that did NOT ask
+    // for it does not bring the restart any closer — it only makes THOSE
+    // sessions wait for nothing (field report: 28 minutes of waiting for a
+    // restart that could not start anyway).
+    //
+    // The requesters are the OWNERS of this cycle (`restart.requesters`), not a
+    // timestamp: a requester that is not here any more counts as stopped. Only
+    // the sessions that did NOT ask for the restart are spared — the requesters
+    // disarm their OWN goal when they ask (reason `restart-queued`), and that
+    // path is untouched.
+    const requesterIds = new Set(
+      (Array.isArray(restart.requesters) ? restart.requesters : [])
+        .map((requester) => (requester && requester.sessionId != null ? String(requester.sessionId) : ''))
+        .filter((sessionId) => sessionId !== ''),
+    )
+    if (requesterIds.size > 0) {
+      for (const entry of list) {
+        const sessionId = entry && entry.sessionId != null ? String(entry.sessionId) : ''
+        if (sessionId !== '' && requesterIds.has(sessionId)) {
+          log.info(
+            `the sessions that asked for the restart are still running: the goals of the other sessions are left alone`,
+            { requesters: [...requesterIds] },
+          )
+          return { disarmed: [], reported: [], skipped: 'requesters-still-running' }
+        }
+      }
+    }
+    // THE GOALS THE USER TOOK BACK (bug, 2026-11-12).
+    //
+    // The user armed the goal again while the restart was waiting: that goal
+    // belongs to the user now. The old code took it away again on the very
+    // next poll (every three seconds), and the disarm OVERWROTE the record —
+    // so the reason was gone and the interface showed "paused" for ever.
+    //
+    // The takeover is therefore written down ONCE, and the goal is left alone
+    // from then on: the restart waits for it.
+    const takenBack = []
+    const blockers = []
+    for (const entry of list) {
+      const sessionId = entry && entry.sessionId != null ? String(entry.sessionId) : ''
+      if (sessionId !== '' && goalTakenBackByUser(sessionId)) {
+        takenBack.push(sessionId)
+        continue
+      }
+      blockers.push(entry)
+    }
+    const { disarms, reported } = selectGoalDisarms(blockers, {
       getGoal: (sessionId) => goalFor(sessionId),
       disarmedGoals: disarmedGoalRecords(),
       parkedGoals: parkedGoalRecords(),
@@ -4085,13 +4185,23 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
     const disarmed = []
     for (const item of disarms) {
       try {
-        const result = disarmGoal(item.sessionId)
+        const result = disarmGoal(item.sessionId, undefined, { reason: 'restart-blocking' })
         if (result.disarmed) disarmed.push(result)
         else log.warn(`could not disarm the goal of session ${item.sessionId}: ${result.reason}${result.error ? ` (${result.error})` : ''}`)
       } catch (error) {
         log.warn(`disarming the goal of session ${item.sessionId} failed:`, describeError(error))
       }
     }
+    for (const sessionId of takenBack) {
+      const at = Date.now()
+      // The goal is the user's again: the record says so (the interface shows
+      // the goal as resumed), and the takeover is remembered so the next poll
+      // does not take the goal away again.
+      stampResumedGoal(state, sessionId, { resumedAt: at })
+      markGoalTookBack(state, sessionId, { at })
+      log.info(`session ${sessionId} armed its goal again (the user restored it): the goal is not taken away a second time; the restart waits for it`)
+    }
+    if (takenBack.length > 0) persist()
     return { disarmed, reported }
   }
 
@@ -4145,17 +4255,18 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
       if (sessionId === 'settings') continue
       if (queuedGoalDisarms.has(sessionId)) continue
       try {
-        const result = disarmGoal(sessionId)
+        // WHY this goal is disarmed is written INTO THE RECORD, together with
+        // the timestamp and the ownership of the disarm (bug, 2026-11-12): it
+        // used to be patched into the record afterwards, so a later disarm
+        // wiped it and the interface could no longer tell a restart from a
+        // rescue.
+        const result = disarmGoal(sessionId, undefined, { reason })
         if (result.disarmed === true) {
           queuedGoalDisarms.set(sessionId, {
             goalId: result.goalId === undefined ? null : result.goalId,
             disarmedAt: Date.now(),
             reason,
           })
-          // WHY this goal is disarmed, written into the record next to the
-          // timestamp: `disarmedAt` alone cannot tell a restart from a rescue.
-          const record = disarmedGoalEntry(state, sessionId)
-          if (record && typeof record === 'object') record.reason = reason
           disarmed.push(result)
         } else {
           reported.push(result)
@@ -7436,9 +7547,14 @@ const titleOfSummary = (item) => {
     const busy = busyAgents()
     // A goal-driven session blocks the restart forever: park its goal BEFORE the
     // gate decides that it is blocked, so the next poll sees an idle session.
+    // WHAT THE DISARM DID — OR WHY IT DID NOT (bug, 2026-11-13).
+    //
+    // The outcome is returned with the tick, so a caller can see that the goals
+    // were LEFT ALONE (the requesters were still running) instead of guessing.
+    let disarmOutcome = { disarmed: [], reported: [] }
     if (busy.length > 0) {
       try {
-        disarmBlockingGoals(busy)
+        disarmOutcome = disarmBlockingGoals(busy)
       } catch (error) {
         log.warn('could not disarm the goals of the blocking sessions:', String(error))
       }
@@ -7562,7 +7678,7 @@ const titleOfSummary = (item) => {
     }
     switch (decision.action) {
       case 'wait':
-        return
+        return disarmOutcome
       case 'long-wait': {
         // A conversation still holds the restart. The request is KEPT — the user
         // asked for a restart, it must never be dropped silently — and the wait
@@ -7583,7 +7699,7 @@ const titleOfSummary = (item) => {
             },
           )
         }
-        return
+        return disarmOutcome
       }
       case 'restart':
       case 'force-restart': {
@@ -8418,6 +8534,42 @@ const titleOfSummary = (item) => {
           log.info(`forced recovery for ${target}: cleared stale over-limit/handoff marks and the attempt counter`)
         }
       }
+      // A GOAL THE PLUGIN LOCKED UP CAN BE UNLOCKED BY HAND (bug, 2026-11-13).
+      //
+      // The records of the plugin's OWN disarms (`restart-queued` /
+      // `restart-blocking`) are the goals it took away. The BOOT does not take
+      // them back once they are older than a day — that is right, the restart
+      // they belonged to is long gone — but the USER must still be able to say
+      // "give that goal back" (field report: seven records since 2026-10-23
+      // whose `resumedAt` stayed empty for ever, and a manual recovery that
+      // answered `no-pending-recovery`).
+      //
+      // ONLY THE NAMED SESSION, ONLY WHILE IT IS NOT RUNNING, and only when
+      // the record says that the PLUGIN took the goal away: a record without a
+      // reason was written by the previous build, and the legacy `parkedGoals`
+      // are goals the USER paused — neither of them is ours to unlock.
+      //
+      // The plugin never does this by itself: the automatic path
+      // (`adoptDisarmedGoals`) and its 24-hour bound are untouched.
+      if (target !== null) {
+        const record = disarmedRecord(state, target)
+        const pluginTookIt = record !== null
+          && typeof record.reason === 'string'
+          && RESTART_DISARM_REASONS.has(record.reason)
+        if (pluginTookIt) {
+          // ONLY the own entry is read: a bare `state.sessions[target]` would
+          // hand out `Object.prototype` itself for the id `__proto__`.
+          const entry = sessionEntry(state, target) || entryFor(state, target)
+          if (entry.running !== true && entry.pendingResume !== true) {
+            entry.pendingResume = true
+            runtime.persist()
+            log.info(
+              `the goal of session ${target} was locked by the plugin: the manual recovery re-opens it`,
+              { goalId: record.goalId },
+            )
+          }
+        }
+      }
       // A MANUAL RECOVERY MUST NOT WAKE A STOPPED GOAL EITHER (2026-11-11):
       // the same guard as the boot adoption — a goal the user paused stays
       // paused, however the recovery was asked for.
@@ -8430,7 +8582,24 @@ const titleOfSummary = (item) => {
       const results = []
       for (const entry of pending) {
         try {
-          results.push(await recoverSession(ctx, runtime, entry, config))
+          const result = await recoverSession(ctx, runtime, entry, config)
+          // THE HUMAN GAVE THE GOAL BACK (bug, 2026-11-13).
+          //
+          // The plugin may not restore a goal by itself, but the USER may — and
+          // that restoration is final for this cycle: the goal is not taken away
+          // again (user decision, 2026-11-13: "插件不能主动去恢复被缴械的目标，
+          // 但是人类可以，并且人类的恢复是不会触发二次缴械的"). Without this the
+          // three-second poll took the goal away again minutes later (field
+          // report: a manual restore at 09:19:41, disarmed again at 09:22:14).
+          //
+          // The BOOT recovery keeps writing `resumedAt` only: a goal the PLUGIN
+          // gave back may be disarmed again in the next cycle, or the restart
+          // would wait for a goal nobody can take away any more (the deadlock of
+          // 2026-11-02). The two paths are therefore NOT the same.
+          if (result && MANUAL_RESUME_ACTIONS.has(result.action)) {
+            markGoalTookBack(state, entry.sessionId, { at: Date.now() })
+          }
+          results.push(result)
         } catch (error) {
           const detail = describeError(error)
           setRecoveryOutcome(state, entry.sessionId, { action: 'prompt-failed', detail })
@@ -8524,15 +8693,28 @@ async function recoverSession(ctx, runtime, entry, config) {
   const sessionId = entry.sessionId
   const attemptCap = Number.isFinite(config.maxResumeAttempts) ? config.maxResumeAttempts : 2
   if (entry.resumeAttempts >= attemptCap) {
-    // Retry budget exhausted: stop treating this session as recoverable so a
-    // broken session can never make every boot retry forever. The failure stays
-    // visible in continuum_status instead of being dropped silently.
-    entry.pendingResume = false
-    entry.interrupted = false
+    // THE BUDGET OF THIS BOOT IS USED UP (bug, 2026-11-13).
+    //
+    // THE BUDGET IS PER BOOT, NOT PER SESSION FOR EVER: `beginBoot` gives every
+    // session a fresh budget in every new cycle, so this counter only stops the
+    // retries INSIDE this boot. The session therefore STAYS PENDING — clearing
+    // `pendingResume` here took it out of the queue for good, and the fresh
+    // budget of the next boot then had nothing to spend itself on.
+    //
+    // WHAT THIS COSTS, AND WHY IT IS THE RIGHT TRADE (decided 2026-11-13): a
+    // session that fails for ever is tried again in the NEXT boot — at most
+    // `maxResumeAttempts` times per boot. That is a BOUNDED cost, and the
+    // reason of the failure stays visible all the time, whereas dropping a
+    // recoverable session for good is silent data loss.
+    //
+    // (Field report 2026-11-13: session-9fef9189 hit a transient failure of
+    // ANOTHER plugin twice — `dsh-wsl-workspace` had registered `read_image`
+    // twice — and was never tried again for two days; the user could not
+    // recover it by hand.)
     entry.lastResumeError = entry.lastResumeError || 'resume attempts exhausted'
     noteRecovery(state, sessionId, 'nothing', 'resume-attempts-exhausted')
     runtime.persist()
-    log.info(`giving up on session ${sessionId}: resume attempts exhausted`, { lastResumeError: entry.lastResumeError })
+    log.info(`the resume budget of this boot is used up for session ${sessionId}; it is tried again in the next boot`, { lastResumeError: entry.lastResumeError })
     return { sessionId, action: 'nothing', detail: 'resume-attempts-exhausted', error: entry.lastResumeError }
   }
 
@@ -8621,7 +8803,22 @@ async function recoverSession(ctx, runtime, entry, config) {
     // not live, so the live goal cannot be read — but the checkpoint recorded
     // the phase of the goal on every `goal/changed`, and that is enough to know
     // that the user paused it. A continuation message would WAKE that session.
-    if (isGoalStopped(entry.goal)) {
+    //
+    // A FINISHED goal is quiet only when the pending work is about the GOAL
+    // (bug, 2026-11-12): a session whose turn was interrupted by the boot
+    // still deserves its continuation message — the goal having no work left
+    // does not mean the user has an answer.
+    //
+    // THE SNAPSHOT MAY BE STALE — AND THAT IS A DELIBERATE CHOICE (bug,
+    // 2026-11-12): `entry.goal.phase` is the phase of the last `goal/changed`,
+    // so it can still say `active` while the goal is `complete` by now. The
+    // live goal cannot be read here (the session is not live), and the two
+    // errors do not cost the same: a stale snapshot wakes a session that has
+    // nothing to do (one visible, retryable round), while the other side
+    // silently drops the message of a user whose turn was cut short. There is
+    // no field evidence for which way to lean, so the snapshot is trusted and
+    // the cost is paid on the visible side.
+    if (shouldStayQuiet({ goal: entry.goal, source: pendingSourceOf(state, sessionId) })) {
       entry.pendingResume = false
       entry.running = false
       entry.interrupted = false
@@ -8765,18 +8962,60 @@ async function recoverSession(ctx, runtime, entry, config) {
   //
   // This is the SECOND of the two guards: the adoption in
   // `lib/checkpoint.js` does not queue a stopped goal either.
-  if (isGoalStopped(goal) || isGoalStopped(entry.goal)) {
+  //
+  // WHERE THE PENDING WORK COMES FROM (bug, 2026-11-12): a FINISHED goal is
+  // quiet only when the pending work is about the goal (adopted from a disarm
+  // record, or the agent was disposed). When the pending work is an
+  // INTERRUPTED TURN of the user — the host restarted while the session was
+  // working — the session still gets its continuation message: the goal having
+  // no work left does not mean the user has an answer.
+  const pendingSource = pendingSourceOf(state, sessionId)
+  const disarmed = disarmedRecord(state, sessionId)
+  const legacyParked = parkedRecord(state, sessionId)
+  if (shouldStayQuiet({ goal, source: pendingSource }) || shouldStayQuiet({ goal: entry.goal, source: pendingSource })) {
+    // WHY THIS SESSION IS LEFT ALONE, IN FULL (2026-11-13).
+    //
+    // The old line said only "its goal was stopped on purpose" — which is
+    // exactly the sentence that made the real incident un-diagnosable: a
+    // `paused` goal with NO record of who paused it looks identical to a goal
+    // the user paused on purpose, and nothing in the log told the two apart.
+    //
+    // So log every fact the decision was made from, and say out loud when the
+    // goal's phase cannot be explained by any record this plugin holds:
+    //   - `unexplained` — the goal is stopped but BOTH record tables are empty:
+    //     nobody (not the user, not this plugin) left a trace. That is the
+    //     "历史遗留" shape worth chasing.
+    //   - `explained-by-record` — we disarmed/parked it ourselves at some point.
+    const livePhase = goal && typeof goal === 'object' ? goal.phase : undefined
+    const checkpointPhase = entry.goal && typeof entry.goal === 'object' ? entry.goal.phase : undefined
+    const activation = goal && typeof goal === 'object' ? goal.activation : undefined
+    const hasRecord = Boolean(disarmed) || Boolean(legacyParked)
+    const verdict = hasRecord ? 'explained-by-record' : 'unexplained'
+    const facts = [
+      `goal=${(goal && goal.id) || (entry.goal && entry.goal.id) || 'none'}`,
+      `livePhase=${livePhase ?? 'none'}`,
+      `checkpointPhase=${checkpointPhase ?? 'none'}`,
+      `activation=${activation ?? 'none'}`,
+      `source=${pendingSource ?? 'none'}`,
+      `disarmRecord=${disarmed ? (disarmed.reason ?? 'no-reason') : 'none'}`,
+      `parkedRecord=${legacyParked ? (legacyParked.reason ?? 'no-reason') : 'none'}`,
+      `verdict=${verdict}`,
+    ].join(' ')
     entry.pendingResume = false
     entry.running = false
     entry.interrupted = false
     noteRecovery(state, sessionId, 'goal-stopped', 'the user stopped this goal: the session stays quiet')
     runtime.persist()
-    log.info(`session ${sessionId} keeps quiet: its goal was stopped on purpose`)
+    log.info(`session ${sessionId} keeps quiet: its goal was stopped on purpose (${facts})`)
+    if (verdict === 'unexplained') {
+      log.warn(
+        `session ${sessionId} keeps quiet but NOTHING explains the stopped goal — no disarm record and no parked record: `
+        + `treat this as a legacy lock and check whether the user ever paused it (${facts})`,
+      )
+    }
     return { sessionId, action: 'goal-stopped', detail: 'the goal is paused: the session stays quiet' }
   }
 
-  const disarmed = disarmedRecord(state, sessionId)
-  const legacyParked = parkedRecord(state, sessionId)
   let resumeError = null
   let resumeAction = null
 
@@ -10145,7 +10384,10 @@ export function buildLifecycleTools(runtime, config) {
       if (isForbiddenSessionId(sessionId)) {
         return { ok: false, disarmed: false, sessionId, reason: 'invalid-session-id' }
       }
-      const result = runtime.disarmGoal(sessionId, sessionId === callerId ? agent : undefined)
+      // THE USER PARKS THE GOAL ON PURPOSE: the record must not say that a
+      // restart took it away, or the boot would give it back and wake the goal
+      // the user silenced.
+      const result = runtime.disarmGoal(sessionId, sessionId === callerId ? agent : undefined, { reason: null })
       const payload = {
         ok: true,
         disarmed: result.disarmed === true,
@@ -11014,7 +11256,9 @@ function buildParkRoute(ctx, runtime, config) {
         const reported = []
         for (const target of targets) {
           try {
-            const result = runtime.disarmGoal(target)
+            // A MANUAL DISARM IS NOT A RESTART: the record must not say that
+            // a restart took this goal away.
+            const result = runtime.disarmGoal(target, undefined, { reason: null })
             if (result.disarmed) disarmed.push(result)
             else reported.push(result)
           } catch (error) {
@@ -13703,6 +13947,13 @@ function trackAgents(ctx, runtime, config) {
         entry.interrupted = true
         entry.pendingResume = true
         entry.pendingSince = Date.now()
+        // WHERE THIS PENDING WORK COMES FROM (bug, 2026-11-12): the agent of
+        // this session disappeared while its turn was running — so the turn of
+        // the USER was cut short, exactly like a restart that interrupted it.
+        // The goal may well be finished now, but that does not mean the user has
+        // an answer ⇒ the session still gets its continuation message (see
+        // `isTurnSidePending` in lib/lifecycle.js).
+        entry.pendingSource = PENDING_SOURCES.DISPOSED
         runtime.persist()
       }
     } catch {}

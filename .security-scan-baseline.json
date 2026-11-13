@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "rule": "dynamic-program",
+      "file": "lib/restart.js",
+      "fingerprint": "52b64ceab552d3df",
+      "reason": "扫描器误报，不是真实风险。lib/restart.js:1805 的 execFileSync(wmiPlan.file, wmiPlan.args, ...) 里，wmiPlan 来自 buildWmiRestartCommand(command)（lib/restart.js:1032），该函数返回的 file 是常量字符串 'powershell.exe'（lib/restart.js:1034），与外部输入无关；外部可配置的 restart command 只进入 args（lib/restart.js:1035 起），execFileSync 不经 shell，因此不存在「可指定任意可执行文件」的面。扫描器无法穿透函数返回值，把 wmiPlan.file 判成了派生值。★ 关键限定：这条基线只覆盖这一个 fingerprint；程序名一旦在将来被改成真的由外部决定，fingerprint 会变、基线失效、扫描重新变红。★ 若要根治（而不是基线化），可把 powershell.exe 提到模块级常量并让 execFileSync 直接引用该常量，使扫描器能看见它是常量；那属于 lib/restart.js 的独立改动，不在本次范围。",
+      "reviewer": "captain（本轮 t1 收口时复核：确认 lib/restart.js 本次 0 行改动、还原副本扫描结果一致）",
+      "reviewedAt": "2026-11-12"
+    }
+  ]
+}

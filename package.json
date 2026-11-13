@@ -1,6 +1,6 @@
 {
   "name": "dsh-autorestart",
-  "version": "0.9.6",
+  "version": "0.9.7",
   "type": "module",
   "description": "DSH plugin: restarts only when every session is idle, waits for plugin installs, then resumes the sessions it interrupted; adds a countdown shutdown, a pre-restart snapshot, and a windowless launcher.",
   "license": "MIT",

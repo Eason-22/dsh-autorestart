@@ -185,7 +185,18 @@ test('boot recovery wakes more pending sessions than one batch', async () => {
   assert.equal(Object.values(after.sessions).every((entry) => entry.pendingResume === false), true)
 })
 
-test('a failing resolveAgent records lastResumeError and the cap clears the retry', async () => {
+test('the retry budget belongs to the BOOT: a new cycle starts fresh, and the cap stops the retries inside one boot', async () => {
+  // THE BUDGET IS PER BOOT (bug, 2026-11-13).
+  //
+  // `beginBoot` gives every session a fresh budget in every new cycle, so the
+  // counter stops the retries INSIDE one boot — and the session stays pending,
+  // so that the fresh budget of the next boot has something to spend itself on.
+  //
+  // WHY: the counter used to be reset only in `markPendingResume` and in an
+  // explicit `continuum_recover_now(force: true)`, and the cap used to DROP the
+  // session (`pendingResume = false`). A session that hit a transient failure of
+  // another plugin was then never tried again, for ever. (Field report
+  // 2026-11-13: session-9fef9189, two days of "nothing".)
   const { file } = tempStateFile('failing')
   seedPreviousBoot(file, (state) => {
     markPendingResume(state, { sessionId: 's-bad', reason: 'restart-requested' })
@@ -201,29 +212,41 @@ test('a failing resolveAgent records lastResumeError and the cap clears the retr
   })
   const bootConfig = { stateFile: file, recoveryDelayMs: 0, maxResumeAttempts: 2, resumeRetryDelayMs: 0, enabled: true }
 
+  // ── BOOT 1: the budget of THIS boot is two attempts.
   const boot1 = makeBoot()
   apply(boot1.ctx, bootConfig)
   await runBootRecovery(boot1)
   let loaded = JSON.parse(fs.readFileSync(file, 'utf8'))
   assert.equal(loaded.sessions['s-bad'].pendingResume, true, 'a failed resume stays pending for a later boot')
-  assert.equal(loaded.sessions['s-bad'].resumeAttempts, 1)
+  assert.equal(loaded.sessions['s-bad'].resumeAttempts, 1, 'the first attempt of this boot counted')
   assert.match(loaded.sessions['s-bad'].lastResumeError, /boom/)
 
+  // A SECOND attempt INSIDE THE SAME BOOT — the manual retry path.
+  const retry = boot1.tools.find((tool) => tool.name === 'continuum_recover_now')
+  assert.ok(retry, 'the plugin exposes the manual retry')
+  await retry.execute({ sessionId: 's-bad' })
+  loaded = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(loaded.sessions['s-bad'].resumeAttempts, 2, 'the second attempt of this boot counted')
+  assert.equal(loaded.sessions['s-bad'].pendingResume, true, 'and the session is still pending')
+  assert.match(loaded.sessions['s-bad'].lastResumeError, /boom/)
+
+  // A THIRD attempt INSIDE THE SAME BOOT is refused by the cap of this boot.
+  await retry.execute({ sessionId: 's-bad' })
+  loaded = JSON.parse(fs.readFileSync(file, 'utf8'))
+  assert.equal(loaded.sessions['s-bad'].resumeAttempts, 2, 'the cap of this boot stopped the third attempt')
+  assert.equal(loaded.sessions['s-bad'].pendingResume, true, 'the session stays pending for the next boot')
+  assert.equal(loaded.sessions['s-bad'].lastRecoveryDetail, 'resume-attempts-exhausted', 'and the reason is on record')
+  assert.match(loaded.sessions['s-bad'].lastResumeError, /boom/, 'the last error stays recorded')
+
+  // ── BOOT 2: A NEW CYCLE BRINGS A NEW BUDGET.
   pretendNewHostBoot(file)
   const boot2 = makeBoot()
   apply(boot2.ctx, bootConfig)
   await runBootRecovery(boot2)
   loaded = JSON.parse(fs.readFileSync(file, 'utf8'))
-  assert.equal(loaded.sessions['s-bad'].pendingResume, true)
-  assert.equal(loaded.sessions['s-bad'].resumeAttempts, 2)
+  assert.equal(loaded.sessions['s-bad'].resumeAttempts, 1, 'the new boot starts with a fresh budget')
+  assert.equal(loaded.sessions['s-bad'].pendingResume, true, 'and the session is tried again')
+  assert.match(loaded.sessions['s-bad'].lastResumeError, /boom/, 'the failure is still visible')
   const status = boot2.tools.find((tool) => tool.name === 'continuum_status').execute({})
   assert.match(status.sessions[0].lastResumeError, /boom/, 'continuum_status exposes the resume error')
-
-  pretendNewHostBoot(file)
-  const boot3 = makeBoot()
-  apply(boot3.ctx, bootConfig)
-  await runBootRecovery(boot3)
-  loaded = JSON.parse(fs.readFileSync(file, 'utf8'))
-  assert.equal(loaded.sessions['s-bad'].pendingResume, false, 'the attempt cap stops the retry loop')
-  assert.match(loaded.sessions['s-bad'].lastResumeError, /boom/, 'the last error stays recorded')
 })

@@ -2,6 +2,184 @@
 
 中文 / English
 
+## 0.9.7 — 2026-11-13
+
+这一版重做了「谁该被缴械 / 谁该被唤醒 / 什么相位算什么状态」这一整套判据：把依据从**过程量**（可变时间戳、活目标的瞬时态）换成**归属量**（这条记录是哪一轮写的、后来谁把它 arm 回去的）。它修掉三个各自独立的真机 bug，补上审计查出的五处覆盖空洞，并把「恢复尝试预算」从按会话终生计改成按开机周期计。
+
+### 一、重启后目标被缴械却不恢复（修正）
+
+**原来错在哪**：开机认领时用 `restart.requestedAt` 当「本轮重启周期」的身份（`if (at < requestAt) continue`）。这个字段会被后来的请求者整体替换 `state.restart`、也会被 `defer_seconds` 推到未来，于是**先发生的缴械被判成历史旧账**，进不了恢复队列——开机连恢复都不尝试。现场反证：若该字段还是首个请求者的时间，同一条记录就会被认领。
+
+**现在**：周期身份改用**归属量** `restartCycleStartedAt`（每次新周期写一次，谁都不许改写），时间戳只留 24 小时兜底。
+
+### 二、排队期每 3 秒把已被重新 arm 的目标再缴一次（修正）
+
+**原来错在哪**：`disarmBlockingGoals` 每 3000ms 扫一遍忙会话，而 `selectGoalDisarms` 按设计只看活目标、显式不让 checkpoint 记录否决；被重新 arm 的目标下一个 tick 又挨一刀，覆盖写时还把 `reason` 抹掉、`resumedAt` 清成 null，界面上永远显示「已暂停」。
+
+**现在**：记录里写 `reason` / `cycle` / `goalRevision` / `tookBackAt`；**用户手动 arm 回来的目标记为「夺回」**，本轮排队不再缴它。
+
+### 三、目标已完成的会话每次开机都被叫醒（修正）
+
+**原来错在哪**：`GOAL_STOPPED_PHASES` 少了 `complete`，于是「目标做完了」被当成「还有待办」，每次开机都排一条续跑消息。真机证据：一个会话跑到第 176 轮。
+
+**现在**：`complete` 归入「停住」。但**不一刀切**——另加 `pendingSource` 区分待办来历：
+
+| 待办来历 | 目标 complete 时 |
+|---|---|
+| `boot-interrupted` / `restart-requested`（**用户那一轮被打断**） | **仍然续跑**：目标没活儿不等于用户那条消息有答案 |
+| `adoption` / `disposed`（目标侧，没有东西可给回） | 保持安静 |
+
+老状态文件没有这个标记时按记录推导：有缴械/停放记录 ⇒ `adoption`，否则 ⇒ `boot-interrupted`。
+
+### 四、恢复尝试预算改为按开机周期计（修正）
+
+**原来错在哪**：`resumeAttempts` 只在 `markPendingResume` 与 `recoverNow(force)` 里重置。一个**开机时没在跑、之后也没有新待办**的会话永远拿不到重置机会，一次临时故障（别的插件崩了一次）就把它的恢复能力永久废掉——代码自己的注释却写着 `At-most-once per boot`。真机证据：一个会话两次尝试都撞在别的插件的 `read_image` 重复注册错误上，之后两天再没被尝试过。
+
+**现在**：`beginBoot` 给每个会话一份新预算；预算用光时**不再清 `pendingResume`**（清了的话下一个开机的新预算无处可用）。代价是有意选的：**永久坏掉的会话每次开机再试最多 2 次，代价有界、失败原因一直可见；而永久丢弃一个可恢复的会话是静默的数据丢失。**
+
+### 五、人工恢复的目标不再被二次缴械（修正）
+
+**原来错在哪**：`isGoalTakenBackByUser` 见到 `resumedAt` 就返回 false（注释写着「插件自己还回去的目标可以被再次缴械」）。可人工恢复（`continuum_recover_now`）只写 `resumedAt`、不写 `tookBackAt`，于是**人点的恢复 3 秒后就被打回**。真机证据：09:19:41 恢复成功，09:22:14 又被缴械。
+
+**现在**：人工入口成功后补写 `tookBackAt` ⇒ 立刻被认成「人的介入」⇒ 重启前不再被缴械。开机自动恢复仍只写 `resumedAt` ⇒ 新周期照常可以再缴。
+
+界面上：胶囊出现「· 目标被手动恢复，不再停止」，tooltip 说明「被停止的目标已被人工恢复，插件不再二次停止，需人工停止」。
+
+### 六、缴械时机：请求者还没停就不缴别人（修正）
+
+**原来错在哪**：重启排队期间，3 秒轮询对**所有正在跑的会话**缴械。可发起重启的会话自己还在跑时，重启根本不可能执行，这时候缴别人**一点用都没有**——只会让没发起重启的会话白等（现场等了 28 分钟）。
+
+**现在**：从 `restart.requesters` 取请求者集合，**只要还有请求者在跑就一条都不缴**（返回 `skipped: 'requesters-still-running'`）；等它们全停了才开始缴「没发起重启」的会话。请求者自己「请求那一刻当场缴械」的行为**不变**——那是主代理自己控制何时停。
+
+界面上：废弃「· 被某个自动续跑的 goal 占着」，统一用「· 已停泊 {n} 个 goal，重启后自动继续」（n 可以为 0，覆盖从 0 到全部停泊的全过程）。
+
+### 七、历史遗留被锁死的 goal 可以被人工解锁（新增）
+
+**原来错在哪**：24 小时年龄上限把老记录挡在自动认领之外（这是对的），但**手动恢复也一起被挡住了**——`recoverNow` 只认 `pendingResume`，而这些记录早被清成 false ⇒ 用户点了没反应，返回 `no-pending-recovery`。
+
+**现在**：手动点名恢复时，只要该会话有一条**插件自己写的**缴械记录（`restart-queued` / `restart-blocking`、未 resumed、当前不在跑），就当作待恢复处理。
+
+**三条边界**（一条都不越）：
+
+- **插件绝不主动恢复**：自动认领路径与 24 小时上限一个字没改。
+- **不碰用户主动暂停的**（`parkedGoals`）：那是用户停的，不是插件锁的。
+- **不解锁没有 `reason` 的上一代记录**：那不是插件锁的。
+
+### 八、覆盖补齐与文案（新增）
+
+审计（只读）把「相位 × 来源」5×5 表摊平后发现的空洞，逐格补上行为用例：`U1`（complete × restart-requested 仍续跑）、`U2`（complete × disposed 仍续跑，两处自相矛盾的注释改成同一口径）、`U3`（相位快照陈旧时的取舍，只钉现状不改行为）、`U4`（老文件的来源推导改成「更近者胜出」）、`U5`（blocked 走恢复层保持安静、phase 缺失仍 fail-closed）。
+
+测试数 **1191 → 1232**，全部通过。
+
+### 九、自己发起重启的会话，不该被暂停的目标一起憋死（修正）
+
+**原来错在哪**：`shouldStayQuiet()` 第一条就是 `if (isGoalStopped(goal)) return true`——目标 `paused` / `blocked` 就一律安静，**把「这次重启是谁要求的」这个已有的信息整个盖掉了**。可 `PENDING_SOURCES` 里早就写着 `restart-requested` 的含义是「**这个会话自己**要求了重启」：一个会话不会无缘无故在干活干到一半时要求重启，它要求重启，就是希望重启完继续。
+
+真机证据：`session-0cde21f1` 的 `pendingSource` 正是 `restart-requested`，但它的目标处于 `paused`，于是开机判成 `goal-stopped` / 「the user stopped this goal: the session stays quiet」，把它要求重启去继续的活吞了。
+
+**现在**：`shouldStayQuiet()` 先看来源——`restart-requested` 直接返回「不必安静」，不再因目标相位短路；其余来源（`boot-interrupted` / `adoption` / `disposed` / 缺失）行为**一个字没变**。
+
+**边界：唤醒 ≠ 继续目标。** 这条只让会话能接着说话，**不会**把暂停的目标重新武装——重新武装的三个分支都要求 `phase === 'active'`，`paused` 目标永远走不到那里，不会产生新的目标轮。**用户自己暂停的目标仍然是暂停的。**
+
+| 目标相位 | 谁发起这次重启 | 结果 |
+|---|---|---|
+| `paused` / `blocked` | **它自己** | **会话被唤醒**（目标仍暂停） |
+| `paused` / `blocked` | 别人 | 保持安静（原行为） |
+| `active` | 任何人 | 恢复/重新武装（原行为） |
+| `complete` | 看来源（U1/U2 的既有口径） | 不变 |
+
+测试数 **1232 → 1241**（新增 9 条），全部通过。
+
+### English
+
+This release reworks the whole "who gets disarmed / who gets woken / which phase counts as stopped" set of judgements: it moves the evidence from **process quantities** (mutable timestamps, the momentary state of a live goal) to **ownership quantities** (which restart cycle wrote this record, and who armed the goal back afterwards). It fixes three independent real-machine bugs, closes five coverage holes found by an audit, and changes the resume-attempt budget from "once per session, for ever" to "once per boot cycle".
+
+#### 1. A goal disarmed by a restart was never resumed (fix)
+
+**What was wrong**: boot adoption used `restart.requestedAt` as the identity of "this restart cycle" (`if (at < requestAt) continue`). That field is replaced wholesale when a later requester rewrites `state.restart`, and `defer_seconds` can push it into the future, so a disarm that happened *earlier* was judged an old leftover and never entered the resume queue — boot did not even try.
+
+**Now**: the cycle identity is the ownership quantity `restartCycleStartedAt` (written once per cycle, rewritten by nobody); the timestamp survives only as a 24-hour fallback.
+
+#### 2. The 3-second loop disarmed a goal again right after it had been re-armed (fix)
+
+**What was wrong**: `disarmBlockingGoals` scans busy sessions every 3000 ms, and `selectGoalDisarms` deliberately looks only at live goals and never lets a checkpoint record veto it — so a goal the user had armed back was disarmed again on the next tick, and the overwrite wiped `reason` and nulled `resumedAt`, leaving the UI saying "paused" for ever.
+
+**Now**: records carry `reason` / `cycle` / `goalRevision` / `tookBackAt`; **a goal armed back by hand is recorded as taken back** and is not disarmed again during that queueing round.
+
+#### 3. Sessions whose goal was complete were woken on every boot (fix)
+
+**What was wrong**: `GOAL_STOPPED_PHASES` lacked `complete`, so "this goal is done" read as "there is still work pending" and every boot queued a continuation. Real-machine evidence: one session reached round 176.
+
+**Now**: `complete` counts as stopped — but not blindly. `pendingSource` decides:
+
+| Where the pending work came from | Goal complete |
+|---|---|
+| `boot-interrupted` / `restart-requested` (**the user's own turn was interrupted**) | **still resumes** — a finished goal does not mean that message got an answer |
+| `adoption` / `disposed` (goal side, nothing to hand back) | stays quiet |
+
+Old state files without that marker derive it from the records: a disarm/park record means `adoption`, otherwise `boot-interrupted`.
+
+#### 4. The resume-attempt budget is now counted per boot cycle (fix)
+
+**What was wrong**: `resumeAttempts` was reset only by `markPendingResume` and `recoverNow(force)`. A session that was not running at boot and had no new pending work never got a reset — one transient failure (another plugin crashing once) permanently destroyed its ability to recover, while the code's own comment claimed `At-most-once per boot`.
+
+**Now**: `beginBoot` hands every session a fresh budget; an exhausted budget **no longer clears `pendingResume`**. The cost is deliberate: **a permanently broken session is retried at most twice per boot — bounded, with the reason always visible; permanently dropping a recoverable session is silent data loss.**
+
+#### 5. A goal recovered by hand is no longer disarmed again (fix)
+
+**What was wrong**: `isGoalTakenBackByUser` returned false as soon as `resumedAt` was set (its comment said a goal the plugin handed back may be disarmed again). But a manual recovery (`continuum_recover_now`) wrote only `resumedAt`, never `tookBackAt`, so **a human recovery was undone 3 seconds later**. Real-machine evidence: recovered at 09:19:41, disarmed again at 09:22:14.
+
+**Now**: the manual entry also writes `tookBackAt`, so the recovery is read as "a human intervened" and the goal is not disarmed before the restart. The automatic boot recovery still writes only `resumedAt`, so a new cycle may disarm it as before.
+
+UI: the capsule shows "· 目标被手动恢复，不再停止", and the tooltip explains that the goal was recovered by hand and the plugin will not stop it a second time.
+
+#### 6. Disarm timing: nobody is disarmed while a requester is still running (fix)
+
+**What was wrong**: while a restart was queued, the 3-second loop disarmed **every running session**. But while the requesting sessions themselves are still running the restart cannot execute at all, so disarming anybody else achieves nothing except making sessions that never asked wait (28 minutes on the real machine).
+
+**Now**: the requester set comes from `restart.requesters`; **as long as one requester is still running nothing is disarmed** (`skipped: 'requesters-still-running'`), and only once they have all stopped does the plugin start disarming sessions that did not ask. The requester's own "disarm at the moment it asks" is **unchanged** — that is the main agent deciding when to stop by itself.
+
+UI: "· 被某个自动续跑的 goal 占着" is gone; one sentence covers everything, "· 已停泊 {n} 个 goal，重启后自动继续" (n may be 0).
+
+#### 7. A legacy locked goal can be unlocked by hand (new)
+
+**What was wrong**: the 24-hour age cap correctly keeps old records out of automatic adoption, but it blocked **manual** recovery too — `recoverNow` only looked at `pendingResume`, which those records had long been cleared to false, so a user clicking recover got `no-pending-recovery`.
+
+**Now**: a named manual recovery accepts a disarm record **written by the plugin itself** (`restart-queued` / `restart-blocking`, not resumed, not currently running) and treats it as pending.
+
+**Three boundaries**, none crossed:
+
+- **The plugin never recovers on its own**: the automatic adoption path and the 24-hour cap are untouched.
+- **Goals the user paused themselves** (`parkedGoals`) are not touched — those were stopped by the user, not locked by the plugin.
+- **Records without `reason` from the previous generation are not unlocked** — those were not locked by the plugin either.
+
+#### 8. Coverage and wording (new)
+
+The audit (read-only) flattened the 5×5 "phase × source" table and filled the holes with behaviour cases: `U1` (complete × restart-requested still resumes), `U2` (complete × disposed still resumes; two contradictory comments now say the same thing), `U3` (what wins when the phase snapshot is stale — pinned as-is, behaviour unchanged), `U4` (deriving the source for old files now takes the nearer of the two), `U5` (blocked stays quiet through the resume layer; a missing phase still fails closed).
+
+Tests **1191 → 1232**, all passing.
+
+#### 9. A session that asked for the restart is not held hostage by its own paused goal (fix)
+
+**What was wrong**: the first line of `shouldStayQuiet()` was `if (isGoalStopped(goal)) return true` — a `paused` / `blocked` goal meant "stay quiet" regardless of **who asked for this restart**, even though `PENDING_SOURCES` has always said `restart-requested` means "**this** session asked for the restart itself". A session does not ask for a restart halfway through its work for no reason; asking means it wants to continue afterwards.
+
+Real-machine evidence: `session-0cde21f1` had `pendingSource` = `restart-requested` while its goal was `paused`, so boot judged it `goal-stopped` ("the user stopped this goal: the session stays quiet") and swallowed the work it had asked to continue.
+
+**Now**: `shouldStayQuiet()` looks at the source first — `restart-requested` means "no need to stay quiet" and no longer short-circuits on the goal phase; every other source (`boot-interrupted` / `adoption` / `disposed` / missing) behaves exactly as before.
+
+**Boundary: waking the session is not continuing the goal.** This only lets the session talk again; it does **not** re-arm a paused goal — all three re-arm branches require `phase === 'active'`, so a `paused` goal never reaches them and no new goal round is produced. **A goal the user paused stays paused.**
+
+| Goal phase | Who asked for this restart | Result |
+|---|---|---|
+| `paused` / `blocked` | **itself** | **the session wakes** (the goal stays paused) |
+| `paused` / `blocked` | somebody else | stays quiet (unchanged) |
+| `active` | anyone | resume / re-arm (unchanged) |
+| `complete` | by source (the U1/U2 rule) | unchanged |
+
+Tests **1232 → 1241** (9 new), all passing.
+
+---
+
 ## 0.9.6 — 2026-11-11
 
 这一版给「重启前等什么」补上了两个**装插件**的信号（市场在装、插件目录在动），并修掉了它们带来的四处判据缺陷：

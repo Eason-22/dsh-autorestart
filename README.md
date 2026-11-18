@@ -9,7 +9,7 @@ Restart DeepSeek Harness without losing the work that is currently running.
 
 Chinese version: [README.zh.md](docs/README.zh.md)
 
-Current version: **0.9.7**
+Current version: **0.9.8**
 
 ## What it does
 
@@ -198,6 +198,7 @@ Both probes are read-only: one `GET`, no body, no retry, nothing is written.
 | `~/.dsh/storages/dsh-autorestart/backups/<stamp>/` | `config/` + `node_modules-link/` of one snapshot |
 | `~/.dsh/storages/dsh-autorestart/last-cookie-clear.json` | How many credentials the last clear removed |
 | `~/.dsh/storages/dsh-autorestart/access.json` | The loopback port and token the plugin listens on |
+| `~/.dsh/storages/dsh-autorestart/last-sleep.json` | When and why the last shutdown intent was cleared (`at` / `reason` / `armedAt` / `countdownSeconds`) |
 
 ## About that backup
 
@@ -359,8 +360,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File plugins/dsh-autorestart/scri
 glob patterns, so `node --test plugins/dsh-autorestart/test` fails with `MODULE_NOT_FOUND`. The script passes
 the glob `plugins/dsh-autorestart/test/*.test.mjs` instead.
 
-All **1191** test cases pass (1191 passed, 0 failed, 0 skipped) — measured on 2026-11-11 with the bundled
-Node: `tests 1191 / pass 1191 / fail 0`, exit code 0.
+All **1250** test cases pass (1250 passed, 0 failed, 0 skipped) — measured on 2026-11-18 with the bundled
+Node: `tests 1250 / pass 1250 / fail 0`, exit code 0.
 
 ## License
 

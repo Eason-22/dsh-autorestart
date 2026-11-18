@@ -4347,7 +4347,21 @@
         // sentence is retired: the capsule names the parked goals instead — and
         // the count may be 0, because the plugin does not park anything while
         // the sessions that asked for the restart are still running.
-        const parkedCount = Array.isArray(info && info.parkedGoals) ? info.parkedGoals.length : 0
+        //
+        // ONLY THE GOALS THAT ARE PARKED RIGHT NOW (bug, 2026-11-18): the Host
+        // keeps every record for ever, so the list also holds the goals of the
+        // runs before this one and the goals that are already back. The capsule
+        // counts the goals THIS run parked and that are still parked: the Host
+        // says `thisBoot` (the record is from this run), the goal is not
+        // resumed and the user did not give it back.
+        const parkedCount = Array.isArray(info && info.parkedGoals)
+          ? info.parkedGoals.filter(
+              (entry) => entry
+                && entry.thisBoot === true
+                && entry.resumedAt == null
+                && entry.tookBackAt == null,
+            ).length
+          : 0
 
         // The long wait: the Host says that the restart is still waiting while a
         // conversation runs on. The capsule shows one
@@ -4381,7 +4395,7 @@
           ? market.pill
           : longWait.hasLongWait
             ? ''
-            : goalActive.length > 0
+            : parkedCount > 0
               ? fill(t('parkedGoals'), { n: parkedCount })
               : goalExhausted.length > 0
                 ? t('goalExhausted')

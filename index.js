@@ -458,7 +458,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.9.7'
+const PLUGIN_VERSION_FALLBACK = '0.9.8'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -1464,14 +1464,30 @@ function goalAwareBlockingDetails(runtime, blockedBy) {
  * The status field is still called `parkedGoals` so an older client keeps
  * working; `kind` tells the two shapes apart.
  *
+ * `thisBoot` says that THIS run produced the record. The records live for
+ * ever in the state file, so the client cannot tell them apart on its own:
+ * the client has no boot time, the Host has one (the state carries
+ * `bootStartedAt`). The flag is read-only — it changes no record, writes
+ * nothing and touches no state field.
+ *
  * @param {object} runtime
- * @returns {{sessionId: string, kind: 'disarmed'|'parked', goalId: string|null, disarmedAt: number|null, parkedAt: number|null, resumedAt: number|null, resumed: boolean, tookBackAt: number|null}[]}
+ * @returns {{sessionId: string, kind: 'disarmed'|'parked', goalId: string|null, disarmedAt: number|null, parkedAt: number|null, resumedAt: number|null, resumed: boolean, tookBackAt: number|null, thisBoot: boolean}[]}
  */
 function parkedGoalList(runtime) {
   const out = []
+  // WHEN THIS RUN STARTED. The state carries it (`beginBoot` writes it), and
+  // a record made at or after that moment belongs to this run.
+  const bootStartedAt = runtime && runtime.state && Number.isFinite(runtime.state.bootStartedAt)
+    ? runtime.state.bootStartedAt
+    : null
   const collect = (records, kind, atKey) => {
     for (const [sessionId, record] of Object.entries(records || {})) {
       if (!record || typeof record !== 'object') continue
+      // WHEN the record was made: the disarmed-goal records carry `disarmedAt`,
+      // the legacy ones the `parkedAt` of their own shape.
+      const madeAt = kind === 'disarmed'
+        ? (Number.isFinite(record.disarmedAt) ? record.disarmedAt : null)
+        : (Number.isFinite(record[atKey]) ? record[atKey] : null)
       out.push({
         sessionId,
         kind,
@@ -1484,6 +1500,8 @@ function parkedGoalList(runtime) {
         // take such a goal away a second time in this cycle, and the interface
         // says so.
         tookBackAt: record.tookBackAt != null ? record.tookBackAt : null,
+        // THIS RUN parked it (the capsule counts only these).
+        thisBoot: bootStartedAt != null && madeAt != null && madeAt >= bootStartedAt,
       })
     }
   }
@@ -3065,6 +3083,79 @@ export function readRestartRequestRecord(stateDir) {
   if (dir === '') return null
   try {
     let text = fs.readFileSync(restartRequestPath(dir), 'utf8')
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
+    const parsed = JSON.parse(text)
+    return isPlainObject(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * THE TRACE OF THE LAST DISARMED SHUTDOWN INTENT.
+ *
+ * The user armed a "shut the machine down when the work is done" intent and
+ * the next morning the intent was gone — with nothing but one log line that
+ * is never written down. This file is the trace: WHEN the intent was
+ * cleared, WHY it was cleared, and what the intent looked like before it
+ * went away.
+ *
+ * It lives in the state directory, next to `last-restart-request.json`.
+ */
+export const SLEEP_TRACE_FILE = 'last-sleep.json'
+
+/**
+ * The path of the sleep trace file.
+ *
+ * @param {string} stateDir
+ * @returns {string}
+ */
+export function sleepTracePath(stateDir) {
+  return path.join(String(stateDir ?? ''), SLEEP_TRACE_FILE)
+}
+
+/**
+ * Write the trace of the last disarmed shutdown intent (atomically: a
+ * temporary file + a rename, so a half-written trace is never read).
+ *
+ * It NEVER throws: a trace that cannot be written must not break the
+ * shutdown flow — the caller gets `{ ok: false, error }` instead.
+ *
+ * @param {string} stateDir
+ * @param {object} record
+ * @param {{ writeFile?: Function, rename?: Function, mkdir?: Function }} [io]
+ * @returns {{ ok: boolean, path: string, error: string|null }}
+ */
+export function writeSleepTraceRecord(stateDir, record, {
+  writeFile = (target, content) => fs.writeFileSync(target, content, 'utf8'),
+  rename = (from, to) => fs.renameSync(from, to),
+  mkdir = (dir) => fs.mkdirSync(dir, { recursive: true }),
+} = {}) {
+  const dir = typeof stateDir === 'string' ? stateDir.trim() : ''
+  if (dir === '') return { ok: false, path: '', error: 'there is no state directory to write the sleep trace into' }
+  const target = sleepTracePath(dir)
+  const temporary = target + '.tmp-' + crypto.randomBytes(6).toString('hex')
+  try {
+    mkdir(dir)
+    writeFile(temporary, JSON.stringify(record, null, 2) + '\n')
+    rename(temporary, target)
+    return { ok: true, path: target, error: null }
+  } catch (error) {
+    return { ok: false, path: target, error: String(error && error.message ? error.message : error) }
+  }
+}
+
+/**
+ * The trace of the last disarmed shutdown intent, as it is on disk.
+ *
+ * @param {string} stateDir
+ * @returns {object|null}
+ */
+export function readSleepTraceRecord(stateDir) {
+  const dir = typeof stateDir === 'string' ? stateDir.trim() : ''
+  if (dir === '') return null
+  try {
+    let text = fs.readFileSync(sleepTracePath(dir), 'utf8')
     if (text.charCodeAt(0) === 0xfeff) text = text.slice(1)
     const parsed = JSON.parse(text)
     return isPlainObject(parsed) ? parsed : null
@@ -11073,6 +11164,75 @@ function admittedByConnection(ctx, req) {
 }
 
 /**
+ * The host's connection service, when this host has one.
+ *
+ * The connection service is the part of the host that knows who is talking to
+ * it: `requestRejection` answers a refusal status (401/403) when the request
+ * is not an authenticated browser request, and nothing at all when the request
+ * may proceed. It is found either as a property of the context or as a service
+ * of the context.
+ *
+ * This is NOT the `resolveConnectionService` above: that one looks for
+ * `authenticatedUrl` (the access link of the host), this one looks for
+ * `requestRejection` (the answer of the host to this very request).
+ *
+ * @param {unknown} ctx - the plugin context.
+ * @returns {unknown} the service, or null when this host has none.
+ */
+function resolveConnectionGate(ctx) {
+  let connection = null
+  try {
+    if (ctx && ctx.connection && typeof ctx.connection.requestRejection === 'function') {
+      connection = ctx.connection
+    }
+  } catch {}
+  if (!connection) {
+    try {
+      if (ctx && typeof ctx.get === 'function') {
+        const service = ctx.get('connection')
+        if (service && typeof service.requestRejection === 'function') connection = service
+      }
+    } catch {}
+  }
+  return connection
+}
+
+/**
+ * The gate of a request that CHANGES state: arming or cancelling the
+ * shutdown.
+ *
+ * "The request came from 127.0.0.1" proves nothing - every process on this
+ * machine can reach the loopback address, so the old rule let ANY local
+ * program arm or cancel the shutdown without a single credential. The only
+ * party that can tell a DSH interface request from another program's request
+ * is the host's connection service, so the route asks it.
+ *
+ * The three outcomes are NOT the same:
+ *
+ *   - the connection service is there and admits the request: it may go;
+ *   - the connection service is there and refuses the request: it may NOT;
+ *   - there is NO connection service: this host cannot tell, so the old
+ *     loopback rule is kept - and the log says so, because a silent fallback
+ *     must never look like a real check.
+ *
+ * @param {unknown} ctx - the plugin context.
+ * @param {unknown} req - the incoming request.
+ * @param {unknown} runtime - the plugin runtime (for the log).
+ * @returns {{ allowed: boolean, reason: string }} the verdict and the reason.
+ */
+function sleepMutationAdmission(ctx, req, runtime) {
+  const connection = resolveConnectionGate(ctx)
+  if (!connection) {
+    try {
+      runtime.log.warn('the sleep route found no connection service, so it could not check whether this request is an authenticated DSH request: the request was admitted by the loopback rule (a degraded fallback, not an authentication check)')
+    } catch {}
+    return { allowed: true, reason: 'no-connection-service' }
+  }
+  if (admittedByConnection(ctx, req)) return { allowed: true, reason: 'admitted' }
+  return { allowed: false, reason: 'not-admitted' }
+}
+
+/**
  * Read a small JSON request body. Never throws: an unreadable or malformed
  * body simply becomes an empty object.
  *
@@ -13117,13 +13277,38 @@ function createSleepService(ctx, runtime, config, options = {}) {
     },
     // The intent is spent when the machine went off, when the shutdown failed
     // and when the user cancelled it: the checkpoint must not keep it.
+    //
+    // The disarm also leaves a trace on disk: "the user armed a shutdown
+    // intent and the next morning the intent was gone" is only provable when
+    // the disarm wrote down WHEN it happened, WHY it happened and what the
+    // intent looked like before it went away.
     onDisarm: (reason) => {
+      // Read the intent BEFORE it is cleared: once clearSleep ran, the
+      // armed moment and the countdown are gone.
+      const intent = runtime.state && runtime.state.sleep ? runtime.state.sleep : null
+      const armedAt = intent && Number.isFinite(intent.armedAt) ? intent.armedAt : null
+      const countdownSeconds = intent && Number.isFinite(intent.countdownSeconds) ? intent.countdownSeconds : null
+      const traceReason = typeof reason === 'string' ? reason : String(reason)
       try {
         clearSleep(runtime.state)
         runtime.persist()
         runtime.log.info('the shutdown intent was cleared:', reason)
       } catch (error) {
         runtime.log.warn('could not clear the shutdown intent:', String(error))
+      }
+      // The trace is a side effect of the disarm: a state directory that
+      // cannot be written to must never turn "the intent was cleared" into
+      // a failure of the shutdown flow.
+      try {
+        const written = writeSleepTraceRecord(runtime.stateDir, {
+          at: Date.now(),
+          reason: traceReason,
+          armedAt,
+          countdownSeconds,
+        })
+        if (!written.ok) runtime.log.warn('could not write the sleep trace:', written.error)
+      } catch (error) {
+        runtime.log.warn('could not write the sleep trace:', String(error))
       }
     },
     countdownSeconds: seconds,
@@ -13282,9 +13467,14 @@ function sleepStatusPayload(sleep, config, runtime) {
  * Build the `/sleep` route: `GET` reports the state of the graceful sleep,
  * `POST` arms or cancels it.
  *
- * It sits next to the health route and uses the same authentication rule
- * (loopback OR a request the connection service admits). Body:
- * `{ "action": "arm" | "cancel" }`; anything else is refused with a 400.
+ * `GET` sits next to the health route and uses the same authentication rule
+ * (loopback OR a request the connection service admits). `POST` is stricter:
+ * it CHANGES state, so it asks the host's connection service whether the
+ * request is an authenticated DSH request - "it came from the loopback
+ * address" proves nothing, because every process on this machine can reach
+ * it. When the host has NO connection service the old loopback rule is kept
+ * and the log says so. Body: `{ "action": "arm" | "cancel" }`; anything else
+ * is refused with a 400.
  *
  * There is NO ticket and no extra header: the desktop client and the hosted
  * web client drive the very same route, so a request carries nothing but the
@@ -13323,6 +13513,18 @@ function buildSleepRoute(ctx, runtime, config, sleep) {
         res.setHeader('content-type', 'application/json; charset=utf-8')
         res.setHeader('allow', 'GET, POST')
         res.end('{"ok":false,"error":"method-not-allowed"}')
+        return
+      }
+      // A request that CHANGES state must be an authenticated DSH request:
+      // "it came from the loopback address" proves nothing, because every
+      // process on this machine can reach it. The host's connection service
+      // is the only one that can tell a DSH interface request from another
+      // program's request.
+      const admission = sleepMutationAdmission(ctx, req, runtime)
+      if (!admission.allowed) {
+        res.statusCode = 403
+        res.setHeader('content-type', 'application/json; charset=utf-8')
+        res.end('{"ok":false,"error":"not-admitted"}')
         return
       }
       // A route that changes state only accepts JSON: a cross-site simple

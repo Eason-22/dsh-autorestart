@@ -4,7 +4,7 @@
 
 ![dsh-autorestart 图标](../assets/icon-180.png)
 
-当前版本：**0.9.7**
+当前版本：**0.9.8**
 
 ## 它做什么
 
@@ -166,6 +166,7 @@
 | `~/.dsh/storages/dsh-autorestart/backups/<时间戳>/` | 一份快照的 `config/` + `node_modules-link/` |
 | `~/.dsh/storages/dsh-autorestart/last-cookie-clear.json` | 上次清掉了几枚凭证 |
 | `~/.dsh/storages/dsh-autorestart/access.json` | 插件监听的本地端口与令牌 |
+| `~/.dsh/storages/dsh-autorestart/last-sleep.json` | 上一次关机意图是什么时候、被什么清掉的（`at` / `reason` / `armedAt` / `countdownSeconds`） |
 
 ## 关于那份备份
 
@@ -314,8 +315,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File plugins/dsh-autorestart/scri
 `node --test plugins/dsh-autorestart/test` 会以 `MODULE_NOT_FOUND` 失败；脚本传的是 glob
 `plugins/dsh-autorestart/test/*.test.mjs`。
 
-**1191** 个用例全绿（1191 通过 / 0 失败 / 0 跳过）——2026-11-11 本机用随附的 Node 实测：
-`tests 1191 / pass 1191 / fail 0`，退出码 0。
+**1250** 个用例全绿（1250 通过 / 0 失败 / 0 跳过）——2026-11-18 本机用随附的 Node 实测：
+`tests 1250 / pass 1250 / fail 0`，退出码 0。
 
 ## 许可
 

@@ -2,6 +2,70 @@
 
 中文 / English
 
+## 0.9.8 — 2026-11-18
+
+中文 / English
+
+这一版收了三处判据。胶囊那行的「已停泊 {n} 个 goal」原来把历史上早就恢复过、乃至你自己收回的目标也算进去（同一时刻旧口径 16 条、新口径 0 条）；「收工关机」的意图被清掉时不留任何痕迹，过了一夜就说不清是谁、什么时候、为什么清掉的；`POST {prefix}/sleep` 的 arm / cancel 只看「来自本机就放行」，本机上任何一个程序都能替你按下关机。三处都只改判据——界面文案一个字节没动，GET 与成功回包的形状也没动。
+
+### 一、胶囊计数：只数「这一轮真的被本插件停掉、至今还没恢复」的目标
+
+**原来错在哪**：胶囊那行 `· 已停泊 {n} 个 goal，重启后自动继续` 的 n 统计的是「历史上被停过的一切」，其中两类根本不该算：已经恢复过的（`resumedAt` 非空）、以及你自己收回的（`tookBackAt`）。实测同一时刻旧口径 16 条、新口径 0 条——屏幕上写着 16，真实待续的却是 0。
+
+**现在**：只数「本进程这一轮被本插件停掉、且至今还没恢复」的目标。
+
+**边界**：文案与 locale key 一律未变，还是 `· 已停泊 {n} 个 goal，重启后自动继续`（n 可以为 0）；变的是 n 的取数口径，不是这句话本身。
+
+### 二、关机留痕：关机意图被清掉时留一条 last-sleep.json
+
+**原来错在哪**：「收工关机」的意图被清掉后什么都不留，第二天只能猜：是谁清掉的、什么时候清掉的、当时那个倒计时还剩几秒。
+
+**现在**：意图被清掉时，向宿主状态目录写一条 `last-sleep.json`，四个字段：`at`（什么时候）、`reason`（为什么）、`armedAt`（什么时候布防的）、`countdownSeconds`（当时设的倒计时）。写留痕是在「清除意图」之后单独一步做的。
+
+**边界**：写留痕失败只记一条 warn，**不影响「清除意图」这条主流程**——意图照样被清掉，绝不会因为留痕写不进去就把用户的关机意图留在那里。
+
+### 三、关机接口鉴权：POST /sleep 的 arm / cancel 必须由宿主连接服务认可
+
+**原来错在哪**：`POST {prefix}/sleep` 的 arm 与 cancel 靠「来自本机就放行」判断。本机上任何一个程序都能调到这个接口，等于让它替你按下关机。
+
+**现在**：arm 与 cancel 改为「必须由宿主连接服务认可」。连接服务明确拒绝 → `403`，body 是 `{"ok":false,"error":"not-admitted"}`。
+
+**边界**：没有连接服务的旧部署降级为本机放行，并写一条含 `connection` 的 warn——这是刻意的兼容降级，不是鉴权通过。GET 的行为、405 + `allow: GET, POST`、JSON content-type 校验、`unknown-action` 的 400、成功回状态载荷，全部不变。
+
+测试数 **1241 → 1250**（新增 9 条），全部通过（1250 通过 / 0 失败 / 0 跳过，退出码 0）。
+
+### English
+
+This release tightens three decisions. The capsule line counted goals that had already been resumed — and goals you took back yourself — so it read 16 while nothing was actually pending. Clearing a shutdown intent wrote nothing down at all, so the next morning nobody could say who cleared it, when, or why. And `POST {prefix}/sleep` admitted `arm` / `cancel` from any local program, because "it came from this machine" was the only test. All three change the decision only: no wording of the UI changed, and neither did the shape of the GET response or of a successful reply.
+
+#### 1. The capsule counted goals that were already back
+
+**What was wrong**: the `n` in `· 已停泊 {n} 个 goal，重启后自动继续` counted "everything this plugin ever stopped", including goals that had already been resumed (`resumedAt` set) and goals you took back yourself (`tookBackAt`). Measured at one instant: 16 by the old rule, 0 by the new one — the screen said 16 while nothing was actually pending.
+
+**Now**: it counts only the goals that **this process stopped in this round and that have not been resumed since**.
+
+**Boundary: the wording and the locale key did not change.** The line is still `· 已停泊 {n} 个 goal，重启后自动继续` and `n` may still be 0; only the way `n` is counted changed.
+
+#### 2. Clearing a shutdown intent left no trace
+
+**What was wrong**: when the "wrap up and shut down" intent was cleared, nothing was written down — the next morning there was no way to tell who cleared it, when it was cleared, or how many seconds the countdown had left.
+
+**Now**: clearing the intent writes one `last-sleep.json` into the host state directory with four fields: `at` (when), `reason` (why), `armedAt` (when it was armed) and `countdownSeconds` (the countdown that was set). The trace is written after the intent has been cleared, as its own separate step.
+
+**Boundary: a failed trace write never blocks the main flow.** If the file cannot be written, only a warn is logged; the intent is still cleared — a shutdown intent is never left in place because the trace could not be saved.
+
+#### 3. The sleep route now needs the host's connection service
+
+**What was wrong**: `arm` and `cancel` on `POST {prefix}/sleep` were admitted by the "it came from this machine" rule, so any local program could press the shutdown button for you.
+
+**Now**: both actions must be admitted by the host's connection service. When the connection service explicitly refuses, the route answers `403` with `{"ok":false,"error":"not-admitted"}`.
+
+**Boundary: old deployments without a connection service keep the loopback rule.** They are admitted as before and a warn containing `connection` is logged — a deliberate compatibility fallback, not a passed authentication check. The GET behaviour, the 405 with `allow: GET, POST`, the JSON content-type check, the 400 `unknown-action` and the successful status payload are all unchanged.
+
+Tests **1241 → 1250** (9 new), all passing (1250 passed / 0 failed / 0 skipped, exit code 0).
+
+---
+
 ## 0.9.7 — 2026-11-13
 
 这一版重做了「谁该被缴械 / 谁该被唤醒 / 什么相位算什么状态」这一整套判据：把依据从**过程量**（可变时间戳、活目标的瞬时态）换成**归属量**（这条记录是哪一轮写的、后来谁把它 arm 回去的）。它修掉三个各自独立的真机 bug，补上审计查出的五处覆盖空洞，并把「恢复尝试预算」从按会话终生计改成按开机周期计。

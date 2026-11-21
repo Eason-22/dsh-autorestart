@@ -37,6 +37,35 @@
 
 恢复一份**来自别的 profile** 的备份，现在会失败并说明原因（以前是静默覆盖）。确实需要跨 profile 恢复时，传 `verifyTarget: false`。
 
+### 1. Four external fixes
+
+| Defect | Symptom | Fix |
+|---|---|---|
+| The instance record published port 0 on hosted web | The restart had actually worked, but the watchdog judged it failed and restored the pre-restart snapshot over the config | Fall back to `webServer.port` when the host does not provide `getOrigin()`; never invent a port when the host really reports 0 |
+| `forceRestartWhenBusy` never took effect | Even with "force restart while busy" configured, the restart kept waiting for minutes | Drop the "must already be in the deferred phase" precondition; a forced restart is recorded as `allow` in the gate record instead of `wait` |
+| Only the requesting session was marked for recovery | Other sessions interrupted by the same restart waited forever and had to be rescued by hand | Before restarting, every running session is written as pending-resume; subagents and already handed-off sessions are left alone; `resume:false` still protects other sessions |
+| Backup restore did not check its source | A synthetic backup could be restored into any profile (this is the 2026-11-13 incident where a real config was overwritten with three lines) | Before restoring, compare the source directory recorded in the backup manifest; refuse when it differs and name both paths in the error |
+
+### 2. The missing half
+
+- `test/restore-backup-guard.test.mjs` (new, 7 checks): a foreign profile is refused and not a single byte is written to the target directory, the refusal names both paths, a same-profile restore still works, the `verifyTarget:false` escape hatch is still there, old backups without a manifest still restore, a manifest without `profileDir` only ever results in "allowed", and case / separator noise counts as the same directory.
+- `guard-live-config.ps1` no longer hardcodes paths from one person's machine: when both parameters are empty it resolves the profile via `DSH_PROFILE_DIR` → `DSH_HOME`+`DSH_PROFILE` → `~/.dsh/profiles/desktop`, and the snapshot defaults to the system temp directory.
+
+### 3. Issue #5: the remaining two (also in this version)
+
+The guard from #6 only stops the "restore" step. The other two points from the report were more fundamental and are fixed here:
+
+| Defect | Symptom | Fix |
+|---|---|---|
+| The remembered path outranked the environment variable | Even with `DSH_PROFILE_DIR` set, a test still read this machine's real profile — that is how the 2026-11-13 "72 KB config reduced to three lines" happened | `resolveProfileDirDetailed` now prefers explicit sources: `DSH_PROFILE_DIR` → `DSH_HOME`+`DSH_PROFILE` → `--profile` → memo (cache) → scan |
+| Supplying only `stateFile` put the memo in a shared real directory | A test read this machine's memo and wrote into the real state directory | `profileDirStateDir` now derives the memo directory from `stateFile` when that is all it gets, so the memo follows the test |
+
+- `test/profile-dir-precedence.test.mjs` (new, 4 checks): the environment variable outranks a stale memo, `DSH_HOME`+`DSH_PROFILE` outranks it too, the memo still works as a cache (without scanning) when no explicit source exists, and with only `stateFile` the memo lands next to that file.
+
+### 4. Behaviour change (the one to know about)
+
+Restoring a backup that came from a **different profile** now fails with an explanation (it used to overwrite silently). Pass `verifyTarget: false` when a cross-profile restore is genuinely intended.
+
 ## 0.9.9 — 2026-11-21
 
 中文 / English

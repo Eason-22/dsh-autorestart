@@ -458,7 +458,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.9.9'
+const PLUGIN_VERSION_FALLBACK = '0.9.10'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -7678,10 +7678,17 @@ const titleOfSummary = (item) => {
         : now
       const record = {
         at: now,
-        // `allow` means "the gate let the restart through" (the decision says
-        // `restart`); every other outcome — wait / warn / long-wait — is a
-        // wait, because the restart has not happened.
-        action: decision.action === 'restart' ? 'allow' : 'wait',
+        // `allow` means "the gate let the restart through" — the decision says
+        // `restart` OR `force-restart`. Every other outcome — wait / warn /
+        // long-wait / give-up — is a wait, because the restart has not happened.
+        //
+        // `force-restart` used to be recorded as `wait`, which is simply false and
+        // made the one file people read to find out why a restart did or did not
+        // happen say the opposite of what was going on: the force path DOES restart
+        // over the running conversations, so the gate allowed it. An operator
+        // looking at `{action: "wait", reason: "force-restart-while-busy"}` had to
+        // notice that the reason and the action contradicted each other.
+        action: decision.action === 'restart' || decision.action === 'force-restart' ? 'allow' : 'wait',
         reason: typeof decision.reason === 'string' ? decision.reason : 'unknown',
         blockedBy: busy.map((entry) => ({
           sessionId: entry && entry.sessionId !== undefined && entry.sessionId !== null
@@ -10181,6 +10188,44 @@ export function buildLifecycleTools(runtime, config) {
           goalId: entry && entry.goal ? entry.goal.goalId : undefined,
           now,
         })
+      }
+      // EVERY OTHER CONVERSATION RUNNING RIGHT NOW MUST BE MARKED TOO (incident
+      // 2026-11-11, fixed here). Only the session that ASKED for the restart used
+      // to be marked. The others relied on `beginBoot()` converting a session it
+      // already knew about into `pendingResume` — but a session the checkpoint has
+      // no entry for is invisible to that loop, so the restart killed it and it was
+      // NEVER woken again. With `forceRestartWhenBusy` on this is the common case,
+      // not an edge case: the whole point of forcing is that other conversations
+      // are running when the restart lands. Those were the ones the user then had
+      // to revive by hand, by typing a fresh message.
+      //
+      // Marking them here is what makes "interrupt and resume" honest: requesting
+      // the restart is the consent to interrupt, so every session that will be
+      // interrupted is written down as pending BEFORE anything is killed.
+      let alsoMarked = 0
+      try {
+        const live = typeof runtime.busyAgents === 'function' ? runtime.busyAgents() : []
+        for (const blocker of Array.isArray(live) ? live : []) {
+          const otherId = blocker && typeof blocker.sessionId === 'string' ? blocker.sessionId : null
+          if (otherId === null || otherId === sessionId) continue
+          // A subagent is not a conversation: it has no inbox to continue and
+          // `sessionController.resolveAgent` refuses subagent-owned sessions.
+          if (blocker.kind === 'subagent' || blocker.isSubagent === true) continue
+          const otherEntry = sessionEntry(state, otherId)
+          if (otherEntry && otherEntry.handoff != null) continue
+          markPendingResume(state, {
+            sessionId: otherId,
+            reason: 'interrupted by a restart another session requested',
+            goalId: otherEntry && otherEntry.goal ? otherEntry.goal.goalId : undefined,
+            now,
+          })
+          alsoMarked += 1
+        }
+      } catch (error) {
+        log.warn('could not mark the other running conversations for recovery:', String(error))
+      }
+      if (alsoMarked > 0) {
+        log.info(`${alsoMarked} other running conversation(s) were marked for recovery before this restart`, { alsoMarked })
       }
       if (typeof args.defer_seconds === 'number' && Number.isFinite(args.defer_seconds) && args.defer_seconds > 0) {
         state.restart.requestedAt = now + Math.min(args.defer_seconds, 3600) * 1000
@@ -13978,6 +14023,22 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
       const origin = typeof webServer.getOrigin === 'function' ? String(webServer.getOrigin()) : ''
       const portMatch = /:(\d+)\/?$/.exec(origin)
       if (portMatch) runtime.webPort = Number(portMatch[1])
+      // THE HOST MAY NOT EXPOSE getOrigin() AT ALL (2026-11-13, dsh 0.2.0-rc.2):
+      // `@deepseek-ai/dsh-host-webserver` declares `get port()` and no
+      // `getOrigin()`, so `origin` stays empty, `runtime.webPort` stays 0 and
+      // the instance record is published with `port: 0`. Everything that reads
+      // that record then fails:
+      //   - the rollback watcher requires `record.port` before it polls the new
+      //     instance, so it never sees it come back;
+      //   - `waitForHealthyInstance` requires `port > 0`, so the in-process
+      //     confirmation never succeeds either.
+      // Both end the same way: the restart is judged FAILED after
+      // `rollbackTimeoutMs` and the pre-restart snapshot is restored over the
+      // live profile, silently reverting configuration written after the
+      // snapshot was taken.
+      if (!(Number(runtime.webPort) > 0) && Number(webServer.port) > 0) {
+        runtime.webPort = Number(webServer.port)
+      }
       // THE INSTANCE RECORD. The new instance publishes its own port and its
       // own access link (with the boot token), so:
       //   - the rollback watcher learns the port of the NEW instance instead

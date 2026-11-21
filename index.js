@@ -2000,7 +2000,7 @@ function scanProfilesForPlugin(profilesDir, fsLike, pluginName) {
 function profileDirStateDir(settings) {
   if (typeof settings.stateDir === 'string' && settings.stateDir.trim() !== '') return settings.stateDir.trim()
   // A CALLER THAT NAMES ONLY A `stateFile` MEANS ITS OWN STATE DIRECTORY (issue #5).
-  // Before 0.9.11 this fell through to the REAL state dir, so a test could read the
+  // Before 0.9.10 this fell through to the REAL state dir, so a test could read the
   // memo of the machine it ran on — and then restore a fixture over the live profile.
   if (typeof settings.stateFile === 'string' && settings.stateFile.trim() !== '') {
     return path.dirname(path.resolve(settings.stateFile.trim()))
@@ -2022,7 +2022,7 @@ function profileDirStateDir(settings) {
  * this plugin). The scan then found TWO candidates, said `ambiguous`, and the
  * backup was not taken — the page said nothing at all.
  *
- * SO THE ORDER IS: ASK, REMEMBER, AND ONLY THEN LOOK — and since 0.9.11 an
+ * SO THE ORDER IS: ASK, REMEMBER, AND ONLY THEN LOOK — and since 0.9.10 an
  * EXPLICIT answer outranks the memo (issue #5: the remembered path used to win,
  * so a test that set `DSH_PROFILE_DIR` still read the machine's real profile and
  * restored its three-line fixture over it).
@@ -2093,7 +2093,7 @@ export function resolveProfileDirDetailed(options = {}) {
 
   // THE PATH WE REMEMBERED LAST TIME. One stat, no scan — but a CACHE, never an
   // answer: it is consulted only after every explicit source stayed silent. Until
-  // 0.9.11 it ran FIRST, so a stale memo silently beat `DSH_PROFILE_DIR` — that is
+  // 0.9.10 it ran FIRST, so a stale memo silently beat `DSH_PROFILE_DIR` — that is
   // exactly how a rollback test restored its three-line fixture over a live profile
   // (issue #5). A normal boot still gets the one-stat fast path.
   const remembered = readProfileDirMemo(stateDir, fsLike)

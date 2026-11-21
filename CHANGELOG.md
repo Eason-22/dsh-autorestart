@@ -22,7 +22,18 @@
 - `test/restore-backup-guard.test.mjs`（新，7 项）：外来 profile 被拒绝且目标目录一个字都没写、拒绝时点名两个路径、同一 profile 照常恢复、`verifyTarget:false` 逃生门还在、没有 manifest 的老备份仍然可恢复、manifest 里没有 `profileDir` 也只有「放行」这一种结果、大小写与斜杠噪声视为同一目录。
 - `guard-live-config.ps1` 不再写死某个人机器上的路径：两个参数留空时按 `DSH_PROFILE_DIR` → `DSH_HOME`+`DSH_PROFILE` → `~/.dsh/profiles/desktop` 解析，快照默认落系统临时目录。
 
-### 三、行为变化（要知道的那一条）
+### 三、Issue #5 剩下的两条（也收在这一版）
+
+#6 的护栏只挡住「写回去」，报告里的另两条更根本的没修，这一版一起补上：
+
+| 缺陷 | 症状 | 修复 |
+|---|---|---|
+| 记忆缓存排在环境变量前面 | 测试即使设了 `DSH_PROFILE_DIR`，读到的仍是这台机器真实的 profile——2026-11-13 那次「72 KB 配置被写成三行」就是这么发生的 | `resolveProfileDirDetailed` 改成「显式来源优先」：`DSH_PROFILE_DIR` → `DSH_HOME`+`DSH_PROFILE` → `--profile` → 记忆（缓存）→ 扫描 |
+| 只给 `stateFile` 时记忆落到共享的真实目录 | 一份测试会读到这台机器的记忆，并往真实状态目录写 | `profileDirStateDir` 在只给 `stateFile` 时取它的目录，记忆跟着测试走 |
+
+- `test/profile-dir-precedence.test.mjs`（新，4 项）：环境变量压过陈旧记忆、`DSH_HOME`+`DSH_PROFILE` 同样压过、没有显式来源时记忆仍然当缓存命中（且不扫描）、只给 `stateFile` 时记忆落在那份文件旁边。
+
+### 四、行为变化（要知道的那一条）
 
 恢复一份**来自别的 profile** 的备份，现在会失败并说明原因（以前是静默覆盖）。确实需要跨 profile 恢复时，传 `verifyTarget: false`。
 

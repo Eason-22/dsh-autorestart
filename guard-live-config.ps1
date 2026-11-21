@@ -7,7 +7,7 @@
     INCIDENT 2026-11-13 03:02:12. Running the upstream test suite in
     `autorestart-upstream` overwrote the REAL profile config:
 
-        C:\Users\i\.dsh-workbuddy\profiles\web\cordis.patch.yml
+        C:\Users\<user>\.dsh-workbuddy\profiles\web\cordis.patch.yml
         72814 bytes  ->  27 bytes  ("rows:\n  - id: two-days-ago\n")
 
     `test/restart-safety.test.mjs` contains a rollback case whose FIXTURE content
@@ -51,15 +51,34 @@ param(
     [Parameter(ParameterSetName = 'Verify')][switch]$Verify,
     [Parameter(ParameterSetName = 'Check')][switch]$Check,
 
-    # The live profile config to guard.
-    [string]$ConfigPath = 'C:\Users\i\.dsh-workbuddy\profiles\web\cordis.patch.yml',
+    # The live profile config to guard. Left empty it is RESOLVED the same way the
+    # plugin resolves it: $env:DSH_PROFILE_DIR, else $env:DSH_HOME + $env:DSH_PROFILE,
+    # else ~/.dsh/profiles/desktop. A path hard-coded from one machine would either
+    # guard nothing here or guard the wrong file, so the parameter is the override.
+    [string]$ConfigPath = '',
 
     # Where the snapshot lives. Deliberately OUTSIDE the profile: a rollback that
-    # rewrites the profile directory must not be able to touch the guard.
-    [string]$SnapshotPath = 'C:\Users\i\Documents\DSH\TASKS\Test1\autorestart-fix\live-config-snapshot.yml'
+    # rewrites the profile directory must not be able to touch the guard. Empty
+    # means the system temp directory.
+    [string]$SnapshotPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
+
+if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+    $profileDir = if (-not [string]::IsNullOrWhiteSpace($env:DSH_PROFILE_DIR)) {
+        $env:DSH_PROFILE_DIR
+    } elseif ((-not [string]::IsNullOrWhiteSpace($env:DSH_HOME)) -and (-not [string]::IsNullOrWhiteSpace($env:DSH_PROFILE))) {
+        Join-Path (Join-Path $env:DSH_HOME 'profiles') $env:DSH_PROFILE
+    } else {
+        Join-Path (Join-Path $HOME '.dsh') 'profiles/desktop'
+    }
+    $ConfigPath = Join-Path $profileDir 'cordis.patch.yml'
+    Write-Verbose "guarding $ConfigPath"
+}
+if ([string]::IsNullOrWhiteSpace($SnapshotPath)) {
+    $SnapshotPath = Join-Path ([System.IO.Path]::GetTempPath()) 'dsh-autorestart-live-config-snapshot.yml'
+}
 
 # The minimum a healthy config has to contain. The real file is ~72 KB with a
 # dozen top-level entries; the damaged one was 27 bytes. A size floor plus the

@@ -9,7 +9,7 @@ Restart DeepSeek Harness without losing the work that is currently running.
 
 Chinese version: [README.zh.md](docs/README.zh.md)
 
-Current version: **0.9.8**
+Current version: **0.9.9**
 
 ## What it does
 
@@ -240,12 +240,26 @@ So **the size of a backup floats — that is normal.** It does not mean the back
 a plugin was left out: the size follows the plugins' own working data. **The things to look at are the file count
 and the plugin list**, not the byte total.
 
-**This version copies everything, file by file.** There is **no exclusion by directory or by plugin** — which is
-why the running data of the backed-up plugins is in there too (`dsh-codekg`'s `data/`, 114 MB measured, of which
-`snapshots/` is 99.6 MB). That is **deliberate, not an oversight**: some people really do need their data backed up
-as well — moving to another machine, keeping a record, looking at it after an incident. **If it is ever offered, it
-should be a setting the user picks** — deciding for themselves what gets copied — rather than a decision made for
-everybody. **This version does not do that.**
+**Two kinds of thing are left out of the copy (0.9.9, 2026-11-21).** Both are things that can be rebuilt or that are
+scratch space — nothing a restored installation needs in order to RUN:
+
+| Left out | Why | Measured here |
+|---|---|---|
+| `.git` | rebuildable (clone/fetch) | 56.8 MB / 2,955 files (12 plugins) |
+| `.tmp*` work directories | scratch space by construction | 7.3 MB / 358 files |
+
+**Everything else is copied file by file** — the configuration, the plugin sources, **and the plugins' own
+dependencies and running data** (`node_modules`, `data/`). Measured on this machine, a copy is **928.1 MB /
+35,187 files**, of which 558.5 MB is `dsh-agent-teams`'s dependencies and 317.0 MB is `dsh-codekg`'s graphs.
+
+**Why the dependencies and the data are IN the copy** (user decision, 2026-11-21): an earlier draft of this version
+also excluded them, which brought one copy down to 50.9 MB — but then a restore needs a `pnpm install` before a
+plugin runs, and `dsh-codekg` has to rebuild its graphs on first use. The user rejected that trade the moment the
+price was stated: **a backup has to come back USABLE, not merely small.** So the size is the price of a copy that
+runs as-is.
+
+**The manifest records what was skipped** (`skipped: [{ plugin, name, files, bytes }]`), so the two exclusions are
+visible rather than implied.
 
 ## Platforms
 

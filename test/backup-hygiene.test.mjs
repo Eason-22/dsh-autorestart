@@ -294,6 +294,8 @@ test('a backup of a linked plugin contains its files but NOT its .git', async (t
   // ...WITHOUT ITS HISTORY.
   assert.equal(fs.existsSync(path.join(copied, '.git')), false, '.git must not be copied')
   // And the list is exactly that one name — this is not a place to guess.
+  // (Dependencies and running data are deliberately KEPT; see
+  // test/backup-exclusions.test.mjs for the user decision behind that.)
   assert.deepEqual([...BACKUP_SKIP_NAMES], ['.git'])
   // The source is untouched: excluding a name from the COPY never deletes it.
   assert.equal(fs.existsSync(path.join(pluginSource, '.git', 'HEAD')), true)

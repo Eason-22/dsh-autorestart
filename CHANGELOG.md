@@ -2,6 +2,53 @@
 
 中文 / English
 
+## 0.9.9 — 2026-11-21
+
+中文 / English
+
+这一版只改**备份该拷什么**：只排除两类「能重建的」和「草稿」，其余一律照拷。
+
+### 一、剩下的排除项：`.git` 与 `.tmp*`
+
+| 不拷什么 | 为什么 | 本机实测 |
+|---|---|---|
+| `.git` | 能重新拉回来（clone/fetch） | 56.8 MB / 2955 文件（12 个插件合计） |
+| `.tmp*` 工作目录 | 天生是草稿区 | 7.3 MB / 358 文件 |
+
+### 二、依赖与运行数据留在备份里
+
+**插件的 `node_modules` 和 `data/` 是拷的。** 本机实证：`node_modules-link/dsh-agent-teams/node_modules`
+（558.5 MB / 32,253 文件）与 `node_modules-link/dsh-codekg/data`（317.0 MB / 1,022 文件）都在副本里，
+而 `.git` 与 `.tmp*` 都不在——两边的判据都写进了测试。
+
+**为什么这样定**（用户 2026-11-21 拍板）：这一版最初的草稿把这两类也排除了，一份备份降到 50.9 MB / 1839 文件；
+但代价是恢复后要先跑一次 `pnpm install` 插件才能起来、`dsh-codekg` 还要重建图谱。用户明确否决了这个取舍：
+**备份要能开箱即用，不是只要小**。所以一份备份回到 **928.1 MB / 35,187 文件**。
+
+### 三、清单会说出跳过了什么
+
+`manifest.json` 的 `skipped: [{ plugin, name, files, bytes }]` 逐条给出被排除的目录名、文件数、字节数
+（是度量，不是估计——测试断言了精确值）。排除项写在明面上，不是暗示。
+
+测试 **1253 全绿**（`test/backup-exclusions.test.mjs` 三条：判定表、副本里两棵树都在且两类都不在、
+清单的条目与数字准确）。
+
+### English
+
+This release changes only **what a backup copies**: two buildable or scratch kinds are excluded; everything else is copied.
+
+**1. What is left out.** `.git` (rebuildable) — 56.8 MB / 2,955 files across 12 plugins — and `.tmp*` work directories — 7.3 MB / 358 files.
+
+**2. Dependencies and running data stay IN.** A plugin's `node_modules` and its `data/` are copied. Measured on this machine: `node_modules-link/dsh-agent-teams/node_modules` (558.5 MB / 32,253 files) and `node_modules-link/dsh-codekg/data` (317.0 MB / 1,022 files) are both in the copy, while `.git` and `.tmp*` are not — both halves are asserted in the tests.
+
+**3. Why** (user decision, 2026-11-21): an earlier draft of this version excluded those two as well, bringing one copy down to 50.9 MB / 1,839 files — but a restore then needs a `pnpm install` before a plugin runs, and `dsh-codekg` has to rebuild its graphs on first use. The user rejected that trade outright: **a backup has to come back USABLE, not merely small.** One copy is therefore **928.1 MB / 35,187 files**.
+
+**4. The manifest says what was skipped**: `skipped: [{ plugin, name, files, bytes }]` with real measurements (the tests assert exact values), so the exclusions are visible rather than implied.
+
+Tests: **1253 pass** (3 in `test/backup-exclusions.test.mjs`: the predicate table, both kept trees present plus both exclusions absent in the copy, and exact manifest counts).
+
+---
+
 ## 0.9.8 — 2026-11-18
 
 中文 / English

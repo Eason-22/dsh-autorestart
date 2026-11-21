@@ -1999,6 +1999,12 @@ function scanProfilesForPlugin(profilesDir, fsLike, pluginName) {
  */
 function profileDirStateDir(settings) {
   if (typeof settings.stateDir === 'string' && settings.stateDir.trim() !== '') return settings.stateDir.trim()
+  // A CALLER THAT NAMES ONLY A `stateFile` MEANS ITS OWN STATE DIRECTORY (issue #5).
+  // Before 0.9.11 this fell through to the REAL state dir, so a test could read the
+  // memo of the machine it ran on — and then restore a fixture over the live profile.
+  if (typeof settings.stateFile === 'string' && settings.stateFile.trim() !== '') {
+    return path.dirname(path.resolve(settings.stateFile.trim()))
+  }
   try {
     const dir = resolveStateDir({})
     return typeof dir === 'string' ? dir : ''
@@ -2016,11 +2022,15 @@ function profileDirStateDir(settings) {
  * this plugin). The scan then found TWO candidates, said `ambiguous`, and the
  * backup was not taken — the page said nothing at all.
  *
- * SO THE ORDER IS: ASK, REMEMBER, AND ONLY THEN LOOK.
+ * SO THE ORDER IS: ASK, REMEMBER, AND ONLY THEN LOOK — and since 0.9.11 an
+ * EXPLICIT answer outranks the memo (issue #5: the remembered path used to win,
+ * so a test that set `DSH_PROFILE_DIR` still read the machine's real profile and
+ * restored its three-line fixture over it).
  *
- *   0. the directory we remembered in the state dir (`profile-dir.json`) —
- *      used directly while it still exists;
- *   1. `DSH_PROFILE_DIR`; 2. `DSH_HOME` + `DSH_PROFILE`; 3. `--profile`;
+ *   0. `DSH_PROFILE_DIR`; 1. `DSH_HOME` + `DSH_PROFILE`; 2. `--profile` —
+ *      anything the caller SAID outranks anything we once saw;
+ *   3. the directory we remembered in the state dir (`profile-dir.json`) — a
+ *      CACHE, consulted only when nothing explicit was given;
  *   4. the scan — the LAST resort, and it only accepts ONE candidate. Two
  *      candidates is `ambiguous` (with the count), never a guess.
  *
@@ -2054,13 +2064,9 @@ export function resolveProfileDirDetailed(options = {}) {
     return result
   }
 
-  // STEP 0 — THE PATH WE REMEMBERED LAST TIME. One stat, no scan.
-  const remembered = readProfileDirMemo(stateDir, fsLike)
-  if (remembered !== null && fsLike.existsSync(remembered) === true) {
-    return { dir: remembered, source: 'remembered', candidates: 1, scanned: false }
-  }
-
-  // STEP 1..3 — ASK. None of these touches the profiles directory.
+  // STEP 1..3 — ASK FIRST. An EXPLICIT answer beats a cache (issue #5): a remembered
+  // path must never outrank `DSH_PROFILE_DIR`, or a test that points the plugin at a
+  // fixture profile keeps reading the machine's real one and restores into it.
   const explicit = env.DSH_PROFILE_DIR
   if (typeof explicit === 'string' && explicit.trim() !== '') {
     const dir = path.resolve(explicit.trim())
@@ -2085,7 +2091,17 @@ export function resolveProfileDirDetailed(options = {}) {
     if (fsLike.existsSync(dir)) return finish({ dir, source: 'host --profile flag', candidates: 1, scanned: false })
   }
 
-  // STEP 4 — THE SCAN, THE LAST RESORT. One candidate or nothing.
+  // THE PATH WE REMEMBERED LAST TIME. One stat, no scan — but a CACHE, never an
+  // answer: it is consulted only after every explicit source stayed silent. Until
+  // 0.9.11 it ran FIRST, so a stale memo silently beat `DSH_PROFILE_DIR` — that is
+  // exactly how a rollback test restored its three-line fixture over a live profile
+  // (issue #5). A normal boot still gets the one-stat fast path.
+  const remembered = readProfileDirMemo(stateDir, fsLike)
+  if (remembered !== null && fsLike.existsSync(remembered) === true) {
+    return { dir: remembered, source: 'remembered', candidates: 1, scanned: false }
+  }
+
+  // THE SCAN, THE LAST RESORT. One candidate or nothing.
   const scan = scanProfilesForPlugin(path.join(root, 'profiles'), fsLike, pluginName)
   if (scan.matches.length === 1) {
     return finish({ dir: scan.matches[0], source: 'profile bundles scan', candidates: 1, scanned: true })

@@ -2,6 +2,16 @@
 
 中文 / English
 
+## 0.9.13 — 2026-11-23
+
+中文 / English
+
+**没发起过重启的会话，不再显示「待重启」气泡。**
+
+中文：输入框下方那条「待重启 · 等待 N 个…」原本只看一件事——本会话在不在插件给出的「等待者」名单里。而这份名单除了真正的请求者，还把「被这次重启打断、等着重启之后自动续接」的会话一起算了进去，于是两类完全不同的事被混成了一件：**请求了重启**（所以它在等）和**被重启打断**（所以它要恢复）。后果是：重启请求那一刻正在干活、却从没请求过重启的会话，也会看到这条气泡，用户会以为是自己发起的；去点取消又被拒绝（它确实不是请求者），看起来就像气泡卡住了。本版让这份名单只包含真正的请求者。**被重启打断的会话照旧会被自动续接**——那是另一件事，记在检查点里，读的不是这份名单，所以恢复行为一点没变。
+
+English: The "pending restart · waiting for N" pill under the composer used to depend on a single thing — whether the current session was in the "waiters" list the plugin reports. That list held not only the real requesters but also every conversation the restart had *interrupted* and would resume afterwards, merging two very different things: **asked for the restart** (so it is waiting) and **was interrupted by it** (so it will be resumed). The consequence: a conversation that happened to be working when someone else requested the restart — and never asked for anything — also saw the pill, so its user assumed they had requested it; cancelling was then refused (it is not a requester), which made the pill look stuck. This release makes the list hold the requesters only. **An interrupted conversation is still resumed automatically** — that is a different fact, recorded in the checkpoint and not read from this list, so the resume behaviour is unchanged.
+
 ## 0.9.12 — 2026-11-22
 
 中文 / English

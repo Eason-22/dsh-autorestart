@@ -465,7 +465,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.9.12'
+const PLUGIN_VERSION_FALLBACK = '0.9.13'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -13919,13 +13919,25 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             }
             addWaiter(restart.bySessionId)
           }
-          if (pendingRestart && live.sessions && typeof live.sessions === 'object') {
-            for (const [sessionId, entry] of Object.entries(live.sessions)) {
-              if (!entry || typeof entry !== 'object') continue
-              if (entry.pendingResume !== true) continue
-              addWaiter(typeof entry.sessionId === 'string' && entry.sessionId ? entry.sessionId : sessionId)
-            }
-          }
+          // A `pendingResume` SESSION IS **NOT** A WAITER (bug, 2026-11-22).
+          //
+          // This list used to also collect every session carrying `pendingResume`.
+          // That marker means "this conversation was interrupted and will be
+          // resumed" — written by `continuum_restart` for every session that was
+          // RUNNING when the restart was requested (a6bcb35). It does NOT mean
+          // "this conversation is waiting for the restart", and the two are not
+          // interchangeable:
+          //
+          //   asking for the restart  -> a waiter     -> the pill, the cancel
+          //   interrupted by it       -> resumable    -> neither
+          //
+          // The composer pill shows itself when `waiters` contains the current
+          // session, so adding the interrupted conversations here made every one of
+          // them display "待重启 · 等待 N 个…" as if it had asked for the restart —
+          // and its cancel was then refused, because it is not a requester.
+          //
+          // `waiters` is therefore the requesters ONLY. Resuming is unaffected: the
+          // boot recovery reads `pendingResume` from the checkpoint, never this list.
           const verdict = runtime.gate()
           // The restart stage (waiting / snapshotting / restarting / back), the
           // real snapshot progress and the "is a cancel still honest" answer —

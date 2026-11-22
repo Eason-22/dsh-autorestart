@@ -2,6 +2,16 @@
 
 中文 / English
 
+## 0.9.11 — 2026-11-22
+
+中文 / English
+
+**修复三个干扰 DSH 自更新的机制**（Issue #1）。
+
+中文：插件的三个机制在 DSH 自更新时会造成干扰——重启门禁把更新触发的重启拦住、重启前备份与更新器的文件替换冲突、`blockManualRestart` 把更新器的命令当成手动重启拦下。本版逐一修复：重启门禁增加 `hostUpdate` 参数在 DSH 自更新时直接放行；备份在检测到更新器缓存时跳过插件树备份；`detectManualRestart` 增加 DSH 更新器命令白名单。这三处修复确保 DSH 自更新不再被插件干扰。
+
+English: Three plugin mechanisms could interfere with DeepSeek Harness self-updates (Issue #1): the restart gate deferred update-triggered restarts, the pre-restart backup conflicted with the updater's file replacement, and `blockManualRestart` blocked updater commands as manual restarts. This release fixes all three: the restart gate now accepts a `hostUpdate` parameter that passes immediately during self-updates; the backup skips the plugin tree when an updater cache is detected; and `detectManualRestart` gains a DSH updater command whitelist. These fixes ensure DSH self-updates are no longer disrupted by the plugin.
+
 ## 0.9.10 — 2026-11-21
 
 中文 / English

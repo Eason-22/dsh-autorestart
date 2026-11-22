@@ -34,6 +34,7 @@ import {
   readFingerprint,
   sampleFingerprint,
 } from './lib/plugin-files.js'
+import { abortAgentSession } from './lib/agent-abort.js'
 
 import {
   armSleep,
@@ -52,6 +53,7 @@ import {
   markIdle,
   markPendingResume,
   markRunning,
+  noteSessionEvent,
   parkedRecord,
   pendingSourceOf,
   pruneSessions,
@@ -70,6 +72,8 @@ import {
   setRestartPhase,
   setRestartProgress,
   clearRestartPhase,
+  stalledBlockerDetails,
+  stalledSummary,
   stampResumedGoal,
   writeState,
 } from './lib/checkpoint.js'
@@ -458,7 +462,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.9.10'
+const PLUGIN_VERSION_FALLBACK = '0.9.11'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -6675,8 +6679,17 @@ const titleOfSummary = (item) => {
     // THE ONE PLACE THAT TAKES A SNAPSHOT (kept single on purpose — a text guard in
     // the tests asserts it, and two entry points once meant two different copies for
     // one restart). Everything that needs a copy goes through here.
+    //
+    // HOST-UPDATE SAFETY (0.9.11): when the DSH self-updater is downloading or
+    // installing, the plugin tree in node_modules is being replaced.  Copying it
+    // concurrently would grab half-written files and a rollback could restore a
+    // corrupt tree.  Detect the updater cache and skip the plugin tree in that case.
+    const hostUpdateCache = path.join(path.dirname(path.dirname(path.dirname(stateFile))), 'updaterCacheDirName')
+    const hostUpdateDetected = (() => {
+      try { return fs.readdirSync(path.dirname(hostUpdateCache)).some((e) => e.includes('updater')) } catch { return false }
+    })()
     const runSnapshot = (why) => snapshotFn({
-      config,
+      config: hostUpdateDetected ? { ...config, backupIncludePlugins: false } : config,
       stateDir: path.dirname(stateFile),
       log,
       profile: runtimeProfileDirFor(options),
@@ -8006,9 +8019,51 @@ const titleOfSummary = (item) => {
     return Array.from(seen).sort()
   }
 
+  // THE LIVE "WHEN DID THIS SESSION LAST DO REAL WORK" (2026-11-22).
+  //
+  // The host gives us no such timestamp: the agent carries no activity time
+  // (the whole `@deepseek-ai/dsh-agent` package has no `lastActivityAt` /
+  // `lastEventAt` / `activityAt` / `updatedAt` field at all) and the session
+  // log is addressed by `seq`, not by the clock. So the WORK EVENTS THEMSELVES
+  // are the source -- and they arrive for EVERY session, a subagent included.
+  //
+  // This map is the live answer for a session the checkpoint does not track
+  // (a subagent): the checkpoint holds the durable times of the root
+  // sessions, this map holds the fresh ones of everybody.
+  const lastWorkAtBySession = new Map()
+
   const runtime = {
     get state() {
       return state
+    },
+    /**
+     * Remember WHEN a session last did real work.
+     *
+     * @param {string} sessionId
+     * @param {number} at the moment, in ms
+     */
+    noteSessionWork(sessionId, at) {
+      if (typeof sessionId !== 'string' || sessionId === '') return
+      const when = Number.isFinite(at) ? Math.trunc(at) : Date.now()
+      lastWorkAtBySession.set(sessionId, when)
+    },
+    /**
+     * When a session last did real work, or null when it never did.
+     *
+     * @param {string} sessionId
+     * @returns {number|null}
+     */
+    lastWorkAt(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId === '') return null
+      const value = lastWorkAtBySession.get(sessionId)
+      return Number.isFinite(value) ? value : null
+    },
+    /**
+     * THE HOST CONTEXT, so a tool that needs the host's own services (the live
+     * agent registry, the session controller) can reach them.
+     */
+    get ctx() {
+      return ctx
     },
     get bootId() {
       return bootId
@@ -10328,6 +10383,9 @@ export function buildLifecycleTools(runtime, config) {
           graceMs: { type: 'number' },
           effectiveSettleMs: { type: 'number' },
           queuedGraceMs: { type: 'number' },
+          // THE STALL SUMMARY (declared because the schema is strict: an
+          // undeclared key would refuse the whole answer).
+          stalled: { oneOf: [{ type: 'object' }, { type: 'null' }] },
           blockedBy: {
             type: 'array',
             items: {
@@ -10396,6 +10454,15 @@ export function buildLifecycleTools(runtime, config) {
       const state = runtime.state
       const includeSessions = args.include_sessions !== false
       const verdict = runtime.gate()
+      // THE BLOCKERS, WITH THEIR ACTIVITY FACTS: a session that has been
+      // silent for a long time is STALLED, and it is the one a human has to
+      // look at. Every entry keeps every field it had; only a stalled one
+      // gets the readable suffix on its label.
+      const blockers = blockingDetails(verdict.blockedBy)
+      const now = Date.now()
+      // THE LIVE "LAST WORK" OF EVERY BLOCKER: the plugin knows it from the
+      // work events, the checkpoint only knows it for the root sessions.
+      const getLastEventAt = (sessionId) => runtime.lastWorkAt(sessionId)
       return {
         ok: true,
         summary: describeState(state),
@@ -10431,7 +10498,10 @@ export function buildLifecycleTools(runtime, config) {
         effectiveSettleMs: runtime.effectiveSettleMs(),
         // The upper bound of a queued (unclaimed) inbox message.
         queuedGraceMs: runtime.queuedGraceMs(),
-        blockedBy: blockingDetails(verdict.blockedBy),
+        blockedBy: stalledBlockerDetails(blockers, { state, now, getLastEventAt }),
+        // THE SUMMARY OF THE STALL: how many blockers are silent for too
+        // long, which ones, and how long the longest silence is.
+        stalled: stalledSummary(blockers, { state, now, getLastEventAt }),
         parkedGoals: parkedGoalDetails(),
         recovery: recoveryList(state),
         handoffs: diagnosticSessions(state),
@@ -10796,6 +10866,64 @@ export function buildLifecycleTools(runtime, config) {
   })
 
   tool({
+    name: 'continuum_abort_agent',
+    description:
+      'Abort the turn a session is running RIGHT NOW, through the host\'s own cancel API. Use it when a '
+      + 'conversation or a subagent is stuck and waiting for it to finish is not an option. Three things '
+      + 'to know: it only has an effect while the target session is RUNNING a turn (with no active turn '
+      + 'the host treats the cancellation as a no-op, and it does not arm later work either); it does NOT '
+      + 'kill any process and does NOT close the session — it aborts the current turn only; '
+      + 'and by default the queued and steering work of the session SURVIVES (keepInbox true), because '
+      + 'aborting a turn is not a decision to throw the inbox away (pass keepInbox false to discard it).',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['sessionId'],
+      properties: {
+        sessionId: { type: 'string', description: 'The session whose running turn is aborted (a subagent session id works too).' },
+        keepInbox: { type: 'boolean', description: 'Keep the queued and steering work of the session (default true).' },
+        reason: { type: 'string', description: 'Optional note recorded in the log.' },
+      },
+    },
+    output: textOutput(
+      {
+        type: 'object',
+        additionalProperties: false,
+        required: ['ok'],
+        properties: {
+          ok: { type: 'boolean' },
+          sessionId: { type: 'string' },
+          cancelledAt: { type: 'number' },
+          keepInbox: { type: 'boolean' },
+          active: { type: 'boolean' },
+          agentStatus: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+          resolvedVia: { type: 'string' },
+          error: { type: 'string' },
+          detail: { type: 'string' },
+        },
+      },
+      (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    ),
+    async execute(args = {}) {
+      const sessionId = typeof args.sessionId === 'string' ? args.sessionId.trim() : ''
+      const reason = typeof args.reason === 'string' && args.reason.trim() !== '' ? args.reason.trim() : ''
+      // `keepInbox` defaults to TRUE: the work that was already queued for the
+      // session is still wanted, it just does not run inside the aborted turn.
+      const result = await abortAgentSession({
+        ctx: runtime.ctx,
+        sessionId,
+        keepInbox: args.keepInbox !== false,
+      })
+      if (result.ok) {
+        log.info(`session ${result.sessionId} was asked to abort its current turn`, reason || '(no reason was given)')
+      } else {
+        log.warn(`could not abort session ${sessionId}:`, result.detail || result.error || 'unknown error')
+      }
+      return result
+    },
+  })
+
+  tool({
     name: 'continuum_supervisor',
     description:
       'Inspect and manage the self-starting supervisor of this plugin (the process that brings the host back when it '
@@ -11132,6 +11260,12 @@ function collectArgumentStrings(value, out = [], depth = 0) {
 export function detectManualRestart(exec, { pid = process.pid, ppid = process.ppid, webPort = 0 } = {}) {
   if (!exec || typeof exec.name !== 'string') return null
   if (!COMMAND_TOOL_PATTERN.test(exec.name)) return null
+  // The DSH self-updater (electron-updater) may invoke shell helpers during
+  // quitAndInstall(); those are host-initiated, not agent-initiated, so they
+  // must never be treated as a manual restart attempt.
+  for (const text of collectArgumentStrings(exec.arguments)) {
+    if (/autoUpdater|quitAndInstall|app-update\.yml|updaterCacheDir|electron-updater/i.test(text)) return null
+  }
   const pidRe = pid > 0 ? new RegExp(`(^|[^0-9])${pid}([^0-9]|$)`) : null
   const ppidRe = ppid > 0 ? new RegExp(`(^|[^0-9])${ppid}([^0-9]|$)`) : null
   const portRe = webPort > 0 ? new RegExp(`(^|[^0-9])${webPort}([^0-9]|$)`) : null
@@ -14190,6 +14324,51 @@ function trackAgents(ctx, runtime, config) {
     try {
       if (!isWorkSessionEvent(payload)) return
       runtime.noteActivity('session-event')
+    } catch {}
+  })
+
+  // THE SESSION A SESSION EVENT BELONGS TO.
+  //
+  // The payload shape differs between the hosts that call this plugin: one
+  // delivers `{ session, event }`, another delivers the live Session as the
+  // first argument and the event as the second. The id is looked for in the
+  // places it can be, and when it cannot be read the answer is null: a wrong
+  // id would stamp the WRONG session, so nothing is written then.
+  const sessionIdOfEvent = (payload, event) => {
+    const candidates = [
+      payload && payload.session && payload.session.id,
+      payload && payload.sessionId,
+      event && event.sessionId,
+      event && event.session && event.session.id,
+      payload && payload.id,
+    ]
+    for (const candidate of candidates) {
+      if (typeof candidate === 'string' && candidate.trim() !== '') return candidate.trim()
+    }
+    return null
+  }
+
+  // WHEN A SESSION LAST DID REAL WORK (2026-11-22).
+  //
+  // This is a SEPARATE listener on purpose: the one above is the QUIET
+  // WINDOW, and it keeps reading the FIRST argument only, exactly as it
+  // always did. The host delivers `(session, event)`, so the work event
+  // lives in the SECOND argument — and it may equally arrive as one object
+  // (`{ session, event }`), which is the shape the own tests of this plugin
+  // deliver. Both shapes are read here; a session id that cannot be read is
+  // skipped, because writing it under the WRONG id would stamp the activity
+  // of another session.
+  ctx.on('session/event', (payload, event) => {
+    try {
+      const sessionId = sessionIdOfEvent(payload, event)
+      if (!sessionId) return
+      if (!isWorkSessionEvent(payload) && !isWorkSessionEvent(event)) return
+      const now = Date.now()
+      // The LIVE moment first: it is the only one a session the checkpoint
+      // does not track (a subagent) can have.
+      runtime.noteSessionWork(sessionId, now)
+      noteSessionEvent(runtime.state, sessionId, { now })
+      runtime.persist()
     } catch {}
   })
 

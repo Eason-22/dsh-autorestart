@@ -701,8 +701,8 @@
     'restart.overlay.backupDone': '备份完成，将执行重启',
     'restart.overlay.skipped': '配置和插件没有变化，跳过备份，将执行重启',
     'restart.overlay.skippedConfig': '配置没有变化，跳过备份，将执行重启',
-    'restart.overlay.compareUnusable': '无法比对配置和插件，仍会备份',
-    'restart.overlay.compareUnusableConfig': '无法比对配置，仍会备份',
+    'restart.overlay.compareUnusable': '备份比对跳过：文件数超过设定上限，无法比对配置和插件，仍会备份（上限可在设置·重启里调）',
+    'restart.overlay.compareUnusableConfig': '备份比对跳过：文件数超过设定上限，无法比对配置，仍会备份（上限可在设置·重启里调）',
     'restart.overlay.backupFailed': '备份失败，重启继续进行',
     'restart.overlay.restarting': '正在重启…',
     // THE HONEST CARD (user report, 2026-10-30): a restart that was interrupted
@@ -1196,8 +1196,8 @@
     'restart.overlay.backupDone': 'Backup done, the restart will now proceed',
     'restart.overlay.skipped': 'No change to configuration or plugins, backup skipped, the restart will now proceed',
     'restart.overlay.skippedConfig': 'No change to configuration, backup skipped, the restart will now proceed',
-    'restart.overlay.compareUnusable': 'Could not compare, backing up anyway',
-    'restart.overlay.compareUnusableConfig': 'Could not compare the configuration, backing up anyway',
+    'restart.overlay.compareUnusable': 'Comparison skipped: more files than the configured limit, backing up anyway (the limit is under Settings · Restart)',
+    'restart.overlay.compareUnusableConfig': 'Comparison skipped: more files than the configured limit, backing up the configuration anyway (the limit is under Settings · Restart)',
     'restart.overlay.backupFailed': 'Backup failed, the restart continues',
     'restart.overlay.restarting': 'Restarting…',
     'restart.overlay.deferred': 'A conversation just started — restart postponed',
@@ -6932,6 +6932,7 @@
         const backupIncludePlugins = status && typeof status === 'object' && typeof status.backupIncludePlugins === 'boolean'
           ? status.backupIncludePlugins
           : true
+
         // The RESTART reserve: the Host reports it in milliseconds, the
         // dropdown works in seconds.
         const reportedRestartGraceMs = status && typeof status === 'object' && typeof status.restartGraceMs === 'number'

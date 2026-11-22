@@ -320,6 +320,18 @@ const REAL_RUNTIME_SCENARIOS = [
     ],
   },
   {
+    label: 'continuum_abort_agent',
+    steps: [
+      // No live agent and no session controller: the refusal answer, with
+      // every failure key at once.
+      { args: { sessionId: 'session-nobody-knows' } },
+      // The unusable session id: refused before anything is touched.
+      { args: { sessionId: '   ' } },
+      // `keepInbox: false` is refused here too, but the answer must still fit.
+      { args: { sessionId: 'session-nobody-knows', keepInbox: false, reason: 'the strict-schema test' } },
+    ],
+  },
+  {
     label: 'continuum_supervisor',
     steps: [
       { args: { action: 'status' } },

@@ -162,6 +162,9 @@ import {
   sweepIncompleteBackups,
   ROLLBACK_REPORT_NAME,
   validateBackupLimit,
+  validateCompareLimit,
+  COMPARE_LIMIT_MIN,
+  COMPARE_LIMIT_MAX,
 } from './lib/backup.js'
 import {
   accessFilePath,
@@ -462,7 +465,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.9.11'
+const PLUGIN_VERSION_FALLBACK = '0.9.12'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -798,6 +801,14 @@ function buildConfigSchema() {
       // rollback of "a plugin upgrade broke the boot" possible)
       backupIncludePlugins: schemastery.boolean().default(true)
         .description('Include the installed plugin tree in that snapshot: about 117 MB and roughly 3 extra seconds, so a broken plugin upgrade can be rolled back by hand as well.'),
+      // THE COMPARISON BUDGET (2026-11-22). The pre-restart comparison asks
+      // "did the configuration or the plugins change" BEFORE copying, so an
+      // unchanged restart copies nothing. It walks the file tree and stops at
+      // this many files, because a walk that takes minutes would slow the
+      // restart down for no benefit. It never blocks the restart: over the
+      // budget the restart simply copies, which is what it always did.
+      maxCompareFiles: schemastery.number().step(1000).min(1000).default(20000)
+        .description('File budget for the pre-restart comparison: over this many files the comparison gives up and the restart copies anyway (it never blocks the restart).'),
       watchEnabled: schemastery.boolean().default(true)
         .description('After boot, record what the loaded plugins provide and compare it with the previous record'),
       watchDelayMs: schemastery.number().step(1).min(0).default(8000)
@@ -907,6 +918,11 @@ const DEFAULTS = {
   // detached watcher puts the snapshot back and launches the host again.
   backupOnRestart: true,
   backupIncludePlugins: true,
+  // The file budget of the pre-restart comparison (see the schema above). The
+  // comparison leaves a plugin's own `node_modules` out, so a real profile sits
+  // around a thousand files; this ceiling only matters for a profile far bigger
+  // than that.
+  maxCompareFiles: 20000,
   maxBackups: DEFAULT_MAX_BACKUPS,
   // THE PLUGIN WATCH (2026-11-01): after the host has settled, take one reading
   // of what the loaded plugins actually provide (tools, interface modules,
@@ -1755,6 +1771,29 @@ function pluginVersionNow() {
   }
 }
 
+
+/**
+ * Resolve the file budget of the pre-restart comparison.
+ *
+ * The ceiling exists so a walk can never slow a restart down for minutes: over
+ * it the comparison gives up and the restart copies, exactly as it always did.
+ * It is a SETTING (2026-11-22) because the right number depends on the profile:
+ * the walk leaves a plugin's own `node_modules` out, so a real profile sits
+ * around a thousand files, but a profile far bigger than that would otherwise
+ * get 「无法比对」 on every single restart with nothing the user could do.
+ *
+ * A value below 1000 is refused rather than accepted: it would make the budget
+ * smaller than a normal profile and turn the comparison off silently.
+ *
+ * @param {object|null|undefined} rawConfig the loader row config, as received
+ * @returns {number}
+ */
+export function compareFilesLimitOf(rawConfig) {
+  const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig.maxCompareFiles : undefined
+  const value = Number(raw)
+  if (Number.isFinite(value) === true && value >= 1000) return Math.floor(value)
+  return DEFAULTS.maxCompareFiles
+}
 
 /**
  * Resolve the effective `backupIncludePlugins` value and where it came from.
@@ -6999,6 +7038,12 @@ const titleOfSummary = (item) => {
           try {
             comparison = findUnchangedBackup(compareDir, backupsDirFor(stateDir), {
               includePlugins: compareIncludePlugins,
+              // THE BUDGET IS THE USER'S (2026-11-22): the comparison walks the
+              // plugin SOURCE only (dependencies are left out), so a real profile
+              // sits around a thousand files. The ceiling still exists for a
+              // profile far bigger than that, and it is now a setting instead of
+              // a constant.
+              limits: { files: compareFilesLimitOf(config) },
             })
           } catch (error) {
             log.warn('the pre-restart comparison failed; the copy is taken as before:', String(error))
@@ -7101,6 +7146,12 @@ const titleOfSummary = (item) => {
         if (snapshot !== null && typeof snapshot === 'object') {
           snapshot.compareReason = typeof comparison.reason === 'string' ? comparison.reason : null
           snapshot.compareDifferences = Array.isArray(comparison.differences) ? comparison.differences : []
+          // THE NUMBERS THE CARD NEEDS (2026-11-22): 「无法比对」 used to be a
+          // dead end — the user could not tell whether the profile was huge or
+          // something was broken. The card now says how many files were walked
+          // and what the ceiling is, so the message explains itself.
+          snapshot.compareFiles = Number.isFinite(Number(comparison.files)) ? Number(comparison.files) : null
+          snapshot.compareLimit = compareFilesLimitOf(config)
         }
       }
       if (cancelled) {
@@ -7907,6 +7958,13 @@ const titleOfSummary = (item) => {
     if (typeof changes.maxBackups === 'number') {
       wanted.maxBackups = changes.maxBackups
       fallback.maxBackups = changes.maxBackups
+    }
+    // THE COMPARISON BUDGET (2026-11-22). A whole number of files; the route
+    // clamps it to the allowed range before it reaches here, so an out-of-range
+    // value is refused with a reason instead of being written.
+    if (typeof changes.maxCompareFiles === 'number') {
+      wanted.maxCompareFiles = changes.maxCompareFiles
+      fallback.maxCompareFiles = changes.maxCompareFiles
     }
     // THE PLUGIN-FILES WATCHDOG (2026-11-11). These three keys were shown in the
     // settings page and posted to `/choice`, but this function had no branch
@@ -12828,6 +12886,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         // settings could not be saved at all.
         const hasFilesWatch = Object.prototype.hasOwnProperty.call(body, 'pluginFilesWatch')
         const hasFilesStable = Object.prototype.hasOwnProperty.call(body, 'pluginFilesStableMs')
+        const hasCompareLimit = Object.prototype.hasOwnProperty.call(body, 'maxCompareFiles')
         const hasFilesMaxBlock = Object.prototype.hasOwnProperty.call(body, 'pluginFilesMaxBlockMs')
         if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasSeconds && !hasGrace && !hasWindow && !hasAskedVersion && !hasFilesWatch && !hasFilesStable && !hasFilesMaxBlock) {
           // No key was asked for: there is nothing to persist.
@@ -12968,6 +13027,24 @@ function buildChoiceRoute(ctx, runtime, config) {
           }))
           return
         }
+        let compareLimit = null
+        if (hasCompareLimit) {
+          const verdict = validateCompareLimit(body.maxCompareFiles)
+          if (!verdict.ok) {
+            res.statusCode = 400
+            res.setHeader('content-type', 'application/json; charset=utf-8')
+            res.setHeader('cache-control', 'no-store')
+            res.end(JSON.stringify({
+              ok: false,
+              error: 'maxCompareFiles-out-of-range',
+              reason: verdict.reason,
+              min: COMPARE_LIMIT_MIN,
+              max: COMPARE_LIMIT_MAX,
+            }))
+            return
+          }
+          compareLimit = verdict.value
+        }
         const changes = {}
         // The route field is `includePlugins`, the configuration key is
         // `backupIncludePlugins` (the profile row keeps the plugin's own name).
@@ -12981,6 +13058,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         if (hasFilesWatch) changes.pluginFilesWatch = body.pluginFilesWatch === true
         if (hasFilesStable) changes.pluginFilesStableMs = Math.trunc(body.pluginFilesStableMs)
         if (hasFilesMaxBlock) changes.pluginFilesMaxBlockMs = Math.trunc(body.pluginFilesMaxBlockMs)
+        if (compareLimit !== null) changes.maxCompareFiles = compareLimit
         const result = await runtime.applyConfigChoice(changes)
         // THE PLUGIN VERSION THE USER WAS ASKED FOR. It lives in
         // install-choice.json (where readInstallChoice() looks for it), so it is

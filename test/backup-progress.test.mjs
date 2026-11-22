@@ -272,8 +272,17 @@ test('⑯ while the copy runs: no bar, the title says 「配置有变化，正�
   // ①c THE COPY'S BRANCHES, verbatim (the copy the user confirmed on 2026-11-07).
   assert.equal(api.dictionaries.zh['restart.overlay.skipped'], '配置和插件没有变化，跳过备份，将执行重启')
   assert.equal(api.dictionaries.zh['restart.overlay.skippedConfig'], '配置没有变化，跳过备份，将执行重启')
-  assert.equal(api.dictionaries.zh['restart.overlay.compareUnusable'], '无法比对配置和插件，仍会备份')
-  assert.equal(api.dictionaries.zh['restart.overlay.compareUnusableConfig'], '无法比对配置，仍会备份')
+  // THE BUDGET MESSAGE SAYS WHY AND WHERE TO FIX IT (user decision, 2026-11-22):
+  // 「无法比对」 on its own was a dead end — the user could not tell whether the
+  // profile was huge or something was broken, and there was nothing to change.
+  assert.equal(
+    api.dictionaries.zh['restart.overlay.compareUnusable'],
+    '备份比对跳过：文件数超过设定上限，无法比对配置和插件，仍会备份（上限可在设置·重启里调）',
+  )
+  assert.equal(
+    api.dictionaries.zh['restart.overlay.compareUnusableConfig'],
+    '备份比对跳过：文件数超过设定上限，无法比对配置，仍会备份（上限可在设置·重启里调）',
+  )
   assert.equal(api.dictionaries.zh['restart.overlay.backupFailed'], '备份失败，重启继续进行')
   assert.equal(api.dictionaries.en['restart.overlay.backupFailed'], 'Backup failed, the restart continues')
   // NO 「正在比对」 CARD (user decision, 2026-11-09): 比对瞬时完成，不单独占一个阶段 —
@@ -948,4 +957,43 @@ test('⑰ the backup scope survives the stage chain: mark → state → stage in
   runtime.markRestartStage('waiting', { reason: 'deferred: conversation-active', includePlugins: null })
   assert.equal(runtime.state.restartPhase.includePlugins, null, 'a stage nobody scoped reports null')
   assert.equal(runtime.restartStageInfo().includePlugins, null)
+})
+
+test('the plugin runtime `data/` directory does not make an untouched profile look changed (2026-11-22)', async (t) => {
+  const setup = fixture(t, 'data-skip')
+  if (setup.linked !== true) {
+    t.skip('this filesystem refuses symlinks/junctions, so no plugin is linked')
+    return
+  }
+
+  const first = makeRuntime(setup)
+  requestRestart(first.runtime.state, { reason: 'the first restart', bySessionId: 'sess-1' })
+  await first.runtime.executeRestart()
+  assert.equal(copies(setup).length, 1, 'the first restart wrote one copy')
+
+  // THE PLUGIN WRITES ITS OWN DATA WHILE IT RUNS (dsh-codekg writes rule docs,
+  // dsh-autorestart its storages). Measured on the real machine: one such file
+  // was the single difference that made a profile the user never touched read
+  // as "changed", so the 972 MB copy ran on every restart anyway.
+  fs.mkdirSync(path.join(setup.source, 'data', 'docs'), { recursive: true })
+  fs.writeFileSync(path.join(setup.source, 'data', 'docs', 'latest'), '', 'utf8')
+  const later = Date.now() + 2000
+  fs.utimesSync(path.join(setup.source, 'data', 'docs', 'latest'), new Date(later), new Date(later))
+
+  const second = makeRuntime(setup)
+  requestRestart(second.runtime.state, { reason: 'the second restart', bySessionId: 'sess-2' })
+  await second.runtime.executeRestart()
+
+  assert.equal(copies(setup).length, 1, 'runtime data alone must not trigger a second copy')
+
+  // THE OTHER SIDE OF THE SAME RULE: a real source edit still counts, even
+  // though `data/` is ignored. Without this the skip rule could hide everything.
+  const pluginFile = path.join(setup.source, 'index.js')
+  fs.writeFileSync(pluginFile, 'export default 3\n', 'utf8')
+  fs.utimesSync(pluginFile, new Date(later + 2000), new Date(later + 2000))
+
+  const third = makeRuntime(setup)
+  requestRestart(third.runtime.state, { reason: 'the third restart', bySessionId: 'sess-3' })
+  await third.runtime.executeRestart()
+  assert.equal(copies(setup).length, 2, 'a genuine source change still copies')
 })

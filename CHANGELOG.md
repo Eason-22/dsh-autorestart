@@ -2,6 +2,16 @@
 
 中文 / English
 
+## 0.9.12 — 2026-11-22
+
+中文 / English
+
+**重启不再每次都做一份约 972 MB 的全量备份。**
+
+中文：重启前会先比对「配置和插件有没有变」，没变化就跳过备份、直接重启。这一步要数文件，超过上限就放弃比对、改为直接备份——而一旦放弃，就会**每次重启都全量备份**。真机上插件的依赖目录（`node_modules`）占了 22,397 个文件里的绝大部分，于是比对每次都放弃、每次重启都要复制约 972 MB、耗时约 100 秒。本版让**比对**只看插件的源码与配置（依赖是能从 `package.json` 重装的，不算「用户改动」），要数的文件降到约 1,900 个，比对恢复正常：没变化的重启不再备份，有变化的重启照常备份。比对同样不看插件运行时自己写的 `data/` 目录（dsh-codekg 往那里写检索产物）——实测中正是这样一个文件让「用户什么都没动」被判成有变化。**这里说的是每个插件自己那层依赖；profile 顶层的 `node_modules` 是 DSH 宿主自己的依赖树，它从来不在比对范围内**，所以这条豁免不可能掩盖宿主依赖的变化。**备份本身一点没缩水**——插件依赖仍然备份在内，还原后不需要再装一遍。同时新增配置项 `maxCompareFiles`（比对的文件数上限，默认 20000，可设 1000–1000000），并把浮窗那句「无法比对」改成说清原因与出路的说法。
+
+English: A restart no longer takes a roughly 972 MB full backup every single time. Before copying, the restart compares whether the configuration and plugins changed, and skips the copy when nothing did. That comparison has to walk files and gives up above a ceiling, falling back to copying — and giving up meant a full backup on **every** restart. On the real machine a plugin's dependency directory (`node_modules`) accounted for most of the 22,397 files, so the comparison always gave up and every restart copied about 972 MB in roughly 100 seconds. This release makes the **comparison** look only at a plugin's own source and configuration (dependencies can be reinstalled from `package.json`, so they are not a user change), which brings the walk down to about 1,900 files and lets the comparison answer again: an unchanged restart skips the copy, a changed one still backs up. The comparison also ignores a plugin's own runtime `data/` directory (dsh-codekg writes its search output there) — on the real machine one such file was exactly what made an untouched profile read as changed. **"A plugin's own dependencies" is what is skipped; the profile-level `node_modules` is the HOST's own dependency tree and was never part of this comparison**, so this exemption cannot hide a change in the host's dependencies. **The backup itself is unchanged** — plugin dependencies are still included, so a restored profile needs no reinstall. A new setting `maxCompareFiles` (the file ceiling of the comparison, default 20000, settable from 1000 to 1000000) and a clearer "could not compare" card that states the reason and where to change the ceiling come with it.
+
 ## 0.9.11 — 2026-11-22
 
 中文 / English

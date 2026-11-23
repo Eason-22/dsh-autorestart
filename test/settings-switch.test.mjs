@@ -908,8 +908,8 @@ test('「备份包含已安装插件」 is drawn as a child of the backup switch
   assert.ok(backupBlock, 'the 「include plugins」 row sits in a subordinate block')
   assert.deepEqual(
     backupBlock.children.map((child) => child.props['data-dsh-autorestart-row']),
-    ['backupIncludePlugins', 'maxBackups'],
-    'that block holds the two items the backup switch governs',
+    ['backupIncludePlugins', 'maxBackups', 'maxCompareFiles'],
+    'that block holds the three items the backup switch governs',
   )
   // The switch above it is NOT inside the block: the block is its child.
   assert.equal(
@@ -1003,8 +1003,8 @@ test('the copy limit is a child of the backup switch, and goes grey with it', as
   assert.ok(block, 'the copy limit sits in a subordinate block')
   assert.deepEqual(
     block.children.map((child) => child.props['data-dsh-autorestart-row']),
-    ['backupIncludePlugins', 'maxBackups'],
-    'the block holds both items the backup switch governs',
+    ['backupIncludePlugins', 'maxBackups', 'maxCompareFiles'],
+    'the block holds all three items the backup switch governs',
   )
   const select = walk(limitRow).find((node) => node.type === 'select')
   assert.ok(select, 'the control is still the dropdown')

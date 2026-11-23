@@ -52,6 +52,8 @@ import {
   markGoalTookBack,
   markIdle,
   markPendingResume,
+  recordInterruptedByRestart,
+  RESTART_BYSTANDER_REASON,
   markRunning,
   noteSessionEvent,
   parkedRecord,
@@ -465,7 +467,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.9.13'
+const PLUGIN_VERSION_FALLBACK = '0.9.14'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -5758,6 +5760,12 @@ const titleOfSummary = (item) => {
     return {
       dir,
       max: config.maxBackups,
+      // THE COMPARISON BUDGET (2026-11-23): the settings page shows a number
+      // input for it, so it has to know the number in force before the user
+      // changes it — the same reason the copy limit is sent above instead of
+      // keeping its own copy. Resolved through the one function that also feeds
+      // the comparison itself, so page and behaviour cannot drift apart.
+      maxCompareFiles: compareFilesLimitOf(config),
       // TWO COUNTED THINGS, NAMED SEPARATELY (2026-11-02): the page printed
       // "current N copies" from the copies that have a manifest, while the prune
       // counted EVERY directory in the backups root - so a machine with an
@@ -6582,8 +6590,20 @@ const titleOfSummary = (item) => {
     }
     const error = (result && result.error) || 'the restore failed'
     log.error('the backup whose restart record says it came up could not be restored:', reason, error)
-    writeRestartReport({ rolledBack: false, reason, backupDir: targetDir, restored })
-    return { rolledBack: false, restored, deferred, error }
+    // A REFUSAL MUST SAY HOW A HUMAN GETS PAST IT (2026-11-23): the automatic
+    // rollback cannot pass `verifyTarget: false`, so a profile that really was
+    // moved would be refused with nothing but "refusing to restore" — and the
+    // record the operator reads is the only place that can carry the way out.
+    const refusalHint = /different profile/.test(error)
+      ? 'the copy was taken from another profile; if this profile really was moved or renamed on purpose, restore that copy by hand with verifyTarget: false'
+      : null
+    writeRestartReport({
+      rolledBack: false,
+      reason: refusalHint === null ? reason : reason + ' — could not restore: ' + error + ' (' + refusalHint + ')',
+      backupDir: targetDir,
+      restored,
+    })
+    return { rolledBack: false, restored, deferred, error, hint: refusalHint }
   }
 
   /**
@@ -10328,9 +10348,21 @@ export function buildLifecycleTools(runtime, config) {
       // are running when the restart lands. Those were the ones the user then had
       // to revive by hand, by typing a fresh message.
       //
-      // Marking them here is what makes "interrupt and resume" honest: requesting
-      // the restart is the consent to interrupt, so every session that will be
-      // interrupted is written down as pending BEFORE anything is killed.
+      // Marking them here is what makes the history honest: requesting the
+      // restart is the consent to interrupt, so every session that will be
+      // interrupted is written down BEFORE anything is killed.
+      //
+      // BUT ONLY THE SESSION THAT ASKED CONTINUES (bug, 2026-11-23). Queuing
+      // every one of them for recovery (what this code did up to 0.9.13) turned
+      // a harmless request into a wake-up call: the idle gate then waits for
+      // these very conversations to finish, so by the time the host was killed
+      // they had COMPLETED their turn — and the continuation message made them
+      // start a fresh round nobody asked for. The user reported it with a
+      // session that had been idle for two minutes when the restart ran.
+      //
+      // So a bystander is RECORDED as interrupted (visible in continuum_status)
+      // and nothing more: `pendingResume` stays false, the boot recovery leaves
+      // it quiet. The requester keeps the resume path it always had.
       let alsoMarked = 0
       try {
         const live = typeof runtime.busyAgents === 'function' ? runtime.busyAgents() : []
@@ -10342,9 +10374,9 @@ export function buildLifecycleTools(runtime, config) {
           if (blocker.kind === 'subagent' || blocker.isSubagent === true) continue
           const otherEntry = sessionEntry(state, otherId)
           if (otherEntry && otherEntry.handoff != null) continue
-          markPendingResume(state, {
+          recordInterruptedByRestart(state, {
             sessionId: otherId,
-            reason: 'interrupted by a restart another session requested',
+            reason: RESTART_BYSTANDER_REASON,
             goalId: otherEntry && otherEntry.goal ? otherEntry.goal.goalId : undefined,
             now,
           })
@@ -10354,7 +10386,7 @@ export function buildLifecycleTools(runtime, config) {
         log.warn('could not mark the other running conversations for recovery:', String(error))
       }
       if (alsoMarked > 0) {
-        log.info(`${alsoMarked} other running conversation(s) were marked for recovery before this restart`, { alsoMarked })
+        log.info(`${alsoMarked} other running conversation(s) were recorded as interrupted by this restart; they are NOT resumed (only the requester continues)`, { alsoMarked })
       }
       if (typeof args.defer_seconds === 'number' && Number.isFinite(args.defer_seconds) && args.defer_seconds > 0) {
         state.restart.requestedAt = now + Math.min(args.defer_seconds, 3600) * 1000
@@ -12888,7 +12920,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         const hasFilesStable = Object.prototype.hasOwnProperty.call(body, 'pluginFilesStableMs')
         const hasCompareLimit = Object.prototype.hasOwnProperty.call(body, 'maxCompareFiles')
         const hasFilesMaxBlock = Object.prototype.hasOwnProperty.call(body, 'pluginFilesMaxBlockMs')
-        if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasSeconds && !hasGrace && !hasWindow && !hasAskedVersion && !hasFilesWatch && !hasFilesStable && !hasFilesMaxBlock) {
+        if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasSeconds && !hasGrace && !hasWindow && !hasAskedVersion && !hasFilesWatch && !hasFilesStable && !hasFilesMaxBlock && !hasCompareLimit) {
           // No key was asked for: there is nothing to persist.
           res.statusCode = 400
           res.setHeader('content-type', 'application/json; charset=utf-8')

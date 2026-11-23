@@ -1778,11 +1778,11 @@ test('the section shows two titled groups, the restart one first', async () => {
   const restartControls = walk(groups[0]).filter(
     (node) => node.type === 'select' || node.type === 'input',
   )
-  assert.equal(restartControls.length, 4, 'the restart group has exactly four controls')
+  assert.equal(restartControls.length, 5, 'the restart group has exactly five controls')
   const restartKeys = restartControls.map((node) => node.props['data-dsh-autorestart-setting'])
   assert.deepEqual(
     restartKeys,
-    ['restartGraceMs', 'backupOnRestart', 'backupIncludePlugins', 'maxBackups'],
+    ['restartGraceMs', 'backupOnRestart', 'backupIncludePlugins', 'maxBackups', 'maxCompareFiles'],
     'the restart group carries the wait, the two backup switches and the copy limit, and nothing else',
   )
   // The 「更多设置」 block: a block of its own, closed by default, standing
@@ -1811,11 +1811,13 @@ test('the section shows two titled groups, the restart one first', async () => {
     'the shutdown group carries the countdown',
   )
 
-  // The dropdowns show the values the Host reports. Six of them now: the two
-  // waits, the backup copy limit, the restart window and the two plugin-folder
-  // scales (the scales used to be number boxes — user decision, 2026-11-11).
+  // The dropdowns show the values the Host reports. Seven of them now: the two
+  // waits, the backup copy limit, the restart window, the two plugin-folder
+  // scales (the scales used to be number boxes — user decision, 2026-11-11),
+  // and the per-comparison file budget (a number box until user decision,
+  // 2026-11-23: a short list cannot be mistyped and cannot reset itself).
   const selects = walk(panel).filter((node) => node.type === 'select')
-  assert.equal(selects.length, 6, 'the section has exactly six dropdowns')
+  assert.equal(selects.length, 7, 'the section has exactly seven dropdowns')
   const byKey = new Map(selects.map((node) => [node.props['data-dsh-autorestart-setting'], node]))
   assert.equal(byKey.get('restartGraceMs').props.value, '0', 'the restart wait the Host reports is shown')
   assert.equal(byKey.get('sleepCountdownSeconds').props.value, '30', 'the countdown the Host reports is shown')
@@ -1837,8 +1839,14 @@ test('the section shows two titled groups, the restart one first', async () => {
   // The two backup switches and the plugin-folder watchdog show the values the
   // Host reports. They are the only inputs left: the two numbers of the
   // watchdog became dropdowns (user decision, 2026-11-11).
-  const switches = walk(panel).filter((node) => node.type === 'input')
-  assert.equal(switches.length, 3, 'the section has exactly three inputs: the three switches')
+  const inputs = walk(panel).filter((node) => node.type === 'input')
+  // NO NUMBER INPUT REMAINS (user decision, 2026-11-23): the comparison budget
+  // was the last one, and a free box invited values nobody wants — it is now a
+  // short list, like the watchdog scales before it.
+  const numbers = inputs.filter((node) => node.props.type === 'number')
+  assert.equal(numbers.length, 0, 'the section has no number input left')
+  const switches = inputs.filter((node) => node.props.type !== 'number')
+  assert.equal(switches.length, 3, 'the section has exactly three switches')
   const switchByKey = new Map(switches.map((node) => [node.props['data-dsh-autorestart-setting'], node]))
   assert.equal(switchByKey.get('backupOnRestart').props.checked, true)
   assert.equal(switchByKey.get('backupIncludePlugins').props.checked, false)

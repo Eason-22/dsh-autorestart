@@ -232,7 +232,7 @@
       "limitMore": "已选 {requested} 份，实际保留 {kept} 份。",
       "limitFailed": "没能改成功，份数保持原样。",
       "empty": "还没有备份；每次重启前会自动生成一份。",
-    "profileUnknown": "这次没有备份：没找到你的配置目录（发现 {n} 个候选）。",
+      "profileUnknown": "这次没有备份：没找到你的配置目录（发现 {n} 个候选）。",
       "path": "存放路径",
       "copyPath": "复制路径",
       "copied": "路径已复制",
@@ -268,7 +268,11 @@
       "rollbackConfirmNo": "取消",
       "rollbackBusy": "正在回退…",
       "rollbackDone": "已回退，正在重启…",
-      "rollbackFailed": "回退没成功：{message}"
+      "rollbackFailed": "回退没成功：{message}",
+      "compareLabel": "单次比对文件上限",
+      "compareHint": "判断配置有没有变的时候，一次最多看多少个文件。超过这个上限就不做比对了（省时间），备份照常进行。",
+      "compareSaved": "已保存：单次比对最多 {n} 个文件。",
+      "compareFailed": "这个数字没能保存。"
     },
     "backupPlugins": {
       "label": "备份包含已安装插件",

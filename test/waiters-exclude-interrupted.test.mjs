@@ -183,7 +183,7 @@ function readReportedState(routes) {
   })
 }
 
-test('an interrupted conversation is NOT a waiter, but is still resumed (2026-11-22)', async () => {
+test('an interrupted conversation is NOT a waiter, and is NOT resumed (2026-11-23)', async () => {
   // `sess-caller` asks for the restart. `sess-other` is a conversation that is
   // running for an unrelated reason — it never asked for anything.
   const { setup, restart, harness, restore } = await bootPlugin('interrupted', [
@@ -211,14 +211,18 @@ test('an interrupted conversation is NOT a waiter, but is still resumed (2026-11
       'so the pill would tell it (and its user) the restart is waiting for them — the 2026-11-22 report',
   )
 
-  // The other half of the contract: removing it from `waiters` must NOT stop the
-  // boot from resuming it. Two different things, and the fix may only change one.
+  // The other half of the contract CHANGED on 2026-11-23: removing it from
+  // `waiters` was the first half; the second half is that the boot recovery must
+  // not wake it either. The old expectation here (pendingResume === true) is the
+  // very write that made an idle conversation start a new round after a restart
+  // it never asked for.
   const state = readState(setup.file)
   const other = sessionEntry(state, 'sess-other')
   assert.ok(other, 'the interrupted conversation is still written down in the checkpoint')
-  assert.equal(
+  assert.notEqual(
     other.pendingResume,
     true,
-    'and it is STILL pendingResume, so the boot recovery resumes it (a6bcb35 must keep working)',
+    'and it is NOT pendingResume: only the requester continues (README §1)',
   )
+  assert.equal(other.interrupted, true, 'it is recorded as interrupted, so status can report it')
 })

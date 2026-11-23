@@ -9,7 +9,7 @@ Restart DeepSeek Harness without losing the work that is currently running.
 
 Chinese version: [README.zh.md](docs/README.zh.md)
 
-Current version: **0.9.13**
+Current version: **0.9.14**
 
 ## What it does
 
@@ -59,10 +59,11 @@ The settings page writes these; the defaults are the ones in the code.
 | `pluginFilesWatch` | `true` | Also wait while the profile's plugin files are being changed — `package.json`, `pnpm-lock.yaml`, `node_modules` and `node_modules-link`. This covers the installs that never go through the market: a manual `pnpm add`, or the host's own plugin manager |
 | `pluginFilesStableMs` | `15000` | How long the plugin files must stay unchanged before the change counts as finished (milliseconds) — a dropdown in the settings page: `5` / `10` / `15` / `30` / `60` seconds. A false positive clears itself after this window |
 | `pluginFilesMaxBlockMs` | `300000` | The longest a single file-change episode may hold a restart, so a stuck installation cannot pin the host shut (milliseconds) — a dropdown in the settings page: `5` / `10` / `30` / `60` minutes (the shortest wait is 5 minutes) |
-| `forceRestartWhenBusy` | `false` | Interrupt a running conversation instead of waiting. The default never interrupts a session |
+| `forceRestartWhenBusy` | `false` | Interrupt a running conversation instead of waiting. The default never interrupts a session. An interruption is a real cut, not a hand-off: the conversations it cuts are recorded as interrupted (`continuum_status` reports them), but only the session that ASKED for the restart is resumed — the others wait for you to say a word |
 | `deferPollMs` | `3000` | Poll interval while waiting for the conversations to go idle |
 | `relaunchDelaySeconds` | `2` | How long the detached helper waits before it kills the app |
 | `restartWindow` | `background` | How the restart command script is started: `background` = no window at all, and it never takes the focus (the default since this version); `foreground` = the visible console window. An existing profile that already says `foreground` keeps it — only a missing or unreadable value falls back to `background` |
+| `maxCompareFiles` | `20000` | How many files one configuration comparison may look at before it gives up. It is a dropdown inside the backup group, below the copy limit, offering 10000 / 20000 / 30000 / 50000; above the ceiling the comparison is skipped to save time and the backup still runs |
 | `backupOnRestart` | `true` | Take a copy before every restart. It compares first, so a copy is only written when something changed. Two copies are kept by default and the oldest is deleted when there are more. With the switch off nothing is compared and no copy is taken |
 | `backupIncludePlugins` | `true` | The copy holds plugins too, in three kinds: the plugins **you wrote yourself** and online plugins you **downloaded and then changed on this machine** (localised ones) are copied with their files, so a rollback restores them exactly; the rest of the **online third-party plugins, installed as they came**, only get their name and version recorded — their authors keep them up to date, so if something breaks, install them once more (~117 MB here, ~3 s with the files) |
 | `maxBackups` | `2` | How many copies to keep (2–10). Its dropdown is a row of its own under **Back up before a restart** — no longer inside the **Backup info** fold. Past that number the oldest copy is deleted; shrinking asks first how many copies will go |
@@ -231,34 +232,28 @@ Where those 138 MB sit — the seven copied plugins:
 | `dsh-security-scan` | 0.3 MB |
 | `dsh-web-fetch-fallback` | 0.1 MB |
 
-**`dsh-codekg` alone is about 86% of the whole backup**, and almost all of that is its own `data/` directory
-(**114.0 MB**): `snapshots/` **99.6 MB** (108 files, mostly the `run-*.json` baselines the tool writes),
-`graphs/` 11.4 MB, `runs/` 2.9 MB. That is **run data the tool produced**, and it grows and shrinks with use and
-with the tool's own retention.
-
-So **the size of a backup floats — that is normal.** It does not mean the backup went wrong, and it does not mean
-a plugin was left out: the size follows the plugins' own working data. **The things to look at are the file count
-and the plugin list**, not the byte total.
-
-**Two kinds of thing are left out of the copy (0.9.9, 2026-11-21).** Both are things that can be rebuilt or that are
-scratch space — nothing a restored installation needs in order to RUN:
+**The copy carries SOURCE only (0.9.14).** What a backup is for is putting back a plugin whose *source* was
+edited into a broken state — that is the only damage it has to undo. A dependency tree comes back with
+`pnpm install`, a plugin's own `data/` is rebuilt the next time it runs, and `.git` comes back from the
+remote, so none of them belongs in every pre-restart copy.
 
 | Left out | Why | Measured here |
 |---|---|---|
+| `node_modules` | reinstallable from `package.json` / `pnpm-lock.yaml` | 585.6 MB / 35,406 files (`dsh-agent-teams`) |
+| `data/` | the plugin writes it at runtime and rebuilds it | 615.8 MB / 11,666 files (`dsh-codekg` graphs) |
 | `.git` | rebuildable (clone/fetch) | 56.8 MB / 2,955 files (12 plugins) |
 | `.tmp*` work directories | scratch space by construction | 7.3 MB / 358 files |
 
-**Everything else is copied file by file** — the configuration, the plugin sources, **and the plugins' own
-dependencies and running data** (`node_modules`, `data/`). Measured on this machine, a copy is **928.1 MB /
-35,187 files**, of which 558.5 MB is `dsh-agent-teams`'s dependencies and 317.0 MB is `dsh-codekg`'s graphs.
+**Measured on this machine (0.9.14): one full copy went from 1,151 MB to 58 MB.** The price is stated so it is
+a choice rather than a surprise: restoring a linked plugin needs one `pnpm install` before it runs again, and a
+plugin that keeps state in `data/` starts that state from empty. The plugin's own code, its manifest and the
+profile configuration come back complete either way.
 
-**Why the dependencies and the data are IN the copy** (user decision, 2026-11-21): an earlier draft of this version
-also excluded them, which brought one copy down to 50.9 MB — but then a restore needs a `pnpm install` before a
-plugin runs, and `dsh-codekg` has to rebuild its graphs on first use. The user rejected that trade the moment the
-price was stated: **a backup has to come back USABLE, not merely small.** So the size is the price of a copy that
-runs as-is.
+**The comparison that decides "did anything change?" uses the same list.** The two used to disagree — "nothing
+changed" was decided on a smaller tree than the one the copy then walked — which is how a restart could skip the
+copy and then still pay for it on the next one.
 
-**The manifest records what was skipped** (`skipped: [{ plugin, name, files, bytes }]`), so the two exclusions are
+**The manifest records what was skipped** (`skipped: [{ plugin, name, files, bytes }]`), so every exclusion is
 visible rather than implied.
 
 ## Platforms

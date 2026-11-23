@@ -30,6 +30,7 @@ import path from 'node:path'
 import test from 'node:test'
 
 import { apply } from '../index.js'
+import { beginBoot, RESTART_BYSTANDER_REASON } from '../lib/checkpoint.js'
 
 /** A temporary state directory for one plugin instance. */
 function tempStateFile(label) {
@@ -164,10 +165,12 @@ function sessionEntry(state, sessionId) {
   return undefined
 }
 
-test('a restart marks EVERY running conversation, including one the checkpoint never saw', async () => {
+test('a restart records EVERY running conversation as interrupted — and queues NONE of them', async () => {
   // `sess-caller` asks for the restart. `sess-other` is a conversation that is
-  // running but has NO checkpoint entry — the exact case that used to be killed
-  // and never woken.
+  // running when the request arrives — the exact case that used to be both
+  // written down AND woken up (bug 2026-11-23: the idle gate waits for it, so by
+  // the time the host dies it has finished its turn and the continuation message
+  // is a wake-up out of nowhere).
   const { setup, restart, restore } = await bootPlugin('all', [
     agent('sess-caller'),
     agent('sess-other'),
@@ -186,9 +189,10 @@ test('a restart marks EVERY running conversation, including one the checkpoint n
   const other = sessionEntry(state, 'sess-other')
 
   assert.ok(caller, 'the session that asked is in the checkpoint')
-  assert.ok(other, 'THE OTHER RUNNING CONVERSATION IS IN THE CHECKPOINT TOO — this is the fix')
-  assert.equal(other.pendingResume, true, 'so the boot recovery will resume it')
-  assert.equal(other.running, false, 'and it is no longer recorded as running')
+  assert.equal(caller.pendingResume, true, 'the REQUESTER is queued: it asked to continue')
+  assert.ok(other, 'the other running conversation is written down (so status can report it)')
+  assert.notEqual(other.pendingResume, true, 'but it is NOT queued: it never asked to be woken')
+  assert.equal(other.interrupted, true, 'it is recorded as interrupted by this restart')
 })
 
 test('a subagent is not marked: it has no inbox to continue', async () => {
@@ -258,11 +262,67 @@ test('without resume:true the caller itself is not marked either', async () => {
     'the caller opted out of coming back',
   )
   const other = sessionEntry(state, 'sess-other')
-  assert.equal(
-    other && other.pendingResume,
+  assert.notEqual(
+    other === undefined ? undefined : other.pendingResume,
     true,
-    'a conversation that did not ask to stop is still protected, even when the caller opts out',
+    'a conversation that did not ask to stop is recorded, never queued — the caller opting out does not make the others wake up either',
   )
+})
+
+/**
+ * THE BOOT SIDE OF THE SAME CONTRACT (bug 2026-11-23).
+ *
+ * The restart gate waits for every conversation, so a bystander has usually
+ * FINISHED its turn before the host is killed. These cases pin the two ways a
+ * bystander could still be dragged into a recovery: a mark written by the
+ * request, and a legacy mark from a build that queued everybody.
+ */
+test('a boot that follows a restart does not queue a bystander that was still running', () => {
+  const state = {
+    bootPid: 111,
+    restart: { requesters: [{ sessionId: 'sess-caller', resume: true }] },
+    sessions: {
+      'sess-caller': { sessionId: 'sess-caller', running: true, pendingResume: false },
+      'sess-other': { sessionId: 'sess-other', running: true, pendingResume: false },
+    },
+  }
+  const { state: next } = beginBoot(state, { pid: 222, now: 5000 })
+  assert.equal(next.sessions['sess-caller'].pendingResume, true, 'the requester is queued')
+  assert.equal(next.sessions['sess-other'].pendingResume, false, 'the bystander is NOT queued')
+  assert.equal(next.sessions['sess-other'].interrupted, true, 'it is still recorded as interrupted')
+  assert.equal(next.sessions['sess-other'].running, false)
+})
+
+test('a crash with no restart recorded still queues a session that was running', () => {
+  // The 2026-11-11 loss (a conversation cut off and never recovered) stays fixed:
+  // WITHOUT a restart request there is no "requester", so the old rule applies.
+  const state = {
+    bootPid: 111,
+    sessions: { 'sess-x': { sessionId: 'sess-x', running: true, pendingResume: false } },
+  }
+  const { state: next } = beginBoot(state, { pid: 222, now: 5000 })
+  assert.equal(next.sessions['sess-x'].pendingResume, true, 'a crashed turn is still recovered')
+  assert.equal(next.sessions['sess-x'].pendingSource, 'boot-interrupted')
+})
+
+test('a bystander queued by an earlier build is taken out of the queue on the next boot', () => {
+  const state = {
+    bootPid: 111,
+    restart: { requesters: [{ sessionId: 'sess-caller', resume: true }] },
+    sessions: {
+      'sess-caller': { sessionId: 'sess-caller', running: false, pendingResume: true, pendingSince: 10 },
+      'sess-other': {
+        sessionId: 'sess-other',
+        running: false,
+        pendingResume: true,
+        pendingSince: 10,
+        reasons: [RESTART_BYSTANDER_REASON],
+      },
+    },
+  }
+  const { state: next } = beginBoot(state, { pid: 222, now: 5000 })
+  assert.equal(next.sessions['sess-caller'].pendingResume, true, 'the requester of the old build still wakes')
+  assert.equal(next.sessions['sess-other'].pendingResume, false, 'the legacy bystander mark is cleared')
 })
 
 

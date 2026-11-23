@@ -1,3 +1,64 @@
+## 0.9.14 — 2026-11-23
+
+中文 / English
+
+### 一、备份范围剔除依赖和数据，备份体积大幅下降
+
+重启前的备份只保**可能被改坏的源码**：配置 + 插件源码。插件目录下的 `node_modules`（依赖，能从 `package.json` 重装）、`data/`（插件运行时自己写、下次运行会重建）、`.git`、`.tmp*` 都不再拷进备份。
+
+实测（本机）：一份全量备份从 **1,151 MB 降到 58 MB**，耗时同步大幅下降。代价说清楚：还原一份本地链接安装的插件后需要先跑一次 `pnpm install`；把状态放在 `data/` 里的插件会从空状态重新开始。插件自身的代码、清单与 profile 配置始终完整。
+
+判断「配置有没有变」的那份比对现在与拷贝使用**同一份排除清单**。此前两者不一致：比对时已排除依赖和数据，拷贝时却全拷——于是「没变化」是在一棵更小的树上判定的，而真正拷的却是另一棵。
+
+### 二、只叫醒发起重启的会话（缺陷修复）
+
+0.9.10 合入的外部修复「重启前把每个正在运行的会话都写成待恢复」，在**默认路径**上会误唤醒旁观者：重启要等所有人空闲，等真正执行时那些会话早已正常收工，但标记没人清除，于是重启后它们被自动叫醒一轮（实测：会话 13:07 收工 → 13:09 被叫醒 → 白跑一分钟）。现在：
+
+- 重启时被波及的会话只记成「被打断」（`continuum_status` 里可见），**不进续接队列**；
+- 宿主启动时只有**发起者**转为待续接；不是发起者的，就算当时真在跑也只记录、不唤醒；
+- 0.9.10–0.9.13 写坏的待续接标记，第一次启动时自动清掉；
+- 没有重启记录的崩溃启动仍按老逻辑恢复当时在跑的会话（2026-11-11 的「切断后再没醒」没有回退）。
+
+### 三、设置页补上「单次比对文件上限」下拉框
+
+`maxCompareFiles` 自 0.9.12 起就是正式配置项（schema / 默认值 / 校验 / 路由 / 持久化都通），但页面没有入口，只能手改 profile。现在它就在「重启前备份」那一组的缩进框里，排在「备份包含已安装插件」和「保留份数」之后——因为它同样是「查一遍配置有没有变」这件事的上限，跟备份开关一起生效。四档：10000 / 20000（默认）/ 30000 / 50000。值来自配置本身（`compareFilesLimitOf`），保存走 `/choice` 路由。
+
+**原来的数字输入框存不进去，这一版修掉了**：它把 `maxCompareFiles` POST 到 `/backup-limit`——那是「保留几份备份」的路由，body 只认 `maxBackups`，于是每次保存都被服务端顶回「the copy limit must be a number」，输入框随即弹回原值。同时 `/choice` 的 no-choice 闸漏列了这个 key，只带它也会被拒。两处都修了；换成下拉框之后也没有「填一个没人要的数」这种可能。
+
+说明文字也改了：原来只写「超过就算放弃」，读起来像「不备份了」。现在写明**超过上限只是不做比对（省时间），备份照常进行**。
+
+### 四、备份护栏的拒绝要说清出口
+
+恢复一份「不是从当前 profile 拷出来的」备份时，报错结尾补了一句出口：确实搬过家或改过名，就用 `verifyTarget: false` 手动恢复。自动回滚被拒时，同样的建议写进 `last-restart-verdict.json`，并在返回值里带 `hint`——否则人手只看得到一句「refusing to restore」。
+
+### 五、文档
+
+README 的 `forceRestartWhenBusy` 补上一句：打断是真的切断，被打断的会话只记录、不自动续接。
+
+### 1. The backup leaves out dependencies and data, and gets much smaller
+
+A pre-restart backup now carries **source only**: the configuration plus the plugins' own code. A plugin's `node_modules` (reinstallable from `package.json`), its `data/` (written at runtime, rebuilt on next use), `.git` and `.tmp*` are no longer copied into every backup.
+
+Measured on this machine: one full copy went from **1,151 MB to 58 MB**, and the time spent copying dropped with it. The price, stated plainly: after restoring a locally linked plugin you need one `pnpm install`, and a plugin that keeps state in `data/` starts from empty. The plugin's own code, its manifest and the profile configuration always come back complete.
+
+The comparison that decides "did anything change?" now uses the **same exclusion list** as the copy. The two used to disagree — dependencies and data were already excluded from the comparison but copied anyway — so "nothing changed" was decided on a smaller tree than the one actually copied.
+
+### 2. Only the session that asked is woken
+
+The external fix in 0.9.10 marked EVERY running conversation for recovery. On the default path (a restart waits for idle) those conversations have long finished before the restart actually happens, yet the mark was never cleared, so they were woken afterwards for a turn nobody asked for. Now bystanders are only recorded as interrupted, boot recovery wakes requesters alone, marks written by 0.9.10-0.9.13 are pruned, and crash boots still recover what was running.
+
+### 3. A settings dropdown for `maxCompareFiles`
+
+The key has been real since 0.9.12 (schema, default, validation, route, persistence) but the page had no control for it. It is a dropdown inside the 「back up before a restart」 group now, indented after 「include installed plugins」 and 「how many copies to keep」 — it is the same "how much work may the change check do" ceiling, so it lives with the backup switch. It offers 10000 / 20000 (default) / 30000 / 50000, seeded from the configuration itself and saved through `/choice`.
+
+**The number box it replaced could not save at all, and this release fixes that**: it posted `maxCompareFiles` to `/backup-limit` — the route for **how many copies to keep**, whose body only carries `maxBackups` — so every save was answered "the copy limit must be a number" and the box snapped back to its old value. The `/choice` route had the mirror problem: its no-choice gate did not list this key, so a body carrying only it was refused too. Both are fixed; a short list also removes the chance of setting a value nobody wants.
+
+The explanation changed as well: it used to say only that the comparison "gives up", which reads like "no backup". It now says plainly that **going over the ceiling only skips the comparison to save time — the backup still runs**.
+
+### 4. The backup guard names the way out
+
+A copy taken from another profile is still refused, but the message (and `last-restart-verdict.json` when the automatic rollback hits it) now names the way out: `verifyTarget: false`.
+
 # Changelog
 
 中文 / English

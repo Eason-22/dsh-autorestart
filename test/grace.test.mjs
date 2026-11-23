@@ -683,7 +683,7 @@ test('the settings section offers the restart wait and the shutdown countdown', 
   const restartControls = walk(groups[0]).filter((node) => node.type === 'select' || node.type === 'input')
   assert.deepEqual(
     restartControls.map((node) => node.props['data-dsh-autorestart-setting']),
-    ['restartGraceMs', 'backupOnRestart', 'backupIncludePlugins', 'maxBackups'],
+    ['restartGraceMs', 'backupOnRestart', 'backupIncludePlugins', 'maxBackups', 'maxCompareFiles'],
     'the restart group carries the wait, the two backup switches and the copy limit',
   )
   // The 「更多设置」 block: a block of its own, closed by default, standing

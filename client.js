@@ -462,6 +462,10 @@
     // Two lines say everything the page can promise; the dropdown below changes
     // the number, so no sentence carries a frozen copy of it.
     'settings.backup.limitLabel': '保留份数',
+    'settings.backup.compareLabel': '单次比对文件上限',
+    'settings.backup.compareHint': '判断配置有没有变的时候，一次最多看多少个文件。超过这个上限就不做比对了（省时间），备份照常进行。',
+    'settings.backup.compareSaved': '已保存：单次比对最多 {n} 个文件。',
+    'settings.backup.compareFailed': '这个数字没能保存。',
     // THE DISK WARNING SITS NEXT TO THE DROPDOWN (user report, 2026-11-02): it
     // used to be a line BELOW the control, so the warning arrived after the
     // choice was made. Same place in the tree, right of the select.
@@ -979,6 +983,10 @@
     'settings.backup.multiProfile': 'More than one settings folder was found, so backups and rollbacks are paused: it cannot tell which one to back up. Fix it by starting with DSH_PROFILE set, or by keeping a single settings folder.',
     'settings.backup.keep': 'At most {n} copies are kept; the oldest one is deleted when there are more.',
     'settings.backup.limitLabel': 'Copies kept',
+    'settings.backup.compareLabel': 'Files per comparison',
+    'settings.backup.compareHint': 'How many files one comparison may look at when deciding whether anything changed. Above this ceiling the comparison is skipped to save time - the backup still runs.',
+    'settings.backup.compareSaved': 'Saved: {n} files per comparison.',
+    'settings.backup.compareFailed': 'That number could not be saved.',
     'settings.backup.limitHint': 'How many copies to keep: two by default, the oldest is deleted when there are more. Every copy takes disk space — keep as few as you need.',
     'settings.backup.limitCurrentOption': 'Current value ({n} copies)',
     'settings.backup.limitAsk': 'This deletes the {remove} oldest copies and cannot be undone. {from} copies now → {to} kept.',
@@ -3634,6 +3642,10 @@
        * The route that persists the one-time install choice: the one the Host
        * sent with the state payload, or the one derived from the health path.
        */
+      // The sizes the page offers for the per-comparison file budget. Four
+      // values, one of them the shipped default; the server still validates.
+      const COMPARE_FILE_LIMIT_CHOICES = [10000, 20000, 30000, 50000]
+
       function choiceUrlFor(info) {
         const sent = info && typeof info.choiceUrl === 'string' ? info.choiceUrl.trim() : ''
         if (sent.startsWith('/')) return sent
@@ -6845,6 +6857,12 @@
         // answer, so the number on screen is the number in force right after the
         // write instead of waiting for the next poll.
         const [limitValue, setLimitValue] = useState(null)
+        // THE COMPARISON BUDGET (2026-11-23): how many files one comparison may
+        // look at. Seeded from the payload like the copy limit above, replaced by
+        // the answer, so the number on screen is the number in force.
+        const [compareValue, setCompareValue] = useState(null)
+        const [compareBusy, setCompareBusy] = useState(false)
+        const [compareNote, setCompareNote] = useState(null)
 
         /**
          * WRITE THE COPY LIMIT (user decision, 2026-11-02).
@@ -7755,7 +7773,87 @@
                     t('settings.backup.limitHint'),
                   ),
                 }),
+                // THE COMPARISON BUDGET, AS A PICK (2026-11-23, user decision):
+                // a free number box invited values nobody wants and could not be
+                // saved at all — it posted to the BACKUP-COUNT route, whose body
+                // only carries maxBackups, so every attempt came back
+                // "the copy limit must be a number" and the box reset itself.
+                // A short list of four sane sizes is both easier to use and
+                // impossible to get wrong; it saves through the route that
+                // actually persists this key.
+                settingsRow(t, {
+                  rowKey: 'maxCompareFiles',
+                  title: t('settings.backup.compareLabel'),
+                  controlId: 'dsh-autorestart-setting-maxCompareFiles',
+                  control: h(
+                    'select',
+                    {
+                      className: 'dsh-autorestart-settings__select',
+                      id: 'dsh-autorestart-setting-maxCompareFiles',
+                      'data-dsh-autorestart-setting': 'maxCompareFiles',
+                      value: String(compareValue === null ? backupsInfo.maxCompareFiles : compareValue),
+                      disabled: compareBusy,
+                      onChange: (event) => {
+                        const wanted = Number(event.target.value)
+                        if (Number.isFinite(wanted) !== true || wanted <= 0) return
+                        void (async () => {
+                          const url = choiceUrlFor(info)
+                          if (url === '') {
+                            setCompareNote(t('settings.backup.compareFailed'))
+                            return
+                          }
+                          setCompareBusy(true)
+                          setCompareNote(null)
+                          try {
+                            const response = await fetch(url, {
+                              method: 'POST',
+                              headers: { 'content-type': 'application/json', accept: 'application/json' },
+                              body: JSON.stringify({ maxCompareFiles: wanted }),
+                            })
+                            const answer = await response.json().catch(() => null)
+                            if (response.ok !== true || answer === null || answer.ok !== true) {
+                              setCompareNote(answer && typeof answer.reason === 'string' && answer.reason !== ''
+                                ? answer.reason
+                                : t('settings.backup.compareFailed'))
+                              return
+                            }
+                            setCompareValue(wanted)
+                            void pollOnce()
+                            setCompareNote(fill(t('settings.backup.compareSaved'), { n: String(wanted) }))
+                          } catch {
+                            setCompareNote(t('settings.backup.compareFailed'))
+                          } finally {
+                            setCompareBusy(false)
+                          }
+                        })()
+                      },
+                    },
+                    COMPARE_FILE_LIMIT_CHOICES.map((n) =>
+                      h('option', { value: String(n), key: 'compare-limit-' + n }, String(n)),
+                    ),
+                  ),
+                  hint: h(
+                    'span',
+                    {
+                      className: 'dsh-autorestart-settings__hint',
+                      'data-dsh-autorestart-backup': 'compare-hint',
+                    },
+                    t('settings.backup.compareHint'),
+                  ),
+                }),
               ),
+              compareNote === null
+                ? null
+                : h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__backup-row', key: 'compare-note' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__backup-label', 'data-dsh-autorestart-backup': 'compare-note' },
+                    compareNote,
+                  ),
+                ),
+
               // THE CONFIRMATION AND THE RESULT OF A SHRINK stay with the
               // dropdown they belong to — so they sit right under the block,
               // never inside the fold.

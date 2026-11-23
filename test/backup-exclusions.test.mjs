@@ -24,6 +24,7 @@ import test from 'node:test';
 import {
   BACKUP_SKIP_NAMES,
   BACKUP_SKIP_PREFIXES,
+  COMPARE_SKIP_NAMES,
   createBackup,
   isSkippedFromBackup,
   LINKS_DIR,
@@ -73,22 +74,28 @@ function fixture(t) {
   return { base, profile, dev, backups: path.join(base, 'storage', 'backups') };
 }
 
-test('isSkippedFromBackup: history and scratch only — dependencies and data are copied', () => {
-  assert.deepEqual([...BACKUP_SKIP_NAMES], ['.git']);
+test('isSkippedFromBackup: source is copied, everything rebuildable is skipped', () => {
+  // WHAT THE BACKUP IS FOR: undoing a broken SOURCE edit. A dependency tree comes
+  // back with `pnpm install`, a plugin's `data/` is rebuilt when it next runs, and
+  // `.git` is rebuildable from the remote — none of them is something an edit can
+  // break, so none of them belongs in every pre-restart copy.
+  assert.deepEqual([...BACKUP_SKIP_NAMES], ['.git', 'node_modules', 'data']);
+  assert.deepEqual([...COMPARE_SKIP_NAMES], [...BACKUP_SKIP_NAMES],
+    'the comparison and the copy must leave out exactly the same names');
   assert.deepEqual([...BACKUP_SKIP_PREFIXES], ['.tmp']);
 
-  for (const name of ['.git', '.tmp', '.tmp-task308', '.tmp-rev310r2-r1']) {
+  for (const name of ['.git', 'node_modules', 'data', '.tmp', '.tmp-task308', '.tmp-rev310r2-r1']) {
     assert.equal(isSkippedFromBackup(name), true, `${name} must be skipped`);
   }
-  // Everything a rollback needs to run must be copied.
-  for (const name of ['node_modules', 'data', 'src', 'lib', 'dist', 'database', '.gitignore']) {
+  // The source itself — the only thing an edit can break — is copied.
+  for (const name of ['src', 'lib', 'dist', 'assets', 'locale', 'docs', 'database', '.gitignore', 'index.js', 'package.json']) {
     assert.equal(isSkippedFromBackup(name), false, `${name} must be copied`);
   }
   assert.equal(isSkippedFromBackup(''), false);
   assert.equal(isSkippedFromBackup(null), false);
 });
 
-test('a linked plugin keeps its dependencies and its data, and loses only history + scratch', async (t) => {
+test('a linked plugin keeps its SOURCE and loses its dependencies, its data, its history and its scratch', async (t) => {
   const { profile, backups } = fixture(t);
   const backup = await createBackup({
     slimBackup: false,
@@ -101,21 +108,23 @@ test('a linked plugin keeps its dependencies and its data, and loses only histor
   assert.equal(backup.ok, true);
   const copy = path.join(backup.dir, LINKS_DIR, 'demo-linked');
 
-  // What a restore needs is there — including the two trees an earlier draft
-  // excluded, because the user needs the copy to RUN after a rollback.
+  // What a rollback needs is the source (and the manifest that says how to
+  // start it) — that is the only thing an edit can break.
   assert.ok(fs.existsSync(path.join(copy, 'package.json')));
   assert.ok(fs.existsSync(path.join(copy, 'src', 'index.js')));
-  assert.ok(fs.existsSync(path.join(copy, 'node_modules', 'left-pad', 'index.js')),
-    'the plugin\'s dependencies must be in the copy');
-  assert.ok(fs.existsSync(path.join(copy, 'data', 'graphs', 'g.json')),
-    'the plugin\'s data must be in the copy');
 
-  // The two exclusions are not.
+  // The rebuildable trees are NOT in the copy: a dependency tree comes back with
+  // `pnpm install`, `data/` is rebuilt by the plugin itself, and `.git` comes
+  // back from the remote.
+  assert.equal(fs.existsSync(path.join(copy, 'node_modules', 'left-pad', 'index.js')), false,
+    'dependencies are rebuildable and must not be in the copy');
+  assert.equal(fs.existsSync(path.join(copy, 'data', 'graphs', 'g.json')), false,
+    'the plugin\'s data is rebuilt by the plugin and must not be in the copy');
   assert.equal(fs.existsSync(path.join(copy, '.git')), false, '.git must not be in the copy');
   assert.equal(fs.existsSync(path.join(copy, '.tmp-task308')), false, '.tmp* must not be in the copy');
 });
 
-test('the manifest names what was skipped — and only those two', async (t) => {
+test('the manifest names what was skipped — dependencies, data, history and scratch', async (t) => {
   const { profile, backups } = fixture(t);
   const backup = await createBackup({
     slimBackup: false,
@@ -128,11 +137,11 @@ test('the manifest names what was skipped — and only those two', async (t) => 
   const manifest = readManifest(backup.dir);
   assert.ok(Array.isArray(manifest.skipped), 'manifest.skipped must be an array');
   const names = manifest.skipped.map((entry) => entry.name).sort();
-  assert.deepEqual(names, ['.git', '.tmp-task308'],
-    'only history and scratch may be reported as skipped');
+  assert.deepEqual(names, ['.git', '.tmp-task308', 'data', 'node_modules'],
+    'every exclusion is reported, none is silent');
 
   const byName = new Map(manifest.skipped.map((entry) => [entry.name, entry]));
-  for (const name of ['.git', '.tmp-task308']) {
+  for (const name of ['.git', '.tmp-task308', 'data', 'node_modules']) {
     const entry = byName.get(name);
     assert.equal(entry.plugin, 'demo-linked');
     assert.ok(entry.files >= 1, `${name} must report at least one file`);

@@ -29,6 +29,7 @@
 上一版排查出的根因（脚本在成功分支提前退出、跳过了自删）已修：
 
 - 成功分支在退出前**先删掉自己的脚本**；失败分支原来的「自删 + 放锁」保持不变；
+- **万一脚本根本没被执行到**（例如桌面版那种不需要外部守护的重启方式），它会在**下一次启动时**被清理扫描一并清掉——本机实测：3 个没自删的脚本，下一次启动后变 0 个；
 - 通用的清理扫描**收编**了 `restart-<n>-watch.ps1`：只删 10 分钟以前的，正在跑的那一个不动；
 - 判据放宽到能认出老格式脚本（此前只认带 `param(` 的新格式，因此 33/34 个老脚本没被扫到）。
 
@@ -67,6 +68,7 @@ Users upgrading from an older version see one card about what this version adds;
 The root cause found in the previous version (the script exited on its success path before deleting itself) is fixed:
 
 - the success path now **deletes its own script** before exiting; the failure path keeps its original delete-and-release;
+- **should a script never be executed at all** (the desktop build needs no external watcher), the cleanup scan takes it at the **next start** — measured locally: 3 that did not delete themselves became 0 after the next start;
 - the general sweep now **adopts** `restart-<n>-watch.ps1`: it deletes only files older than ten minutes, so the one still running is left alone;
 - the predicate was widened so the old-format scripts are recognised (it used to require `param(`, so 33 of 34 old scripts were never swept).
 

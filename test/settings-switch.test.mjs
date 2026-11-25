@@ -833,7 +833,7 @@ test('the backup fold carries the same title as every other fold', async () => {
   assert.ok(fold, 'the backup fold is there')
   const summary = fold.children.find((child) => child.type === 'summary')
   assert.ok(summary, 'the backup fold has a title')
-  assert.equal(textOf(summary), '备份信息', 'the backup fold says what is inside it')
+  assert.equal(textOf(summary), '具体备份信息', 'the backup fold says what is inside it')
 
   // And its content is still there — the READ-ONLY part (user decision,
   // 2026-11-11): the count, the rule, the per-copy rows and the path. The copy
@@ -859,7 +859,7 @@ test('the backup fold carries the same title as every other fold', async () => {
  * the backup switch although it only means something when that switch is on.
  * ------------------------------------------------------------------ */
 
-/** The 「备份信息」 fold of the settings page. */
+/** The 「具体备份信息」 fold of the settings page. */
 function backupFold(panel) {
   const found = walk(panel).find(
     (node) => node.type === 'details' && node.props['data-dsh-autorestart-backup'] === 'section',
@@ -881,7 +881,7 @@ test('the backup fold says what is inside it, not 「查看说明」 again', asy
 
   const summary = backupFold(panel).children.find((child) => child.type === 'summary')
   assert.ok(summary, 'the backup fold has a title')
-  assert.equal(textOf(summary), '备份信息', 'the fold says it is about backups')
+  assert.equal(textOf(summary), '具体备份信息', 'the fold says it is about backups')
 
   // No other fold on the page may carry that same wording either — the point
   // was that two folds were called the same thing.
@@ -890,9 +890,9 @@ test('the backup fold says what is inside it, not 「查看说明」 again', asy
     .filter((node) => node !== summary)
     .map((node) => textOf(node))
   assert.equal(
-    otherSummaries.includes('备份信息'),
+    otherSummaries.includes('具体备份信息'),
     false,
-    `only the backup fold says 「备份信息」: ${JSON.stringify(otherSummaries)}`,
+    `only the backup fold says 「具体备份信息」: ${JSON.stringify(otherSummaries)}`,
   )
 })
 

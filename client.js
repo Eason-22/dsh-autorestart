@@ -360,8 +360,8 @@
     // skipped it and which copy it kept on using.
     'settings.backup.lastSkipped': '上次重启（{time}）：配置和插件没有变化，未新建备份，沿用 {dir}',
     'settings.backup.lastSkippedConfig': '上次重启（{time}）：配置没有变化，未新建备份，沿用 {dir}',
-    'settings.backup.section': '备份信息',
-    'settings.backup.hint': '每次重启前先比对：DSH 配置、以及下面两项范围内的插件，有没有变化。有变化才新建一份存档，没变化就沿用最近那份。默认保留 2 份，超出自动删最旧的；份数在下面的「保留份数」里改。关掉这个开关时不做比对，也不产生存档。存档不会自动还原，要回退去「备份信息」里点。',
+    'settings.backup.section': '具体备份信息',
+    'settings.backup.hint': '每次重启前先比对：DSH 配置、以及下面两项范围内的插件，有没有变化。有变化才新建一份存档，没变化就沿用最近那份。默认保留 2 份，超出自动删最旧的；份数在下面的「保留份数」里改。关掉这个开关时不做比对，也不产生存档。存档不会自动还原，要回退去「具体备份信息」里点。',
     'settings.backupPlugins.label': '备份包含已安装插件',
     'settings.backupPlugins.hint': '打开后，存档会连插件一起存：',
     'settings.backupPlugins.kindsLocal': '你自己写的插件，以及从线上下载后又本地改过（做过本地化）的插件——连文件一起拷，回退时文件能原样还原；',
@@ -905,8 +905,8 @@
     // skipped it and which copy it kept on using.
     'settings.backup.lastSkipped': 'The last restart ({time}): no change to configuration or plugins, no new copy written, reusing {dir}',
     'settings.backup.lastSkippedConfig': 'The last restart ({time}): no change to the configuration, no new copy written, reusing {dir}',
-    'settings.backup.section': 'Backup info',
-    'settings.backup.hint': 'Before every restart it compares your DSH settings and the plugins covered by the two items below. Only when something changed does it take a new copy; when nothing changed it keeps using the most recent one. Two copies are kept by default and the oldest is deleted when there are more; change that number under "Copies kept" below. With this switch off nothing is compared and no copy is taken. A copy is never restored by itself - to roll back, press the button under "Backup info".',
+    'settings.backup.section': 'Backup details',
+    'settings.backup.hint': 'Before every restart it compares your DSH settings and the plugins covered by the two items below. Only when something changed does it take a new copy; when nothing changed it keeps using the most recent one. Two copies are kept by default and the oldest is deleted when there are more; change that number under "Copies kept" below. With this switch off nothing is compared and no copy is taken. A copy is never restored by itself - to roll back, press the button under "Backup details".',
     'settings.backupPlugins.label': 'Include the installed plugins in the backup',
     'settings.backupPlugins.hint': 'With this on, the copy holds the plugins too:',
     'settings.backupPlugins.kindsLocal': 'the plugins you wrote yourself, and the ones you downloaded and then changed on this machine (localised ones) — their files are copied, so a rollback restores them exactly as they were;',
@@ -6094,6 +6094,14 @@
         '  padding-left:14px;',
         '  border-left:2px solid var(--dsw-alias-border-l1);',
         '}',
+        // 具体备份信息 (user decision, 2026-11-25): the fold lists what IS in the
+        // backups, so it belongs to 「copies kept」 — indented as a subordinate
+        // line instead of sitting flush with the group title.
+        '.dsh-autorestart-settings__details--sub{',
+        '  margin-left:16px;',
+        '  padding-left:14px;',
+        '  border-left:2px solid var(--dsw-alias-border-l1);',
+        '}',
         // A row whose switch above is off: the control is greyed out.
         '.dsh-autorestart-settings__row--off .dsh-autorestart-settings__row-control{',
         '  opacity:.5;',
@@ -6109,10 +6117,10 @@
         '  padding:12px 14px;',
         '}',
         '.dsh-autorestart-settings__advanced-summary{',
-        '  font-size:12px;',
-        '  font-weight:700;',
+        '  font-size:13px;',
+        '  font-weight:600;',
         '  line-height:18px;',
-        '  color:var(--dsw-alias-label-secondary);',
+        '  color:var(--dsw-alias-label-primary);',
         '  cursor:pointer;',
         '}',
         // THE BACKUP LIST (user report, 2026-10-29: the old one-liner
@@ -7883,7 +7891,7 @@
               return h(
                 'details',
                 {
-                  className: 'dsh-autorestart-settings__details',
+                  className: 'dsh-autorestart-settings__details dsh-autorestart-settings__details--sub',
                   'data-dsh-autorestart-backup': 'section',
                   ...(sectionOpen ? { open: true } : {}),
                   onToggle: (event) => {

@@ -1151,9 +1151,9 @@ test('the whole backup explanation is one fold, closed by default', async () => 
   // of being only it.
   // The title says WHAT is inside (user decision, 2026-11-11): it used to be
   // the same 「查看说明」 as the row help, which said nothing about backups.
-  assert.equal(summary[0].children[0], '备份信息', 'the title says what is inside the fold')
+  assert.equal(summary[0].children[0], '具体备份信息', 'the title says what is inside the fold')
   assert.equal(
-    textOf(summary[0]).startsWith('备份信息'),
+    textOf(summary[0]).startsWith('具体备份信息'),
     true,
     `the title still leads the summary: ${textOf(summary[0])}`,
   )
@@ -1945,7 +1945,7 @@ test('the copy-limit hint is verbatim, and belongs to the row it explains', asyn
     },
   })
   const panel = await mounted.settled('dsh-autorestart')
-  // THE DROPDOWN IS A ROW NOW (user decision, 2026-11-11): it left the 「备份信息」
+  // THE DROPDOWN IS A ROW NOW (user decision, 2026-11-11): it left the 「具体备份信息」
   // fold and sits under 「重启前备份」, so its warning arrives with it — as the
   // row's own explanation, in the same row, not as a line of its own.
   const rows = walk(panel).filter(

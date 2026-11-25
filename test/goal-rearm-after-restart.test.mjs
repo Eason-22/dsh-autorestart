@@ -36,7 +36,11 @@ test('a goal disarmed by THIS restart becomes pending work again', () => {
       'session-a': { sessionId: 'session-a', running: false, updatedAt: 1500 },
     },
     disarmedGoals: {
-      'session-a': { goalId: 'goal-1', disarmedAt: 1500, resumedAt: null },
+      // WHY the goal was taken away: the pending restart did it. The ownership
+      // of a disarm is read from this field and from NOTHING else (the boot
+      // does not guess it from the timestamps), so a record that does not
+      // carry it is not ours to give back.
+      'session-a': { goalId: 'goal-1', disarmedAt: 1500, resumedAt: null, reason: 'restart-queued' },
     },
   })
   const pending = recoverableSessions(state, { now: 2000 })
@@ -46,7 +50,13 @@ test('a goal disarmed by THIS restart becomes pending work again', () => {
   assert.equal(pending[0].goal.goalId, 'goal-1')
 })
 
-test('the parked-goals map is adopted too, with its own timestamp field', () => {
+test('the legacy parked-goals map is NOT adopted any more (it has no reason to prove the plugin did it)', () => {
+  // WHY THIS CASE IS THE OTHER WAY ROUND NOW: a parked record is the shape of
+  // the PREVIOUS (pause-based) build — `normalizeParkedGoals` keeps `goalId`,
+  // `parkedAt` and `resumedAt` and nothing else, so there is no `reason` in
+  // it. The ownership of a disarm is read from the reason and from NOTHING
+  // else, so nothing in this record says that the PLUGIN took the goal away:
+  // it is not ours to give back and the boot leaves it exactly where it is.
   const state = stateWith({
     restart: { requestedAt: 1000 },
     sessions: {
@@ -57,7 +67,12 @@ test('the parked-goals map is adopted too, with its own timestamp field', () => 
     },
   })
   const pending = recoverableSessions(state, { now: 2000 })
-  assert.deepEqual(pending.map((entry) => entry.sessionId), ['session-b'])
+  assert.deepEqual(pending.map((entry) => entry.sessionId), [], 'a parked record is not adopted')
+  assert.deepEqual(
+    state.parkedGoals['session-b'],
+    { goalId: 'goal-2', parkedAt: 1200, resumedAt: null },
+    'and the record is left exactly as it was',
+  )
 })
 
 test('a record without a session is an orphan: it is dropped, not adopted', () => {
@@ -74,8 +89,11 @@ test('a record without a session is an orphan: it is dropped, not adopted', () =
   assert.equal(state.disarmedGoals['session-gone'], undefined, 'the orphan record is dropped with the session')
 })
 
-test('a goal disarmed BEFORE this restart is history, not pending work', () => {
-  // Otherwise every boot would resurrect sessions from days ago.
+test('a goal disarmed BEFORE this restart is history, not pending work (a record with no reason is never claimed)', () => {
+  // Otherwise every boot would resurrect sessions from days ago. The record has
+  // no `reason`: nothing in it says that the PLUGIN took this goal away, and
+  // the ownership of a disarm is read from the reason and from nothing else —
+  // so the record is not ours to give back, whatever the clock says.
   const state = stateWith({
     restart: { requestedAt: 1000 },
     disarmedGoals: {
@@ -111,7 +129,10 @@ test('an already running session is left alone: it needs no recovery nudge', () 
       'session-e': { sessionId: 'session-e', running: true, updatedAt: 1500 },
     },
     disarmedGoals: {
-      'session-e': { goalId: 'goal-5', disarmedAt: 1500, resumedAt: null },
+      // The plugin's own disarm: the record names the reason, so the guard
+      // that is really tested here is the RUNNING one and not the ownership
+      // one.
+      'session-e': { goalId: 'goal-5', disarmedAt: 1500, resumedAt: null, reason: 'restart-blocking' },
     },
   })
   const pending = recoverableSessions(state, { now: 2000 })
@@ -119,6 +140,7 @@ test('an already running session is left alone: it needs no recovery nudge', () 
   // Adopted or not, the session is recovered exactly once and keeps running.
   assert.equal(pending[0].sessionId, 'session-e')
   assert.equal(pending[0].running, true)
+  assert.notEqual(pending[0].pendingResume, true, 'a running session needs no recovery nudge')
 })
 
 test('the prototype keys the session maps guard against are never adopted', () => {
@@ -145,7 +167,10 @@ test('a session that is over the model context window is never adopted', () => {
       },
     },
     disarmedGoals: {
-      'session-big': { goalId: 'goal-1', disarmedAt: 1500, resumedAt: null },
+      // The plugin's own disarm: the record names the reason, so the guard
+      // that is really tested here is the OVER-LIMIT one and not the
+      // ownership one.
+      'session-big': { goalId: 'goal-1', disarmedAt: 1500, resumedAt: null, reason: 'restart-blocking' },
     },
   })
   assert.deepEqual(recoverableSessions(state, { now: 2000 }), [], 'an over-limit session must never be resurrected')
@@ -263,7 +288,10 @@ test('the boot gives back a goal the restart disarmed, with nothing else pending
       'session-x': { sessionId: 'session-x', running: false, updatedAt: now },
     },
     disarmedGoals: {
-      'session-x': { goalId: 'goal-1', disarmedAt: now - 4000, resumedAt: null },
+      // WHY the goal was taken away: the pending restart did it. The ownership
+      // of a disarm is read from this field and from NOTHING else, so a record
+      // without it would not be given back.
+      'session-x': { goalId: 'goal-1', disarmedAt: now - 4000, resumedAt: null, reason: 'restart-queued' },
     },
   })
 
@@ -314,7 +342,10 @@ function bootStateWith(now, { sessions = idleSession(now) } = {}) {
     restart: { requestedAt: now - 5000, attempt: 0, notBefore: 0 },
     sessions,
     disarmedGoals: {
-      'session-x': { goalId: 'goal-1', disarmedAt: now - 4000, resumedAt: null },
+      // WHY the goal was taken away: the PLUGIN disarmed it for the restart.
+      // The ownership of a disarm is read from this field and from NOTHING
+      // else, so a record without it would not be given back.
+      'session-x': { goalId: 'goal-1', disarmedAt: now - 4000, resumedAt: null, reason: 'restart-blocking' },
     },
   }
 }
@@ -401,7 +432,13 @@ test('the CONTROL: a session whose goal is still armed is recovered as before', 
   const warnings = []
   const { ctx, timeouts } = createContext({
     agent: { id: 'session-x', status: 'idle' },
-    goal: { id: 'goal-1', revision: 1, phase: 'active', activation: 'armed', roundsStarted: 1, maxGoalRounds: 10 },
+    // WHY THE LIVE GOAL IS NOT THE ONE IN THE RECORD: the goal this session
+    // holds NOW is still armed, and an armed goal is not the plugin's to
+    // re-arm. The record is the plugin's own disarm of the PREVIOUS goal of
+    // this session (that is why the session is pending work), so the plugin
+    // gives THAT goal back — not this one — and the session is continued the
+    // ordinary way, with a message.
+    goal: { id: 'goal-2', revision: 1, phase: 'active', activation: 'armed', roundsStarted: 1, maxGoalRounds: 10 },
     resumed,
     injected,
     warnings,

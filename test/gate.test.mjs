@@ -271,8 +271,8 @@ test('the gate is announced once, as a feature of its own', () => {
 
 test('the package version and its fallback agree', () => {
   const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
-  assert.equal(pkg.version, '1.0.0')
-  assert.equal(PLUGIN_VERSION_FALLBACK, '1.0.0')
+  assert.equal(pkg.version, '1.0.1')
+  assert.equal(PLUGIN_VERSION_FALLBACK, '1.0.1')
 })
 
 /* ------------------------------------------------------------------ *

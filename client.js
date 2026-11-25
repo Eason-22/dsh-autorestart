@@ -4385,7 +4385,8 @@
               (entry) => entry
                 && entry.thisBoot === true
                 && entry.resumedAt == null
-                && entry.tookBackAt == null,
+                && entry.tookBackAt == null
+                && (entry.reason === 'restart-queued' || entry.reason === 'restart-blocking'),
             ).length
           : 0
 

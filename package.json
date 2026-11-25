@@ -1,6 +1,6 @@
 {
   "name": "dsh-autorestart",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "DSH plugin: restarts DeepSeek Harness only when every session is idle, holds questions while you are away, and resumes the interrupted work.",
   "license": "MIT",

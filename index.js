@@ -109,6 +109,16 @@ import {
   UNREACHABLE_MAX_BLOCK_MS,
   probeMarketStatus,
 } from './lib/market-probe.js'
+// THE MARKET QUEUE (2026-11-25): the market's own log is the only witness of an
+// update that waits in the BROWSER's queue — the server-side status route
+// answers "idle" while the queue is not idle (see lib/market-queue.js).
+import {
+  MARKET_LOG_RELATIVE_PATH,
+  MARKET_QUEUE_STALE_MS,
+  marketQueueDecision,
+  parseMarketLogTail,
+  readMarketLogTail,
+} from './lib/market-queue.js'
 import {
   backupsRoot,
   backupPluginDirIn,
@@ -474,7 +484,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '1.0.0'
+const PLUGIN_VERSION_FALLBACK = '1.0.1'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -674,6 +684,16 @@ const DEFAULT_RESUME_RETRY_DELAY_MS = 1000
 const MANUAL_RESUME_ACTIONS = new Set(['resume-disarmed-goal', 'resume-paused-goal', 'rearm-goal'])
 
 /**
+ * WHY A GOAL WAS DISARMED BY THE USER (2026-11-25).
+ *
+ * A goal the USER parked belongs to the user: the plugin must never hand it
+ * back on its own after a restart. The record has to say WHO took the goal
+ * away, so the boot can tell a user's park from the plugin's own disarms
+ * (`restart-queued` / `restart-blocking`) — an empty reason cannot.
+ */
+export const MANUAL_DISARM_REASON = 'manual-park'
+
+/**
  * How long a session-title lookup stays cached (ms).
  *
  * The client polls the health route every 2s; the session list is read at
@@ -795,6 +815,16 @@ function buildConfigSchema() {
         .description('How long the restart still waits after the market reported that it finished, to bridge the gap between two operations of its queue (milliseconds).'),
       marketUnreachableMaxBlockMs: schemastery.number().min(0).default(300000)
         .description('How long a remembered "the market is installing" answer keeps the restart waiting while the market status route cannot be reached (milliseconds). After this bound the market counts as NOT installing, so a silent market can never hold the host for ever. Default 300000 (5 minutes).'),
+      // THE MARKET QUEUE (2026-11-25). The market refuses to install while an
+      // agent is running and keeps the operation in a queue that lives in the
+      // BROWSER. The server-side status route answers "busy: false" in that
+      // window — the SERVER is idle, the QUEUE is not — so the probe above
+      // cannot see the operation and a restart would drop it on the floor. This
+      // switch turns on the second witness: the market's own log.
+      marketQueueWatch: schemastery.boolean().default(true)
+        .description('Also wait while the plugin market holds an update in its queue: the queue lives in the browser, so the market status route reports "idle" while an update waits, and the market log is the only witness of it.'),
+      marketQueueStaleMs: schemastery.number().min(0).default(MARKET_QUEUE_STALE_MS)
+        .description('How long a queued market update may hold the restart before it counts as abandoned (milliseconds). After this bound the entry no longer blocks, so a queue that never settles can never pin the host shut.'),
       pluginFilesWatch: schemastery.boolean().default(true)
         .description('Also wait while the profile plugin files are being changed (package.json, pnpm-lock.yaml, node_modules), which covers installs that never go through the market: a manual pnpm add, or the host plugin manager.'),
       pluginFilesStableMs: schemastery.number().min(0).default(15000)
@@ -930,6 +960,11 @@ const DEFAULTS = {
   marketProbeIntervalMs: 1500,
   marketInstallCooldownMs: INSTALL_COOLDOWN_MS,
   marketUnreachableMaxBlockMs: UNREACHABLE_MAX_BLOCK_MS,
+  // THE MARKET QUEUE (2026-11-25): the market's own log is the only witness of
+  // an update that waits in the browser's queue — the server-side status route
+  // reports "idle" while the queue is not idle.
+  marketQueueWatch: true,
+  marketQueueStaleMs: MARKET_QUEUE_STALE_MS,
   pluginFilesWatch: true,
   pluginFilesStableMs: PLUGIN_FILES_STABLE_MS,
   pluginFilesMaxBlockMs: PLUGIN_FILES_MAX_BLOCK_MS,
@@ -1071,6 +1106,15 @@ function normalizeConfig(raw) {
   config.marketUnreachableMaxBlockMs = Number.isFinite(unreachableMax) && unreachableMax >= 0
     ? Math.trunc(unreachableMax)
     : UNREACHABLE_MAX_BLOCK_MS
+  // THE MARKET QUEUE (2026-11-25). A hand-edited profile row must not be able
+  // to break the watch: the switch falls back to "watch", and the bound falls
+  // back to the default — the same rule the schema states. A broken value can
+  // therefore never turn into a blocker that never ends.
+  if (typeof config.marketQueueWatch !== 'boolean') config.marketQueueWatch = true
+  const queueStale = Number(config.marketQueueStaleMs)
+  config.marketQueueStaleMs = Number.isFinite(queueStale) && queueStale >= 0
+    ? Math.trunc(queueStale)
+    : MARKET_QUEUE_STALE_MS
   // THE PLUGIN-FILES WATCHDOG (2026-11-11). A hand-edited profile row must not
   // be able to break the watchdog: the switch falls back to "watch", and the two
   // durations are clamped to whole milliseconds that are not negative — the
@@ -1522,7 +1566,7 @@ function goalAwareBlockingDetails(runtime, blockedBy) {
  * nothing and touches no state field.
  *
  * @param {object} runtime
- * @returns {{sessionId: string, kind: 'disarmed'|'parked', goalId: string|null, disarmedAt: number|null, parkedAt: number|null, resumedAt: number|null, resumed: boolean, tookBackAt: number|null, thisBoot: boolean}[]}
+ * @returns {{sessionId: string, kind: 'disarmed'|'parked', goalId: string|null, disarmedAt: number|null, parkedAt: number|null, resumedAt: number|null, resumed: boolean, tookBackAt: number|null, reason: string|null, thisBoot: boolean}[]}
  */
 function parkedGoalList(runtime) {
   const out = []
@@ -1551,6 +1595,12 @@ function parkedGoalList(runtime) {
         // take such a goal away a second time in this cycle, and the interface
         // says so.
         tookBackAt: record.tookBackAt != null ? record.tookBackAt : null,
+        // WHO DISARMED THE GOAL. The plugin disarms a goal for the restart
+        // ('restart-queued' / 'restart-blocking'), the user stops it by hand
+        // ('manual-park'), and the records of the old builds carry no reason at
+        // all (null). The interface counts only the goals the plugin parked, so
+        // this field has to travel with the record all the way out.
+        reason: record.reason != null ? String(record.reason) : null,
         // THIS RUN parked it (the capsule counts only these).
         thisBoot: bootStartedAt != null && madeAt != null && madeAt >= bootStartedAt,
       })
@@ -4287,7 +4337,8 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
     try {
       // A HANDOFF IS NOT A RESTART: the record must not say that a restart
       // took this goal away, or the boot would give it back.
-      const result = disarmGoal(sourceId, requested === null ? callerAgent : undefined, { reason: null })
+      // WHY: the USER parked this goal, so the record must name the user as the one who disarmed it — a parked goal belongs to the user and is never handed back.
+      const result = disarmGoal(sourceId, requested === null ? callerAgent : undefined, { reason: MANUAL_DISARM_REASON })
       disarmedGoal = result.disarmed === true
     } catch (error) {
       log.warn(`could not disarm the goal of the handed-off session ${sourceId}:`, describeError(error))
@@ -4652,6 +4703,157 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
     }
   }
 
+  /* ------------------------------------------------------------------ *
+   * THE MARKET QUEUE (2026-11-25)
+   *
+   * THE PROBLEM: the market refuses to install while an agent is running and
+   * puts the operation into a queue that lives in the BROWSER. Until the
+   * session goes idle the browser keeps that request, and the market's own
+   * server-side status route reports `busy: false` — the SERVER is idle, the
+   * QUEUE is not. A restart in that window drops the queued operation on the
+   * floor, so the probe above cannot see it and the gate must look somewhere
+   * else.
+   *
+   * THE ONLY WITNESS is the market's own persistent NDJSON log
+   * (`<profileDir>/.dsh-market/log.ndjson`, see lib/market-queue.js): a package
+   * whose LAST known event is a refusal (`update-blocked`, `install-blocked`,
+   * `uninstall-blocked`) is still waiting, and a package whose last known
+   * event is a settlement (`update-start`, `update`, `install`, ...) has left
+   * the queue.
+   *
+   * FAIL OPEN: every failure mode here means "we cannot see", and a probe that
+   * cannot see must NEVER hold a restart hostage — the same rule the market
+   * probe follows. A missing log, an unreadable log, a line we cannot parse, a
+   * broken configuration: all of them answer "nothing is queued", and the
+   * restart proceeds exactly as it did before this block existed.
+   * ------------------------------------------------------------------ */
+  let marketQueueSampledAt = 0
+  let marketQueueText = null
+  /** Whether the log already announced the queue episode that is running now. */
+  let marketQueueEpisodeLogged = false
+
+  /**
+   * The market's log, next to the profile it belongs to, or null when unknown.
+   *
+   * WHY THE PROFILE DIRECTORY: the market writes its log beside the profile it
+   * serves, and `resolveProfileDir()` is the one resolver this file already
+   * uses for the profile's plugin files — so the path can never point at a
+   * second, different answer than the watchdog above uses.
+   *
+   * NEVER THROWS: a profile this host cannot resolve answers null, and null
+   * means "there is nothing to read".
+   */
+  const marketQueueLogPath = () => {
+    try {
+      const dir = resolveProfileDir()
+      return typeof dir === 'string' && dir !== ''
+        ? dir.replace(/[\\/]+$/, '') + '/' + MARKET_LOG_RELATIVE_PATH
+        : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The queue decision, from a log tail.
+   *
+   * EVERY FAILURE ANSWERS "NOTHING IS QUEUED": a parser that throws, a
+   * decision that throws, a bound that is not a number — all of them mean "we
+   * cannot see", and a probe that cannot see must never hold the host hostage.
+   *
+   * WHY THE BOUND IS CHECKED HERE AND NOT ONLY AT LOAD TIME: the config is
+   * normalized when it is read, so the bound is a finite number there. But a
+   * bound that is not a number would mean "no upper bound" to the decision,
+   * and a blocker without an upper bound is exactly the "the restart never
+   * happens" defect. So a bound that is not usable answers "nothing is
+   * queued" here too — the watch simply does not block.
+   */
+  const marketQueueDecisionOf = (text, now) => {
+    const staleAfterMs = Number(config.marketQueueStaleMs)
+    if (!Number.isFinite(staleAfterMs) || staleAfterMs < 0) {
+      return marketQueueDecision([], { now })
+    }
+    try {
+      return marketQueueDecision(parseMarketLogTail(text).queued, {
+        now,
+        staleAfterMs,
+      })
+    } catch {
+      return marketQueueDecision([], { now })
+    }
+  }
+
+  /**
+   * The queue decision, from a cached tail.
+   *
+   * WHY THE CACHE: the gate is asked on every tick, and the log only changes
+   * when the market writes a line. Reading a tail on every tick would be a
+   * small disk-read storm for a file that is quiet most of the time.
+   */
+  const marketQueueNow = (now = Date.now()) => {
+    // The watch is off: the market queue is not a reason to wait.
+    if (config.marketQueueWatch !== true) return marketQueueDecision([], { now })
+    if (marketQueueText !== null && now - marketQueueSampledAt < 2000) {
+      return marketQueueDecisionOf(marketQueueText, now)
+    }
+    marketQueueSampledAt = now
+    let text = ''
+    try {
+      const file = marketQueueLogPath()
+      text = file === null ? '' : readMarketLogTail(file)
+    } catch {
+      // A log we cannot read is a log we cannot see: nothing is queued.
+      text = ''
+    }
+    marketQueueText = text
+    return marketQueueDecisionOf(text, now)
+  }
+
+  /**
+   * The market queue as an EXTERNAL blocker.
+   *
+   * It blocks the gate, but it is not a conversation — `blockedBy` stays
+   * conversation-only, so the task count of the bubble can never count the
+   * market queue as a session.
+   */
+  const marketQueuedExternalBlockers = (now = Date.now()) => {
+    let decision = null
+    try {
+      decision = marketQueueNow(now)
+    } catch {
+      decision = marketQueueDecision([], { now })
+    }
+    if (decision === null || decision.blocking !== true) {
+      // The episode is over: the next one logs its own line again.
+      marketQueueEpisodeLogged = false
+      return []
+    }
+    // ONE LINE PER EPISODE (2026-11-25). The gate says "the market has a
+    // queued update"; the log says WHICH package and how long it has been
+    // waiting. It is written when the episode STARTS, not on every tick.
+    if (!marketQueueEpisodeLogged) {
+      marketQueueEpisodeLogged = true
+      try {
+        const name = typeof decision.packageName === 'string' && decision.packageName !== ''
+          ? decision.packageName
+          : 'an unnamed package'
+        log.info('the plugin market holds a queued update; the restart and the power-off wait for it:', `${name} has been waiting ${Math.round(decision.waitedMs / 1000)}s`)
+      } catch {
+        // A log that cannot be written is not a reason to hold the host hostage.
+      }
+    }
+    return [{
+      sessionId: null,
+      kind: 'market-queued',
+      reason: 'plugin-install',
+      label: '插件市场',
+      name: '插件市场有一个更新在排队，等会话空闲就开始装',
+      packageName: decision.packageName,
+      phase: null,
+      cooldown: false,
+    }]
+  }
+
   /**
    * The market as an EXTERNAL blocker: it blocks the gate, but it is not a
    * conversation — `blockedBy` stays conversation-only, so the task count of the
@@ -4734,8 +4936,12 @@ let queueDiagLog = { at: 0, requestedAt: 0 }
     }]
   }
 
-  /** Both external blockers: the market when it answers, the files always. */
+  /**
+   * Every external blocker: the market queue first (it is the one the probe
+   * cannot see), then the market install, then the plugin files.
+   */
   const externalBlockersNow = (now = Date.now()) => [
+    ...marketQueuedExternalBlockers(now),
     ...marketExternalBlockers(now),
     ...pluginFilesExternalBlockers(now),
   ]
@@ -8991,6 +9197,26 @@ function describeError(value) {
 }
 
 /**
+ * DID THE HOST ALREADY GIVE THE GOAL BACK? (bug, 2026-11-25)
+ *
+ * The goals service refuses to resume a goal that is `active` AND `armed`:
+ * `goal "<id>" is already active and armed` (GOAL_INVALID_TRANSITION). That
+ * refusal is NOT a failure — it says the goal is already running, so there is
+ * nothing left to give back: the RECORD is stale, not the goal. The host's own
+ * wording is what tells the two apart, so only that wording counts here: a
+ * different error (a stale revision, an exhausted round budget) stays a
+ * failure.
+ *
+ * @param {unknown} error
+ * @returns {boolean}
+ */
+function isAlreadyArmedError(error) {
+  if (error === null || typeof error !== 'object') return false
+  const message = typeof error.message === 'string' ? error.message : ''
+  return /already active and armed/i.test(message)
+}
+
+/**
  * Record the self-reported outcome of one recovery attempt for a session.
  *
  * Every return path of `recoverSession` calls this: a recovery that did nothing
@@ -9343,11 +9569,55 @@ async function recoverSession(ctx, runtime, entry, config) {
 
   let resumeError = null
   let resumeAction = null
+  // TRUE when the goal of this session is one that THIS plugin took away for
+  // the restart (the record names a restart reason). Such a goal must be given
+  // back BY THE PLUGIN, and a failure to give it back must leave a trace.
+  let pluginOwnedResume = false
+  // TRUE when the resume was refused because the goal is ALREADY RUNNING (the
+  // host armed it again): the goal is fine, so the session goes on the ORDINARY
+  // recovery path and is woken up — it is NOT closed as if it were stale.
+  let alreadyArmed = false
+
+  // (0) THE GOAL THIS PLUGIN DISARMED FOR THE RESTART — GIVEN BACK WHATEVER
+  // THE ACTIVATION SAYS (bug, 2026-11-25, session 534dee38).
+  //
+  // THE REAL MISS (session 534dee38: disarmed by this plugin at 00:47 with
+  // `reason = 'restart-blocking'`, cycle 937): the boot answered
+  // `lastRecoveryAction = 'prompt-continuation'` and the record's `resumedAt`
+  // stayed empty — the goal was NEVER given back. It matched neither (1) nor
+  // (3), because at boot the goal's `activation` was NOT `disarmed`: the host's
+  // own goal round driver had armed the goal again after the restart. The goal
+  // was running, but the plugin's record of the disarm was never closed, so the
+  // session was treated as "nothing to give back" and the work was dropped.
+  //
+  // WHY `activation` MUST NOT BE THE GATE: the activation is the HOST's
+  // process-local state (`armed` / `disarmed`), and it is NOT durable. The
+  // plugin's own `goals.disarm()` is gone with the old process, and the round
+  // driver may arm the goal again before this boot pass reaches it. The DURABLE
+  // fact is the RECORD: only the plugin that took a goal away may give it back,
+  // and the record says who took it (`reason`). So the OWNERSHIP of the disarm —
+  // not the activation — decides whether the goal is given back.
+  //
+  // `resume` itself is safe for an `active` goal: the goals service resumes
+  // the phases `active`, `paused` and `blocked`, and refuses only an `active`
+  // AND `armed` goal — which means it is already running (see
+  // `isAlreadyArmedError`).
+  //
+  // A record the USER stopped (`manual-park`) and a record of the previous
+  // build (no reason at all) are NOT ours to give back: they never reach this
+  // branch, because only a restart reason names the plugin as the owner.
+  const pluginDisarm = disarmed && typeof disarmed.reason === 'string' && RESTART_DISARM_REASONS.has(disarmed.reason)
+    ? disarmed
+    : null
+  if (pluginDisarm && goal && goal.phase === 'active' && pluginDisarm.goalId === goal.id) {
+    resumeAction = 'resume-disarmed-goal'
+    pluginOwnedResume = true
+  }
 
   // (1) The goal THIS plugin disarmed before the restart: it is still durably
   // `active` and only its activation is `disarmed`, so re-arming it with its
   // current revision lets the goal round driver continue the work.
-  if (goal && disarmed && goal.phase === 'active' && goal.activation === 'disarmed' && disarmed.goalId === goal.id) {
+  if (resumeAction === null && goal && disarmed && goal.phase === 'active' && goal.activation === 'disarmed' && disarmed.goalId === goal.id) {
     resumeAction = 'resume-disarmed-goal'
   }
 
@@ -9392,6 +9662,44 @@ async function recoverSession(ctx, runtime, entry, config) {
       resumeError = describeError(error)
       entry.lastResumeError = resumeError
       log.warn(`could not resume goal ${goal.id} of ${sessionId} (${resumeAction}):`, resumeError)
+      if (pluginOwnedResume) {
+        // A GOAL THIS PLUGIN TOOK AWAY MUST NOT BE LOST (bug, 2026-11-25).
+        //
+        // THE RESUME FAILED — AND THE TWO REASONS ARE NOT THE SAME:
+        //
+        // (a) THE GOAL IS ALREADY RUNNING: the host armed it again after the
+        //     restart (or the user gave it back), so the goals service refuses
+        //     the resume ("already active and armed"). NOTHING IS MISSING on
+        //     the goal's side — but the record must NOT be closed as if this
+        //     plugin had given the goal back, and the session must NOT be left
+        //     asleep either: it goes on the ORDINARY recovery path, so it is
+        //     woken up with the continuation message and the work continues.
+        //     Closing the record here is what made the work fall on the floor:
+        //     the goal was running, the session was asleep, and nothing in the
+        //     report said so.
+        //
+        // (b) IT REALLY CANNOT RUN ANY MORE: the goal is finished, or its round
+        //     budget is used up. Then the record is closed (there is nothing
+        //     left to give back) and the failure is recorded — NOT degraded
+        //     into a bare continuation message, which would hide the fact that
+        //     the goal was never given back.
+        if (isAlreadyArmedError(error)) {
+          alreadyArmed = true
+          log.info(`the goal ${goal.id} of session ${sessionId} is already armed by the host; the session is woken up to continue`)
+        } else {
+          const cannotRun = goal.phase === 'complete'
+            || (Number.isFinite(goal.roundsStarted)
+              && Number.isFinite(goal.maxGoalRounds)
+              && goal.roundsStarted >= goal.maxGoalRounds)
+          // ONLY A GOAL THAT CANNOT RUN ANY MORE MAY CLOSE THE RECORD.
+          if (cannotRun) stampResumedGoal(state, sessionId, { resumedAt: Date.now() })
+          const detail = `goal ${goal.id} could not be given back: ${resumeError}`
+          noteRecovery(state, sessionId, 'goal-rearm-failed', detail)
+          runtime.persist()
+          log.warn(`the goal ${goal.id} of session ${sessionId} was taken away by this plugin (${pluginDisarm.reason}) and could not be given back:`, resumeError)
+          return { sessionId, action: 'goal-rearm-failed', detail, error: resumeError }
+        }
+      }
     }
   }
 
@@ -9411,6 +9719,12 @@ async function recoverSession(ctx, runtime, entry, config) {
   // message still makes progress, and the reason is recorded for the operator.
   let pendingAction = 'prompt-continuation'
   let pendingDetail = resumeError ? `goal resume failed: ${resumeError}` : 'continuation message queued'
+  if (alreadyArmed) {
+    // THE GOAL IS ALREADY RUNNING (the host armed it again after the restart):
+    // the record stays OPEN — this plugin did not give the goal back — and the
+    // session is woken up right here, so the work does not fall on the floor.
+    pendingDetail = `the goal ${goal.id} is already armed by the host; the session is woken up to continue`
+  }
   if (goal === undefined) {
     pendingAction = 'goal-lookup-failed'
     pendingDetail = `${goalLookupError || 'goals.get returned no goal'}; continuation message queued`
@@ -10777,7 +11091,8 @@ export function buildLifecycleTools(runtime, config) {
       // THE USER PARKS THE GOAL ON PURPOSE: the record must not say that a
       // restart took it away, or the boot would give it back and wake the goal
       // the user silenced.
-      const result = runtime.disarmGoal(sessionId, sessionId === callerId ? agent : undefined, { reason: null })
+      // WHY: the USER parked this goal, so the record must name the user as the one who disarmed it — a parked goal belongs to the user and is never handed back.
+      const result = runtime.disarmGoal(sessionId, sessionId === callerId ? agent : undefined, { reason: MANUAL_DISARM_REASON })
       const payload = {
         ok: true,
         disarmed: result.disarmed === true,
@@ -11888,7 +12203,8 @@ function buildParkRoute(ctx, runtime, config) {
           try {
             // A MANUAL DISARM IS NOT A RESTART: the record must not say that
             // a restart took this goal away.
-            const result = runtime.disarmGoal(target, undefined, { reason: null })
+            // WHY: the USER parked this goal, so the record must name the user as the one who disarmed it — a parked goal belongs to the user and is never handed back.
+            const result = runtime.disarmGoal(target, undefined, { reason: MANUAL_DISARM_REASON })
             if (result.disarmed) disarmed.push(result)
             else reported.push(result)
           } catch (error) {

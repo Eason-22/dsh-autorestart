@@ -9,7 +9,7 @@ Restart DeepSeek Harness without losing the work that is currently running.
 
 Chinese version: [README.zh.md](docs/README.zh.md)
 
-Current version: **1.0.0**
+Current version: **1.0.1**
 
 ## What it does
 

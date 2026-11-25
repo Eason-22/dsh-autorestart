@@ -1,3 +1,53 @@
+## 1.0.1 — 2026-11-25
+
+中文 / English
+
+### 一、插件市场正在下载 / 安装时，不再重启
+
+以前有个坑：你在插件市场点了更新，市场发现有会话在跑，就把它排进队列等空闲；可重启闸看到的也是「会话空闲」，于是立刻重启——页面一刷新队列没了，更新永远装不完整。这一版让重启闸直接读市场自己的日志：**市场里有更新在排队、或者正在装，都算忙碌**，等它装完再重启。
+
+- 不用配置，默认开；日志读不到、解析失败、设置异常时一律当作「不阻塞」，绝不会因此把重启卡死。
+- 排队超过 30 分钟还没动静的，视为过期，不再挡着重启。
+
+### 二、目标是「谁缴的谁还」
+
+重启前插件会把正在自动续跑的目标临时收起来，好让会话空闲。以前它靠时间戳猜这笔账是谁记的，猜错两个方向都会出事：
+
+- **插件缴的，可能不还**：真实发生过一次（会话 `534dee38`），目标被松开后再也没被武装回来。
+- **你手动停的，可能被它自作主张拉起来**：只要停的时点落在某次重启周期里，就会被当成「重启缴的」。
+
+这一版记录里写清「为什么缴的」，归还只认这个字段：**插件为重启缴的，插件一定还；你手动停的，插件一律不碰；来历不明、判断不了的旧记录，不主动恢复。**
+
+另外「还不上」这件事以前是静默的，现在会明说（哪个会话、哪个目标、什么原因）。
+
+### 三、气泡上的「已停泊 N 个 goal」只数插件停的
+
+那句话里的数字以前把你自己停的也算进去了，读起来像插件替你保管着。现在只数插件自己停的目标。文案一个字没改。
+
+## English
+
+### 1. No restart while the plugin market is downloading or installing
+
+When you updated a plugin from the market, the market saw an active session and queued the install. The restart gate saw "idle sessions" instead and restarted right away — the page reloaded, the queue was gone, and the update never finished. The gate now reads the market's own log: **a queued update, or an install in progress, counts as busy**.
+
+- No configuration; on by default. If the log is missing, unreadable or malformed, it is treated as "not blocking" — it can never stall a restart.
+- An entry that has been queued for more than 30 minutes is stale and no longer blocks.
+
+### 2. A disarmed goal is given back by whoever disarmed it
+
+Before a restart the plugin disarms goals that keep driving themselves, so their sessions can go idle. It used to guess who took a goal away from a timestamp, and guessing wrong broke both ways:
+
+- **A goal the plugin took could stay taken**: this really happened (session `534dee38`) — the goal was never armed again.
+- **A goal you stopped by hand could be re-armed against your wish**, whenever the stop fell inside a restart cycle.
+
+The record now says why the goal was taken away, and only that field decides: **what the plugin took for a restart it always gives back; what you stopped by hand it never touches; a record whose origin cannot be determined is not restored on its own.**
+
+"Could not give it back" used to be silent; it now names the session, the goal and the reason.
+
+### 3. The pill counter "N goals parked" now counts only the plugin's own
+
+That number used to include goals you stopped yourself, which read as if the plugin was holding them for you. It now counts only the goals the plugin parked. The wording is unchanged.
+
 ## 1.0.0 — 2026-11-25
 
 中文 / English

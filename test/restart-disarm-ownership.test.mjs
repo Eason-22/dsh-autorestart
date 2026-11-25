@@ -168,9 +168,11 @@ test('R1: a disarm that happened BEFORE the later requester is adopted all the s
   assert.equal(pending[0].goal.goalId, 'goal-1')
 })
 
-test('R2: a record of the previous build is only claimed by its timestamps', () => {
+test('R2: a record of the previous build is never claimed (it has no reason)', () => {
   // No reason, no cycle, no revision: the previous build wrote nothing but
-  // the timestamp, so the timestamp is all there is.
+  // the timestamp. The ownership of the disarm is read from the reason, so
+  // there is nothing in this record that says the PLUGIN took the goal away:
+  // it is not ours to give back, whatever the timestamps say.
   const state = stateWith({
     restart: { requestedAt: 1000 },
     sessions: {
@@ -180,10 +182,10 @@ test('R2: a record of the previous build is only claimed by its timestamps', () 
       'session-old': { goalId: 'goal-old', disarmedAt: 999, resumedAt: null },
     },
   })
-  assert.deepEqual(recoverableSessions(state, { now: 2000 }), [], 'the disarm is older than the request: it is history')
+  assert.deepEqual(recoverableSessions(state, { now: 2000 }), [], 'no reason: the record is not ours to give back')
   // The same record, read by a clock that is a day later: it is older than the
-  // request AND older than the age bound — it is history either way.
-  assert.deepEqual(recoverableSessions(state, { now: 1_700_000_000_000 }), [], 'a day later it is still history')
+  // age bound as well — it is not claimed either way.
+  assert.deepEqual(recoverableSessions(state, { now: 1_700_000_000_000 }), [], 'a day later it is still not claimed')
 })
 
 test('R2: a record of the previous build without a session is an orphan, not pending work', () => {
@@ -198,8 +200,9 @@ test('R2: a record of the previous build without a session is an orphan, not pen
 
 test('R2 (the age bound): a record of the previous build that is older than a day is not claimed', () => {
   // A record that was never resumed is never pruned, so without an age bound
-  // it would come back on every single boot. Here the record is NEWER than the
-  // request (so the request moment does not reject it) but a day old.
+  // it would come back on every single boot. Here the record is a day old:
+  // the age bound is what rejects it, and the bound applies to EVERY record —
+  // to the ones that name a restart just as much as to the ones that do not.
   const now = 1_700_000_000_000
   const state = stateWith({
     restart: { requestedAt: 1000 },
@@ -360,16 +363,21 @@ test('R8: a disarm that names no reason does not throw the reason away', () => {
 })
 
 /* ------------------------------------------------------------------ *
- * ⑥ THE LEGACY FALLBACK, ON THE PRODUCTION PATH (review O1).
+ * ⑥ A RECORD OF THE PREVIOUS BUILD IS NOT OURS (user decision, 2026-11-25).
  *
- * A record of the previous build has no `reason`, so the boot decides about it
- * with the timestamps: the disarm has to be at least as new as the START of
- * the restart cycle, and it must not be older than a day (a record that was
- * never resumed is never pruned).
+ * A record of the previous build has no `reason`: nothing in it says that
+ * the PLUGIN took the goal away. The ownership of a disarm is read from the
+ * reason and from NOTHING else — the old rule GUESSED it from the timestamps
+ * ("no reason, but it happened after the cycle started → it must be ours"),
+ * and that guess handed back the goals the user had stopped on purpose. So
+ * such a record is left exactly where it is: it is not claimed, not even
+ * when the timestamps would have said yes (C1).
+ *
+ * The age bound still applies to EVERY record (C3, D1, D3), and a record
+ * whose session is gone is dropped as an orphan (R2).
  *
  * The start of the cycle lives in the STATE (`state.restartCycleStartedAt`),
- * because that is where `requestRestart` writes it. These cases go through
- * that very field, so the fallback is covered where it actually runs.
+ * because that is where `requestRestart` writes it (C4).
  * ------------------------------------------------------------------ */
 
 /** The state of a host that is waiting for a restart, with a legacy record. */
@@ -386,16 +394,22 @@ function legacyState({ disarmedAt = 2000, now = 6000 } = {}) {
   })
 }
 
-test('C1: a record of the previous build is claimed by the start of the cycle', () => {
-  const pending = recoverableSessions(legacyState(), { now: 6000 })
-  assert.equal(pending.length, 1, 'the record has no reason: the cycle start decides')
-  assert.equal(pending[0].pendingResume, true)
-  assert.equal(pending[0].goal.goalId, 'goal-1')
+test('C1: a record of the previous build is NOT claimed any more (it has no reason to prove the plugin did it)', () => {
+  // WHY: the ownership of a disarm is read from its `reason` and from NOTHING
+  // else. The old rule GUESSED it from the timestamps ("no reason, but it
+  // happened after the start of the cycle → it must be ours"), and that guess
+  // handed back the goals the user had stopped on purpose. A record without a
+  // reason is not ours: it is not claimed, not even when the timestamps would
+  // have said "this one is ours".
+  const state = legacyState()
+  const pending = recoverableSessions(state, { now: 6000 })
+  assert.equal(pending.length, 0, 'the record has no reason: nobody can prove the plugin took the goal away')
+  assert.notEqual(state.sessions['session-a'].pendingResume, true, 'and the session is not made pending work either')
 })
 
 test('C2: a record of the previous build that is older than the cycle is history', () => {
   const state = legacyState({ disarmedAt: 999 })
-  assert.deepEqual(recoverableSessions(state, { now: 6000 }), [], 'the disarm is older than the cycle start')
+  assert.deepEqual(recoverableSessions(state, { now: 6000 }), [], 'the disarm is older than the cycle start (and a record with no reason is never claimed anyway)')
 })
 
 test('C3: a record of the previous build that is more than a day old is not claimed', () => {

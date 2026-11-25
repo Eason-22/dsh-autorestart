@@ -25,6 +25,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   apply,
   featureAnnouncements,
+  GATE_FEATURE_VERSION,
   pluginVersion,
   PLUGIN_VERSION_FALLBACK,
   SLEEP_FEATURE_VERSION,
@@ -253,6 +254,7 @@ test('the version of the announcement is the FEATURE version, not the package ve
     [
       { feature: 'sleep', version: SLEEP_FEATURE_VERSION },
       { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION },
+      { feature: 'gate', version: GATE_FEATURE_VERSION },
     ],
     'the announcement must carry the FEATURE version',
   )
@@ -312,7 +314,7 @@ test('a release does not bring the announcement back', async () => {
   assert.equal(module.pluginVersion(), '9.9.9', 'the clone must really run the new package version')
   assert.deepEqual(
     module.featureAnnouncements(),
-    [{ feature: 'sleep', version: '0.5.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }],
+    [{ feature: 'sleep', version: '0.5.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }, { feature: 'gate', version: GATE_FEATURE_VERSION }],
     'the announcement must not follow the version of the package',
   )
 
@@ -382,7 +384,7 @@ test('a new FEATURE version brings the announcement back on purpose', async () =
   const { module } = await clonePlugin('feature', { featureVersion: '0.6.0' })
   assert.deepEqual(
     module.featureAnnouncements(),
-    [{ feature: 'sleep', version: '0.6.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }],
+    [{ feature: 'sleep', version: '0.6.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }, { feature: 'gate', version: GATE_FEATURE_VERSION }],
     'the clone must really run the new feature version',
   )
 
@@ -404,7 +406,7 @@ test('a FEATURE version above the record brings the announcement back', async ()
   const { module } = await clonePlugin('feature-070', { featureVersion: '0.7.0' })
   assert.deepEqual(
     module.featureAnnouncements(),
-    [{ feature: 'sleep', version: '0.7.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }],
+    [{ feature: 'sleep', version: '0.7.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }, { feature: 'gate', version: GATE_FEATURE_VERSION }],
     'the clone must really run the new feature version',
   )
 
@@ -627,7 +629,11 @@ const INSTALL_ANSWERED = {
 function mountAnnouncementPanel({
   storage,
   fetches,
-  pending = [{ feature: 'sleep', version: '0.5.0' }, { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION }],
+  // THE HOST'S OWN LIST (2026-11-24): the fake Host answers with exactly the
+  // announcements the real Host reports — the graceful shutdown, the
+  // self-starting supervisor and the gate. A card for a new feature is
+  // therefore covered by the DEFAULT too, not only by a test that names it.
+  pending = featureAnnouncements(),
   sleepStatus = { ok: true, phase: 'idle', countdownSeconds: 30, showSleepButton: true },
 }) {
   const source = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
@@ -771,6 +777,11 @@ test('the "知道了" button records the announcement and the card disappears', 
   const mounted = mountAnnouncementPanel({
     storage: createStorage({ ...INSTALL_ANSWERED }),
     fetches,
+    // THIS TEST IS ABOUT THE CARD OF THE SHUTDOWN (2026-11-24): the Host
+    // announces the gate as well, and that card waits behind this one — see
+    // 'the announcements of the Host cover the gate' below. Here the Host
+    // reports the shutdown only, so the card can really disappear.
+    pending: [{ feature: 'sleep', version: SLEEP_FEATURE_VERSION }],
   })
 
   mounted.render()
@@ -789,6 +800,77 @@ test('the "知道了" button records the announcement and the card disappears', 
   const posts = announcementPosts(fetches)
   assert.equal(posts.length, 1, 'the Host must be told exactly once')
   assert.deepEqual(JSON.parse(posts[0].init.body), { feature: 'sleep' })
+})
+
+test('the card of the gate quotes announcement.gate.* and records the gate announcement', async () => {
+  const fetches = []
+  const mounted = mountAnnouncementPanel({
+    storage: createStorage({ ...INSTALL_ANSWERED }),
+    fetches,
+    pending: [{ feature: 'gate', version: GATE_FEATURE_VERSION }],
+  })
+
+  mounted.render()
+  await settle()
+  const tree = mounted.render()
+  assert.ok(tree, 'the card of the gate must be shown')
+  assert.equal(tree.props.role, 'status', 'the card must be a status block, not a modal')
+  assert.equal(tree.props['data-dsh-autorestart-announcement-feature'], 'gate')
+
+  // THE COPY OF THE GATE IS ITS OWN (2026-11-24): the card carries
+  // announcement.gate.* — not the copy of the graceful shutdown.
+  const zh = JSON.parse(fs.readFileSync(new URL('../locale/zh.json', import.meta.url), 'utf8'))
+  const text = textOf(tree)
+  assert.ok(text.includes(zh.announcement.gate.title), 'the title must come from announcement.gate.title')
+  assert.ok(text.includes(zh.announcement.gate.line1), 'the first line must come from announcement.gate.line1')
+  assert.ok(text.includes(zh.announcement.gate.line2), 'the second line must come from announcement.gate.line2')
+  assert.ok(text.includes(zh.announcement.gate.line3), 'the third line must come from announcement.gate.line3')
+  assert.ok(text.includes(zh.announcement.gate.button), 'the button must come from announcement.gate.button')
+
+  const button = walk(tree).find(
+    (node) => node.type === 'button' && node.props['data-dsh-autorestart-announcement-ack'],
+  )
+  assert.ok(button, 'the card must offer the "知道了" button')
+  button.props.onClick()
+
+  await settle()
+  assert.equal(mounted.render(), null, 'the card must disappear once it was recorded')
+  const posts = announcementPosts(fetches)
+  assert.equal(posts.length, 1, 'the Host must be told exactly once')
+  assert.deepEqual(JSON.parse(posts[0].init.body), { feature: 'gate' })
+})
+
+test('the announcements of the Host cover the gate: the card of the gate follows the card of the shutdown', async () => {
+  // THE LIST OF THE HOST (2026-11-24): the fake Host answers with the
+  // announcements the real Host reports, so the card of the gate is covered by
+  // the DEFAULT — one card at a time, the next one waits behind it.
+  const fetches = []
+  const mounted = mountAnnouncementPanel({
+    storage: createStorage({ ...INSTALL_ANSWERED }),
+    fetches,
+  })
+
+  mounted.render()
+  await settle()
+  const first = mounted.render()
+  assert.ok(first, 'the card of the shutdown must be shown first')
+  assert.equal(first.props['data-dsh-autorestart-announcement-feature'], 'sleep')
+
+  const button = walk(first).find(
+    (node) => node.type === 'button' && node.props['data-dsh-autorestart-announcement-ack'],
+  )
+  assert.ok(button, 'the card must offer the "知道了" button')
+  button.props.onClick()
+
+  await settle()
+  const second = mounted.render()
+  assert.ok(second, 'the card of the gate must take the place of the recorded one')
+  assert.equal(second.props['data-dsh-autorestart-announcement-feature'], 'gate')
+  assert.deepEqual(
+    JSON.parse(announcementPosts(fetches)[0].init.body),
+    { feature: 'sleep' },
+    'the Host must be told about the shutdown only',
+  )
 })
 
 test('the card stays until the user answered it', async () => {
@@ -864,8 +946,32 @@ test('the copy of the card lives in the locale files', () => {
     assert.equal(dictionaries.en[clientKey], en.announcement[fileKey], `en.${fileKey} must match the client copy`)
   }
 
+  // THE GATE HAS ITS OWN COPY (2026-11-24): it lives under announcement.gate,
+  // so the mapping above cannot reach it — it is checked on its own.
+  const gateMapping = {
+    'announcement.gate.title': 'title',
+    'announcement.gate.line1': 'line1',
+    'announcement.gate.line2': 'line2',
+    'announcement.gate.line3': 'line3',
+    'announcement.gate.button': 'button',
+  }
+  for (const [clientKey, fileKey] of Object.entries(gateMapping)) {
+    assert.equal(
+      dictionaries.zh[clientKey],
+      zh.announcement.gate[fileKey],
+      `zh.announcement.gate.${fileKey} must match the client copy`,
+    )
+    assert.equal(
+      dictionaries.en[clientKey],
+      en.announcement.gate[fileKey],
+      `en.announcement.gate.${fileKey} must match the client copy`,
+    )
+  }
+
   assert.match(zh.announcement.disabled, /目前关闭/, 'the zh copy must say that the button is off')
   assert.match(en.announcement.disabled, /switched off/, 'the en copy must say that the button is off')
   assert.match(zh.announcement.button, /知道了/)
   assert.match(en.announcement.button, /Got it/)
+  assert.match(zh.announcement.gate.button, /知道了/, 'the gate card must offer the same button')
+  assert.match(en.announcement.gate.button, /Got it/, 'the gate card must offer the same button')
 })

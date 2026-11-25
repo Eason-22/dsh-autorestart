@@ -808,7 +808,7 @@ test('the sleep route answers with exactly the agreed shape', async () => {
   assert.equal(res.statusCode, 200)
   const payload = JSON.parse(res.body)
   assert.deepEqual(Object.keys(payload).sort(), [
-    'armed', 'armedAt', 'backupIncludePlugins', 'backupOnRestart', 'blockers', 'countdownSeconds', 'dryRun', 'host', 'lastLaunch', 'lastRun', 'message', 'ok', 'phase', 'quietForMs', 'remainingMs', 'restartGraceMs', 'restartWindow', 'showSleepButton',
+    'armed', 'armedAt', 'backupIncludePlugins', 'backupOnRestart', 'blockers', 'countdownSeconds', 'dryRun', 'gateOnSleep', 'host', 'lastLaunch', 'lastRun', 'message', 'ok', 'phase', 'quietForMs', 'remainingMs', 'restartGraceMs', 'restartWindow', 'showSleepButton',
   ])
   assert.equal(payload.restartWindow, 'background', 'the restart helper runs in the background unless asked otherwise')
   assert.equal(payload.lastLaunch, null, 'nothing was restarted on this machine yet')
@@ -1763,14 +1763,13 @@ test('the section shows two titled groups, the restart one first', async () => {
   )
   assert.deepEqual(
     groups.map((node) => node.props['data-dsh-autorestart-group']),
-    ['restart', 'shutdown', 'supervisor', 'report'],
+    ['restart', 'shutdown', 'report'],
     'the restart group must come before the shutdown group',
   )
   const titles = groups.map((group) => textOf(group.children[0]))
   assert.equal(titles[0], '重启相关设置', 'the restart group must have a visible title')
   assert.equal(titles[1], '关机相关设置', 'the shutdown group must have a visible title')
-  assert.equal(titles[2], '开机自启', 'the supervisor group must have a visible title')
-  assert.equal(titles[3], '遇到问题', 'the report group must have a visible title')
+  assert.equal(titles[2], '遇到问题', 'the report group must have a visible title')
 
   // The restart group carries the wait, the two backup switches and the copy
   // limit. The restart window and the plugin-folder watchdog moved into the
@@ -1778,12 +1777,15 @@ test('the section shows two titled groups, the restart one first', async () => {
   const restartControls = walk(groups[0]).filter(
     (node) => node.type === 'select' || node.type === 'input',
   )
-  assert.equal(restartControls.length, 5, 'the restart group has exactly five controls')
+  assert.equal(restartControls.length, 9, 'the restart group has five rows and the four of the fold')
   const restartKeys = restartControls.map((node) => node.props['data-dsh-autorestart-setting'])
   assert.deepEqual(
     restartKeys,
-    ['restartGraceMs', 'backupOnRestart', 'backupIncludePlugins', 'maxBackups', 'maxCompareFiles'],
-    'the restart group carries the wait, the two backup switches and the copy limit, and nothing else',
+    [
+      'restartGraceMs', 'restartWindow', 'backupOnRestart', 'backupIncludePlugins', 'maxBackups',
+      'pluginFilesWatch', 'pluginFilesStableMs', 'pluginFilesMaxBlockMs', 'maxCompareFiles',
+    ],
+    'the restart group carries its five rows and the four rows of the 「更多设置」 fold',
   )
   // The 「更多设置」 block: a block of its own, closed by default, standing
   // AFTER the shutdown settings and BEFORE 「遇到问题」.
@@ -1796,19 +1798,19 @@ test('the section shows two titled groups, the restart one first', async () => {
     walk(advanced)
       .filter((node) => node.type === 'select' || node.type === 'input')
       .map((node) => node.props['data-dsh-autorestart-setting']),
-    ['restartWindow', 'pluginFilesWatch', 'pluginFilesStableMs', 'pluginFilesMaxBlockMs'],
+    ['pluginFilesWatch', 'pluginFilesStableMs', 'pluginFilesMaxBlockMs', 'maxCompareFiles'],
     'the block carries the restart window and the plugin-folder watchdog',
   )
 
-  // The shutdown group carries exactly one: the countdown.
+  // The shutdown group carries the countdown and the gate of the shutdown.
   const shutdownControls = walk(groups[1]).filter(
     (node) => node.type === 'select' || node.type === 'input',
   )
-  assert.equal(shutdownControls.length, 1, 'the shutdown group has exactly one control')
-  assert.equal(
-    shutdownControls[0].props['data-dsh-autorestart-setting'],
-    'sleepCountdownSeconds',
-    'the shutdown group carries the countdown',
+  assert.equal(shutdownControls.length, 2, 'the shutdown group has exactly two controls')
+  assert.deepEqual(
+    shutdownControls.map((node) => node.props['data-dsh-autorestart-setting']),
+    ['sleepCountdownSeconds', 'gateOnSleep'],
+    'the shutdown group carries the countdown and the gate switch',
   )
 
   // The dropdowns show the values the Host reports. Seven of them now: the two
@@ -1846,12 +1848,14 @@ test('the section shows two titled groups, the restart one first', async () => {
   const numbers = inputs.filter((node) => node.props.type === 'number')
   assert.equal(numbers.length, 0, 'the section has no number input left')
   const switches = inputs.filter((node) => node.props.type !== 'number')
-  assert.equal(switches.length, 3, 'the section has exactly three switches')
+  assert.equal(switches.length, 4, 'the section has exactly four switches')
   const switchByKey = new Map(switches.map((node) => [node.props['data-dsh-autorestart-setting'], node]))
   assert.equal(switchByKey.get('backupOnRestart').props.checked, true)
   assert.equal(switchByKey.get('backupIncludePlugins').props.checked, false)
   // The watchdog is ON unless the Host reports it switched off.
   assert.equal(switchByKey.get('pluginFilesWatch').props.checked, true)
+  // The gate of the shutdown is ON unless the Host reports it switched off.
+  assert.equal(switchByKey.get('gateOnSleep').props.checked, true)
 
   // The labels and the explanation are on the page.
   const shown = textOf(panel)

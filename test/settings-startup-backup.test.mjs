@@ -346,63 +346,11 @@ test('the desktop client shows no startup block at all', async () => {
   assert.equal(folds.length, 0, 'no supervisor fold either')
 })
 
-test('an unknown host stays hidden — not shown and misleading', async () => {
-  const mounted = mountSettings({
-    info: {
-      instance: { isDesktopApp: false, platform: 'linux' },
-      supervisor: { mode: 'auto', installed: false },
-      restart: { mode: 'command', command: '', written: false, canRevert: false, previous: null },
-    },
-  })
-  const panel = await mounted.settled('dsh-autorestart')
-  const status = marked(panel, 'data-dsh-autorestart-supervisor').filter(
-    (node) => node.props['data-dsh-autorestart-supervisor'] === 'startup-status',
-  )
-  assert.equal(status.length, 1, 'the line is there')
-  assert.equal(textOf(status[0]), '我看不出你是怎么启动的（我不猜，也不会自己乱拉）', 'the honest copy')
-  // Nothing that writes a command.
-  const writes = marked(panel, 'data-dsh-autorestart-supervisor').filter(
-    (node) => node.props['data-dsh-autorestart-supervisor'] === 'apply'
-      || node.props['data-dsh-autorestart-supervisor'] === 'derive',
-  )
-  assert.equal(writes.length, 0, 'an unknown host gets no button that writes a command')
-})
-
-test('a hosted host that somebody else supervises sees one line and two small actions', async () => {
-  const mounted = mountSettings({
-    info: {
-      instance: { isDesktopApp: false, platform: 'linux' },
-      supervisor: {
-        mode: 'external',
-        installed: false,
-        startup: { mode: 'external', evidence: 'parent:1234: supervise.sh' },
-      },
-      restart: { mode: 'command', command: '', written: false, canRevert: false, previous: null },
-    },
-  })
-  const panel = await mounted.settled('dsh-autorestart')
-  const nodes = marked(panel, 'data-dsh-autorestart-supervisor')
-  const status = nodes.filter((node) => node.props['data-dsh-autorestart-supervisor'] === 'startup-status')
-  assert.equal(status.length, 1, 'exactly one line')
-  assert.equal(textOf(status[0]), '我记下的启动方式：由你自己的程序拉起（重启交给它，我不插手）', 'the plain copy')
-
-  const redetect = nodes.filter((node) => node.props['data-dsh-autorestart-supervisor'] === 'redetect')
-  assert.equal(redetect.length, 1, 'the "detect again" action')
-  const revert = nodes.filter((node) => node.props['data-dsh-autorestart-supervisor'] === 'revert')
-  assert.equal(revert.length, 1, 'the "undo" action')
-  assert.equal(revert[0].props.disabled, true, 'nothing to undo → the button says so')
-
-  // The command itself is folded away, and it is not in the page yet. The backup
-  // group has its own folds, so the SUPERVISOR one is selected by its marker.
-  const folds = walk(panel).filter(
-    (node) => node.type === 'details' && node.props['data-dsh-autorestart-supervisor'] === 'details',
-  )
-  assert.equal(folds.length, 1, 'the supervisor fold exists')
-  assert.equal(folds[0].props.open, undefined, 'the fold starts closed')
-  assert.equal(textOf(folds[0].children[0]), '技术细节', 'the fold says "technical details"')
-})
-
-test('a bare host that has no command yet gets the "help me" button', async () => {
+test('the 「开机自启」 group is not on the settings page any more', async () => {
+  // The plugin decides by itself how this host is started (the desktop client
+  // brings itself back, a hosted instance is brought by its orchestrator), so
+  // the page must not offer a choice the user cannot get right (user
+  // decision, 2026-11-24).
   const mounted = mountSettings({
     info: {
       instance: { isDesktopApp: false, platform: 'linux' },
@@ -411,66 +359,24 @@ test('a bare host that has no command yet gets the "help me" button', async () =
     },
   })
   const panel = await mounted.settled('dsh-autorestart')
-  const nodes = marked(panel, 'data-dsh-autorestart-supervisor')
-  const status = nodes.filter((node) => node.props['data-dsh-autorestart-supervisor'] === 'startup-status')
-  assert.equal(textOf(status[0]), '我还不知道怎么把你拉起来', 'the honest copy')
-  const derive = nodes.filter((node) => node.props['data-dsh-autorestart-supervisor'] === 'derive')
-  assert.equal(derive.length, 1, 'the "help me find out how to restart" button')
-  assert.equal(textOf(derive[0]), '帮我看看怎么重启')
-})
+  assert.ok(panel, 'the settings section must be rendered')
 
-test('a bare host with a confirmed command says so', async () => {
-  const mounted = mountSettings({
-    info: {
-      instance: { isDesktopApp: false, platform: 'linux' },
-      supervisor: { mode: 'auto', installed: false, startup: { mode: 'bare' } },
-      restart: { mode: 'command', command: 'node /srv/dsh/web.js', written: true, canRevert: true, previous: null },
-    },
-  })
-  const panel = await mounted.settled('dsh-autorestart')
-  const status = marked(panel, 'data-dsh-autorestart-supervisor').filter(
-    (node) => node.props['data-dsh-autorestart-supervisor'] === 'startup-status',
+  const names = walk(panel)
+    .filter((node) => typeof node.props['data-dsh-autorestart-group'] === 'string')
+    .map((node) => node.props['data-dsh-autorestart-group'])
+  assert.equal(names.includes('supervisor'), false, 'the 「开机自启」 group is gone')
+  assert.deepEqual(
+    names,
+    ['restart', 'advanced', 'shutdown', 'report'],
+    'the page has the restart group, the 「更多设置」 fold, the shutdown group and the report group',
   )
-  assert.equal(textOf(status[0]), '我记下的启动方式：按你确认过的那条命令重启')
-  const revert = marked(panel, 'data-dsh-autorestart-supervisor').filter(
-    (node) => node.props['data-dsh-autorestart-supervisor'] === 'revert',
+  const keys = marked(panel, 'data-dsh-autorestart-supervisor').map(
+    (node) => node.props['data-dsh-autorestart-supervisor'],
   )
-  assert.equal(revert[0].props.disabled, false, 'there is something to undo')
+  for (const forbidden of ['startup-status', 'derive', 'redetect', 'revert', 'apply', 'details', 'written', 'previous']) {
+    assert.equal(keys.includes(forbidden), false, 'the page must not show ' + forbidden)
+  }
 })
-
-test('the command text only appears after the fold was opened', async () => {
-  const mounted = mountSettings({
-    info: {
-      instance: { isDesktopApp: false, platform: 'linux' },
-      supervisor: { mode: 'auto', installed: false, startup: { mode: 'bare' } },
-      restart: {
-        mode: 'command',
-        command: 'node /srv/dsh/web.js --port 5601',
-        written: true,
-        canRevert: true,
-        previous: { restartMode: 'app', restartCommand: '' },
-      },
-    },
-  })
-  const panel = await mounted.settled('dsh-autorestart')
-
-  // The command is NOT in the page while the fold is closed.
-  assert.equal(textOf(panel).includes('node /srv/dsh/web.js'), false, 'the command is not shown by default')
-  const fold = walk(panel).find(
-    (node) => node.type === 'details' && node.props['data-dsh-autorestart-supervisor'] === 'details',
-  )
-  assert.ok(fold, 'the fold exists')
-
-  // The user opens it: the command is there.
-  fold.props.onToggle({ target: { open: true } })
-  const opened = mounted.render('dsh-autorestart')
-  assert.equal(textOf(opened).includes('node /srv/dsh/web.js --port 5601'), true, 'the command is visible now')
-  assert.equal(textOf(opened).includes('以下是插件实际会执行的命令'), true, 'the fold explains what it shows')
-})
-
-/* ------------------------------------------------------------------ *
- * The backups on disk.
- * ------------------------------------------------------------------ */
 
 test('the backup list reads the directory, not the copies inside it', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-autorestart-backups-'))
@@ -1852,12 +1758,6 @@ test('a derivation that cannot produce a command explains itself and writes noth
   assert.ok(note, 'the failure is said out loud')
   assert.match(textOf(note), /端口每次都变/, `the Host's reason in the user's words: ${textOf(note)}`)
   assert.equal(marked(after, 'data-dsh-autorestart-restart-fixed').length, 0, 'nothing pretends to be configured')
-  // …and the manual route is still on the page.
-  assert.ok(
-    marked(after, 'data-dsh-autorestart-supervisor')
-      .some((node) => node.props['data-dsh-autorestart-supervisor'] === 'redetect'),
-    'the manual entry stays where it was',
-  )
 })
 
 test('a host that already has its command is left alone', async () => {

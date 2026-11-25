@@ -9,7 +9,7 @@ Restart DeepSeek Harness without losing the work that is currently running.
 
 Chinese version: [README.zh.md](docs/README.zh.md)
 
-Current version: **0.9.14**
+Current version: **1.0.0**
 
 ## What it does
 
@@ -22,6 +22,8 @@ Three small things, all around restarting.
 **3. It clears the login cookies.** Every launch leaves a `dsh-auth-*` entry behind; they pile up until the request header overflows (~16 KB), the server answers 431, and the client can only say `Web authentication failed`. The plugin clears those stale credentials before each restart and records the outcome in `last-cookie-clear.json`.
 
 There is also a **countdown shutdown**: a moon button at the bottom of the sidebar waits for every conversation to finish, counts down on screen, and powers the machine off.
+
+**4. It stops asking you questions once you have gone.** While that countdown shutdown is armed, the tools that ask you to decide something are held back: the model is told you are away, that the question belongs in the reply body, and that it should carry on with what you already approved. Turn the switch off and nothing is held back. Only the ask-type tools are affected — writing files, running commands and delegating work pass untouched — and it adds nothing permanent to a conversation: the only text is the one line a blocked question gets back.
 
 ## What it does not do
 
@@ -69,6 +71,7 @@ The settings page writes these; the defaults are the ones in the code.
 | `maxBackups` | `2` | How many copies to keep (2–10). Its dropdown is a row of its own under **Back up before a restart** — no longer inside the **Backup info** fold. Past that number the oldest copy is deleted; shrinking asks first how many copies will go |
 | `restartCommandTimeoutMs` | `30000` | How long the restart command may run before the plugin stops waiting for it |
 | `showSleepButton` | `true` | Show the countdown-shutdown button |
+| `gateOnSleep` | `true` | While the countdown shutdown is armed, hold back the tools that ask the user a question. On by default; turn it off and no guard is registered at all |
 | `sleepCountdownSeconds` | `10` | Countdown length before powering off — a dropdown: `0` / `10` / `20` / `30` / `60` seconds. `10` is only the default for an instance that never set it: a profile that already stores `20` (or `30`, or `60`) keeps that value — nothing is migrated or overwritten |
 | `sleepCommand` | `''` | Override the power-off command |
 | `resumeOnBoot` | `true` | Resume interrupted sessions after a restart |
@@ -103,9 +106,8 @@ under it, behind a faint vertical line, and greyed out (its control cannot be us
 | Section | What is in it |
 |---|---|
 | **Restart settings** | The wait before the restart, **Back up before a restart** with **two subordinate rows** — **Include the installed plugins in the backup** and **Copies kept** — and the **Backup info** fold (read-only) |
-| **Shutdown settings** | The countdown of the graceful shutdown |
+| **Shutdown settings** | The countdown of the graceful shutdown, and the row under it: **hold the questions while I am away** |
 | **More settings** | A block of its own, **closed by default**: how the restart command script runs, and the plugin-folder watchdog |
-| **Start at login** | How "start at login" works on *this* machine, with copyable commands. The plugin never changes your system configuration for you. Not shown on the desktop client — it relaunches itself, so there is nothing to install |
 | **Something is wrong** | The diagnostics and a **Report a problem** button that copies them and opens a pre-filled GitHub issue. The diagnostics carry no access token and no secrets |
 
 **Back up before a restart** compares first, so it says what actually happens: your DSH settings and the plugins

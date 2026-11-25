@@ -16,6 +16,8 @@ import {
   RESTART_WINDOW_BACKGROUND,
   RESTART_WINDOW_CHOICES,
   RESTART_WINDOW_FOREGROUND,
+  WATCH_HELPER_PATTERN,
+  WATCH_MIN_AGE_MS,
   WINDOW_SHIM_PATTERN,
   buildCustomCommand,
   buildGateScript,
@@ -457,6 +459,34 @@ test('buildWatchScript waits for the NEW instance, rolls the snapshot back and s
   assert.ok(script.includes("'C:/state/restart-3-watch.ps1'"), 'the watcher script is cleaned up');
   assert.ok(script.includes("'C:/state/restart-3.cmd'"), 'the gate script is cleaned up');
 
+  // THE SUCCESS PATH CLEANS UP TOO (2026-11-24). The old script had
+  // `if ($decided -or $healthy) { exit 0 }` BEFORE the self-delete, so every
+  // successful restart left its `restart-<n>-watch.ps1` behind - MEASURED:
+  // 431 of them on the real machine. The two branches are symmetric now.
+  const successBranch = script.indexOf('if ($decided -or $healthy) {');
+  assert.ok(successBranch > 0, 'the success branch exists');
+  const successClean = script.indexOf('foreach ($p in @(', successBranch);
+  const successExit = script.indexOf('exit 0', successBranch);
+  assert.ok(successClean > successBranch, 'the success branch deletes its helper files');
+  assert.ok(successExit > successClean, 'the success branch deletes BEFORE it exits');
+  assert.equal(
+    script.split('foreach ($p in @(').length - 1,
+    2,
+    'BOTH branches delete the helper files: the success one and the failure one',
+  );
+  const failureClean = script.indexOf('foreach ($p in @(', successExit);
+  assert.ok(failureClean > successExit, 'the failure branch keeps its own cleanup');
+  assert.ok(script.indexOf('exit 1') > failureClean, 'the failure branch deletes BEFORE it exits');
+  // The lock is NOT touched by the success branch: `$lock` and `$locked` are
+  // only assigned further down, in the failure branch, so they do not exist
+  // yet at that point - and the lock belongs to the party that HOLDS it.
+  const successBlock = script.slice(successBranch, successExit);
+  assert.equal(
+    successBlock.includes('$lock'),
+    false,
+    'the success branch must not touch the lock: it is not assigned yet',
+  );
+
   // The marker of a decision the plugin made itself.
   assert.ok(script.includes('$marker.decided -eq $true'), 'it stands down when the plugin decided');
 
@@ -537,6 +567,22 @@ const WATCH_SCRIPT_BODY = [
   '# dsh-autorestart: put the known-good copy back',
 ].join('\n');
 
+/**
+ * A body in the OLD FORMAT of the watcher (2026-11-24).
+ *
+ * The builds before the parameter block declared their variables INLINE and
+ * never wrote a `param` block. 33 of the 34 watchers that were left on the
+ * real machine were of this shape, so demanding `param(` of them left the
+ * residue on the disk for ever.
+ */
+const OLD_WATCH_SCRIPT_BODY = [
+  '# dsh-autorestart: wait for the relaunched host',
+  '$health = "http://127.0.0.1:51004/__dsh_autorestart/health"',
+  '$deadline = (Get-Date).AddMilliseconds(90000)',
+  'Start-Sleep -Seconds 2',
+  'if ($healthy) { exit 0 }',
+].join('\\n');
+
 /** Make a state directory with the given files (name → body). */
 function sweepFixture(files) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-watch-sweep-'));
@@ -607,6 +653,38 @@ test('a missing state directory is not an error, and looksLikeWatchScript is str
   assert.equal(looksLikeWatchScript(WATCH_SCRIPT_BODY), true);
   assert.equal(looksLikeWatchScript('Write-Host "hi"'), false, 'no param()/Start-Sleep/marker: not ours');
   assert.equal(looksLikeWatchScript(''), false);
+
+  // THE OLD FORMAT (2026-11-24): the builds before the parameter block
+  // declared their variables INLINE and never wrote a `param` block. 33 of
+  // the 34 watchers that were left on the real machine were of that shape,
+  // so demanding `param(` of them left the residue on the disk for ever.
+  assert.equal(
+    looksLikeWatchScript(OLD_WATCH_SCRIPT_BODY),
+    true,
+    'the old format without a param block is still ours: banner + health route + waiting',
+  );
+  const thirdPartyScript = [
+    'param(',
+    '  [string] $PortFile = ""',
+    ')',
+    'Start-Sleep -Seconds 4',
+    'Write-Host "my own script"',
+  ].join('\\n');
+  assert.equal(
+    looksLikeWatchScript(thirdPartyScript),
+    false,
+    'a third-party script that waits but carries no ownership marker is not ours',
+  );
+  const markerOnlyScript = [
+    '# dsh-autorestart: wait for the relaunched host',
+    '$health = "http://127.0.0.1:51004/__dsh_autorestart/health"',
+    'Write-Host "no waiting at all"',
+  ].join('\\n');
+  assert.equal(
+    looksLikeWatchScript(markerOnlyScript),
+    false,
+    'the ownership marker alone is not enough: a watcher has to wait',
+  );
 });
 
 /* ------------------------------------------------------------------ *
@@ -812,7 +890,7 @@ test('the PowerShell fallback starts the SAME command line with no console windo
   assert.equal(/^[\x20-\x7e]+$/.test(line), true);
 });
 
-test('the helper sweep removes OLD .cmd and .vbs of ours, keeps foreign and fresh files, and counts them', (t) => {
+test('the helper sweep removes OLD .cmd, .vbs and .ps1 of ours, keeps foreign and fresh files, and counts them', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-helper-sweep-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const shim = buildWindowShimScript('cmd.exe /c echo hi');
@@ -826,12 +904,17 @@ test('the helper sweep removes OLD .cmd and .vbs of ours, keeps foreign and fres
     'restart-546.cmd': helper,
     'restart-545.cmd': helper,
     'restart-3-window.vbs': shim,
+    // OURS, old: a watcher the rollback left behind (the 431-file pile).
+    'restart-4-watch.ps1': WATCH_SCRIPT_BODY,
+    // OURS, old format (no param block): the 34 that were left over.
+    'restart-6-watch.ps1': OLD_WATCH_SCRIPT_BODY,
     // A .cmd with our name but NOT our content: a user's file — kept.
     'restart-9.cmd': 'echo this is my own script\r\n',
     // A .vbs that is not ours: kept.
     'restart-9-window.vbs': 'MsgBox "my own script"',
+    // A .ps1 that is not ours: kept.
+    'restart-8-watch.ps1': 'Write-Host "my own script"\n',
     // Neither name matches: never looked at.
-    'restart-4-watch.ps1': WATCH_SCRIPT_BODY,
     'restart.cmd': helper,
     'restart-x.cmd': helper,
     'restart-5.cmd.bak': helper,
@@ -840,20 +923,44 @@ test('the helper sweep removes OLD .cmd and .vbs of ours, keeps foreign and fres
   for (const [name, body] of Object.entries(files)) fs.writeFileSync(path.join(dir, name), body, 'utf8');
   const old = new Date(Date.now() - 10 * 60 * 1000);
   for (const name of Object.keys(files)) fs.utimesSync(path.join(dir, name), old, old);
+  // The watcher of ours is CLEARLY old: the ten-minute floor of the watcher
+  // must not be decided by a boundary of a few milliseconds.
+  const clearlyOld = new Date(Date.now() - 30 * 60 * 1000);
+  fs.utimesSync(path.join(dir, 'restart-4-watch.ps1'), clearlyOld, clearlyOld);
+  fs.utimesSync(path.join(dir, 'restart-6-watch.ps1'), clearlyOld, clearlyOld);
+  fs.utimesSync(path.join(dir, 'restart-8-watch.ps1'), clearlyOld, clearlyOld);
+  // A watcher that was written a moment ago: the one of a restart that may
+  // be running RIGHT NOW. It must survive.
+  fs.writeFileSync(path.join(dir, 'restart-12-watch.ps1'), WATCH_SCRIPT_BODY, 'utf8');
 
   const result = sweepRestartHelpers(dir);
-  assert.deepEqual(result.removed.sort(), ['restart-3-window.vbs', 'restart-545.cmd', 'restart-546.cmd']);
+  assert.deepEqual(
+    result.removed.sort(),
+    ['restart-3-window.vbs', 'restart-4-watch.ps1', 'restart-545.cmd', 'restart-546.cmd', 'restart-6-watch.ps1'],
+    'the watcher of ours goes too - the old format without a param block as well',
+  );
   assert.deepEqual(result.removedCmd.sort(), ['restart-545.cmd', 'restart-546.cmd'], 'the gate helpers go');
   assert.deepEqual(result.removedVbs, ['restart-3-window.vbs'], 'the shim goes too');
-  assert.deepEqual(result.kept.sort(), ['restart-9-window.vbs', 'restart-9.cmd'], 'foreign content is never touched');
-  assert.equal(result.scanned, 5, 'only the five matching names were even looked at');
+  assert.deepEqual(
+    result.removedPs1,
+    ['restart-4-watch.ps1', 'restart-6-watch.ps1'],
+    'both watchers are counted on their own',
+  );
+  assert.deepEqual(
+    result.kept.sort(),
+    ['restart-12-watch.ps1', 'restart-8-watch.ps1', 'restart-9-window.vbs', 'restart-9.cmd'],
+    'foreign content is never touched, and a watcher of the last ten minutes is kept',
+  );
+  assert.equal(result.scanned, 9, 'only the nine matching names were even looked at');
   assert.equal(result.failed, 0);
   assert.equal(result.error, null);
   // The files are really gone; nothing else was touched.
   assert.equal(fs.existsSync(path.join(dir, 'restart-546.cmd')), false);
   assert.equal(fs.existsSync(path.join(dir, 'restart-545.cmd')), false);
   assert.equal(fs.existsSync(path.join(dir, 'restart-3-window.vbs')), false);
-  for (const name of ['restart-9.cmd', 'restart-9-window.vbs', 'restart-4-watch.ps1', 'restart.cmd', 'restart-x.cmd', 'restart-5.cmd.bak', 'notes.txt']) {
+  assert.equal(fs.existsSync(path.join(dir, 'restart-4-watch.ps1')), false);
+  assert.equal(fs.existsSync(path.join(dir, 'restart-6-watch.ps1')), false, 'the old format is gone too');
+  for (const name of ['restart-9.cmd', 'restart-9-window.vbs', 'restart-8-watch.ps1', 'restart-12-watch.ps1', 'restart.cmd', 'restart-x.cmd', 'restart-5.cmd.bak', 'notes.txt']) {
     assert.equal(fs.existsSync(path.join(dir, name)), true, name + ' must survive the sweep');
   }
 
@@ -862,8 +969,11 @@ test('the helper sweep removes OLD .cmd and .vbs of ours, keeps foreign and fres
   fs.writeFileSync(path.join(dir, 'restart-5-window.vbs'), shim, 'utf8');
   const fresh = sweepRestartHelpers(dir);
   assert.deepEqual(fresh.removed, [], 'nothing is removed inside the 60 s window');
-  assert.deepEqual(fresh.kept.sort(), ['restart-5-window.vbs', 'restart-547.cmd', 'restart-9-window.vbs', 'restart-9.cmd']);
-  assert.equal(fresh.scanned, 4);
+  assert.deepEqual(
+    fresh.kept.sort(),
+    ['restart-12-watch.ps1', 'restart-5-window.vbs', 'restart-547.cmd', 'restart-8-watch.ps1', 'restart-9-window.vbs', 'restart-9.cmd'],
+  );
+  assert.equal(fresh.scanned, 6);
 
   // The name patterns are strict, and the old export sweeps BOTH kinds too
   // (it used to sweep only the .vbs).
@@ -871,6 +981,10 @@ test('the helper sweep removes OLD .cmd and .vbs of ours, keeps foreign and fres
   assert.equal(HELPER_SCRIPT_PATTERN.test('restart-546-window.vbs'), false);
   assert.equal(HELPER_SCRIPT_PATTERN.test('restart-546.cmd.bak'), false);
   assert.equal(WINDOW_SHIM_PATTERN.test('restart-546-window.vbs'), true);
+  assert.equal(WATCH_HELPER_PATTERN.test('restart-4-watch.ps1'), true);
+  assert.equal(WATCH_HELPER_PATTERN.test('restart-4-watch.ps1.bak'), false);
+  assert.equal(WATCH_HELPER_PATTERN.test('restart-watch.ps1'), false);
+  assert.equal(WATCH_MIN_AGE_MS, 10 * 60 * 1000, 'the watcher has a floor of TEN MINUTES');
   assert.equal(looksLikeGateHelper(helper), true);
   assert.equal(looksLikeGateHelper('echo hi'), false);
   fs.utimesSync(path.join(dir, 'restart-547.cmd'), old, old);

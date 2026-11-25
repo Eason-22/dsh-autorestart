@@ -551,7 +551,7 @@ test('the 「更多设置」 block stands after the shutdown settings, closed by
     .map((node) => node.props['data-dsh-autorestart-group'])
   assert.deepEqual(
     order,
-    ['restart', 'shutdown', 'advanced', 'supervisor', 'report'],
+    ['restart', 'advanced', 'shutdown', 'report'],
     'the block stands between the shutdown settings and the report',
   )
 
@@ -559,7 +559,7 @@ test('the 「更多设置」 block stands after the shutdown settings, closed by
   const inner = rowsOf(advanced).map((row) => row.props['data-dsh-autorestart-row'])
   assert.deepEqual(
     inner,
-    ['restartWindow', 'pluginFilesWatch', 'pluginFilesStableMs', 'pluginFilesMaxBlockMs'],
+    ['pluginFilesWatch', 'pluginFilesStableMs', 'pluginFilesMaxBlockMs', 'maxCompareFiles'],
     'the block carries the restart window and the plugin-folder watchdog',
   )
   for (const row of rowsOf(advanced)) {
@@ -908,7 +908,7 @@ test('「备份包含已安装插件」 is drawn as a child of the backup switch
   assert.ok(backupBlock, 'the 「include plugins」 row sits in a subordinate block')
   assert.deepEqual(
     backupBlock.children.map((child) => child.props['data-dsh-autorestart-row']),
-    ['backupIncludePlugins', 'maxBackups', 'maxCompareFiles'],
+    ['backupIncludePlugins', 'maxBackups'],
     'that block holds the three items the backup switch governs',
   )
   // The switch above it is NOT inside the block: the block is its child.
@@ -1003,7 +1003,7 @@ test('the copy limit is a child of the backup switch, and goes grey with it', as
   assert.ok(block, 'the copy limit sits in a subordinate block')
   assert.deepEqual(
     block.children.map((child) => child.props['data-dsh-autorestart-row']),
-    ['backupIncludePlugins', 'maxBackups', 'maxCompareFiles'],
+    ['backupIncludePlugins', 'maxBackups'],
     'the block holds all three items the backup switch governs',
   )
   const select = walk(limitRow).find((node) => node.type === 'select')

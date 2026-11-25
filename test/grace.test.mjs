@@ -668,13 +668,12 @@ test('the settings section offers the restart wait and the shutdown countdown', 
   )
   assert.deepEqual(
     groups.map((node) => node.props['data-dsh-autorestart-group']),
-    ['restart', 'shutdown', 'supervisor', 'report'],
+    ['restart', 'shutdown', 'report'],
     'the restart group must come before the shutdown group',
   )
   assert.equal(textOf(groups[0].children[0]), '重启相关设置', 'the restart group has a visible title')
   assert.equal(textOf(groups[1].children[0]), '关机相关设置', 'the shutdown group has a visible title')
-  assert.equal(textOf(groups[2].children[0]), '开机自启', 'the supervisor group has a visible title')
-  assert.equal(textOf(groups[3].children[0]), '遇到问题', 'the report group has a visible title')
+  assert.equal(textOf(groups[2].children[0]), '遇到问题', 'the report group has a visible title')
 
   // The restart group carries the wait, the two backup switches and the copy
   // limit (the limit lives in the backup fold). The restart window and the
@@ -683,8 +682,11 @@ test('the settings section offers the restart wait and the shutdown countdown', 
   const restartControls = walk(groups[0]).filter((node) => node.type === 'select' || node.type === 'input')
   assert.deepEqual(
     restartControls.map((node) => node.props['data-dsh-autorestart-setting']),
-    ['restartGraceMs', 'backupOnRestart', 'backupIncludePlugins', 'maxBackups', 'maxCompareFiles'],
-    'the restart group carries the wait, the two backup switches and the copy limit',
+    [
+      'restartGraceMs', 'restartWindow', 'backupOnRestart', 'backupIncludePlugins', 'maxBackups',
+      'pluginFilesWatch', 'pluginFilesStableMs', 'pluginFilesMaxBlockMs', 'maxCompareFiles',
+    ],
+    'the restart group carries its five rows and the four rows of the 「更多设置」 fold',
   )
   // The 「更多设置」 block: a block of its own, closed by default, standing
   // AFTER the shutdown settings and BEFORE 「遇到问题」.
@@ -697,7 +699,7 @@ test('the settings section offers the restart wait and the shutdown countdown', 
     walk(advanced)
       .filter((node) => node.type === 'select' || node.type === 'input')
       .map((node) => node.props['data-dsh-autorestart-setting']),
-    ['restartWindow', 'pluginFilesWatch', 'pluginFilesStableMs', 'pluginFilesMaxBlockMs'],
+    ['pluginFilesWatch', 'pluginFilesStableMs', 'pluginFilesMaxBlockMs', 'maxCompareFiles'],
     'the block carries the restart window and the plugin-folder watchdog',
   )
   const blockOrder = walk(panel)
@@ -705,13 +707,13 @@ test('the settings section offers the restart wait and the shutdown countdown', 
     .map((node) => node.props['data-dsh-autorestart-group'])
   assert.deepEqual(
     blockOrder,
-    ['restart', 'shutdown', 'advanced', 'supervisor', 'report'],
+    ['restart', 'advanced', 'shutdown', 'report'],
     'the 「更多设置」 block stands after the shutdown settings and before 「遇到问题」',
   )
   const shutdownControls = walk(groups[1]).filter((node) => node.type === 'select' || node.type === 'input')
   assert.deepEqual(
     shutdownControls.map((node) => node.props['data-dsh-autorestart-setting']),
-    ['sleepCountdownSeconds'],
+    ['sleepCountdownSeconds', 'gateOnSleep'],
     'the shutdown group carries the countdown',
   )
 

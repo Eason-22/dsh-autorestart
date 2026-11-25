@@ -80,6 +80,9 @@
         # The button arms the countdown; the machine is switched off for real
         # (a WSL host shuts Windows down, not the WSL distribution).
         showSleepButton: true
+        # 收工关机已启动时，用户不在电脑前：拦住「向用户提问」这类工具，
+        # 把要拍板的问题写进回复正文（标「待你拍板」），不要弹卡等他。
+        gateOnSleep: true
         # How many seconds the countdown lasts after every conversation is done.
         # A DROPDOWN in the settings page: 0 / 10 / 20 / 30 / 60 seconds.
         # `0` means no countdown at all — the machine is switched off as soon

@@ -1,3 +1,81 @@
+## 1.0.0 — 2026-11-25
+
+中文 / English
+
+### 一、点了「收工关机」之后，不再弹卡问你
+
+你点了收工关机去睡觉，插件却还在弹卡等你回答——没人答，会话就停在那儿。这一版加了一道闸：**收工关机生效期间，那些「要你拍板」的卡会被拦下来**，模型收到一句提示（用户已经离开、把要问的写进正文、先做已经点头过的事），于是它继续干已经批准过的活，而不是停下来等一个不在电脑前的人。
+
+几件要说清的事：
+
+- **默认开**，开关在设置页「关机相关设置」里、就在倒数秒数下面；关掉它，闸连注册都不做，一切照旧。
+- **只拦「提问」这一类工具**，别的工具一概不碰（写文件、跑命令、派活都不受影响）。
+- **点取消立刻恢复**，不需要重启。
+- **不往对话里加任何常驻内容**：没有注入、没有「你已经离开」的常驻提示；只有卡被拦下时那一句拒绝文案。上一版内部试验过那种注入，它会影响同机上**别的**会话（它们以为自己该收尾），这一版彻底删掉了。
+
+### 二、设置页按方案 A 重排
+
+- 三组，顺序固定：**重启相关设置**（含折叠的「更多设置」）→ **关机相关设置** → **遇到问题**。
+- **「开机自启」整组撤掉**：插件会按你用的是桌面客户端还是网页来自己判断，摆出来只会让人选错。相关能力仍在诊断信息与首次安装卡里。
+- **页面顶部的运行状态区撤掉**：主界面已经有「空闲 / 待重启」，设置页不重复。
+- 所有说明文字**沿用原有文案**，没有另写一套。
+
+### 三、升级到 1.0.0 的一次性说明卡
+
+从旧版本升上来的用户，启动后会看到一次「这一版多了什么」的卡，点「知道了」不再出现；**全新安装不会看到它**（首次安装即视为已读的逻辑没有动）。
+
+### 四、看门狗脚本残留：根治 + 存量清理
+
+上一版排查出的根因（脚本在成功分支提前退出、跳过了自删）已修：
+
+- 成功分支在退出前**先删掉自己的脚本**；失败分支原来的「自删 + 放锁」保持不变；
+- 通用的清理扫描**收编**了 `restart-<n>-watch.ps1`：只删 10 分钟以前的，正在跑的那一个不动；
+- 判据放宽到能认出老格式脚本（此前只认带 `param(` 的新格式，因此 33/34 个老脚本没被扫到）。
+
+**存量清理只在升级时跑一次**（启动前已有存档的老用户），全新安装**一个文件都不删**。本机实测：状态目录里的残留从 **431 个降到 0**（重启后新写入的那一个「正在跑」的脚本按设计保留）。
+
+### 版本号说明
+
+本版按你的指定发 **1.0.0**（工作区规则第 12 条「只抬最小一档」这次被明确覆盖）。功能范围与 0.9.x 连续：新增的是那道闸与设置页重排，没有破坏性改动。
+
+## English
+
+### 1. No more ask-cards after you press the countdown shutdown
+
+You press the countdown shutdown and go to sleep; the plugin keeps showing cards that wait for an answer — nobody answers, and the conversation sits there. This version adds a gate: **while the countdown shutdown is armed, the tools that ask you to decide something are held back.** The model gets one line (the user is away, write the question into the reply body, do what has already been approved) and carries on with the approved work instead of waiting for someone who is not at the desk.
+
+Worth stating plainly:
+
+- **On by default**, with a switch in **Shutdown settings**, right under the countdown seconds. Turn it off and the gate is not even registered — everything behaves as before.
+- **Only the ask-type tools are held back.** Nothing else is touched: writing files, running commands, delegating work all pass untouched.
+- **Cancelling restores it immediately**, with no restart.
+- **Nothing is added to the conversation.** No injection, no permanent "the user is away" note — only the refusal text when a card is actually blocked. An earlier internal build injected such a note; it leaked into *other* sessions on the same machine (they concluded they should wrap up), and it is gone in this version.
+
+### 2. The settings page, rearranged (plan A)
+
+- Three groups in a fixed order: **Restart settings** (with the folded **More settings**) → **Shutdown settings** → **Something is wrong**.
+- **The whole "Start at login" group is gone**: the plugin works out on its own whether you run the desktop client or the web page, and showing it only invited the wrong choice. The capability is still in the diagnostics and the first-install card.
+- **The status block at the top of the page is gone**: the main window already says whether everything is idle.
+- Every explanation reuses the **existing copy**; no second set of words was written.
+
+### 3. A one-time note when upgrading to 1.0.0
+
+Users upgrading from an older version see one card about what this version adds; pressing "Got it" makes it go away for good. **A fresh install never sees it** — the first-install-is-already-read logic is untouched.
+
+### 4. Watchdog script leftovers: root cause fixed, existing files cleaned once
+
+The root cause found in the previous version (the script exited on its success path before deleting itself) is fixed:
+
+- the success path now **deletes its own script** before exiting; the failure path keeps its original delete-and-release;
+- the general sweep now **adopts** `restart-<n>-watch.ps1`: it deletes only files older than ten minutes, so the one still running is left alone;
+- the predicate was widened so the old-format scripts are recognised (it used to require `param(`, so 33 of 34 old scripts were never swept).
+
+**The cleanup of existing files runs once, on upgrade** (only for a user whose state file already existed before start-up); a fresh install **deletes nothing**. Measured on this machine: the leftovers in the state directory went from **431 to 0** (the one script written by the restart that just ran is kept by design).
+
+### About the version number
+
+This release is **1.0.0** at your explicit request (workspace rule 12, "only the smallest step", is overridden for this one). The scope continues from 0.9.x: the gate and the settings rearrangement are the new parts, and there is no breaking change.
+
 ## 0.9.14 — 2026-11-23
 
 中文 / English

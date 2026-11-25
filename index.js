@@ -251,6 +251,13 @@ import {
   sweepRestartHelpers,
   writeTextFileAtomic,
 } from './lib/restart.js'
+import {
+  UNKNOWN_PREVIOUS_VERSION,
+  WATCH_RESIDUE_MIGRATION_ID,
+  migrateWatchResidue,
+  readMigrationRecord,
+  writeMigrationRecord,
+} from './lib/watch-residue.js'
 import { compareSemver } from './lib/semver.js'
 import { buildCookieClearCommand, readCookieClearReport, summarizeCookieClear } from './lib/cookie-clear.js'
 import { cleanupLegacyWatchdogArtifacts } from './lib/legacy-cleanup.js'
@@ -467,7 +474,7 @@ function snapGraceChoice(value, fallback = DEFAULT_RESTART_GRACE_MS) {
  * `pluginVersion()`), but a bundled installation may not ship that file — so
  * the constant below is the last resort. A test keeps the two in sync.
  */
-const PLUGIN_VERSION_FALLBACK = '0.9.14'
+const PLUGIN_VERSION_FALLBACK = '1.0.0'
 
 /**
  * The version of the graceful-shutdown FEATURE, not the version of the package.
@@ -495,6 +502,15 @@ const SLEEP_FEATURE_VERSION = '0.5.0'
  * brings an answered question back.
  */
 const SUPERVISOR_FEATURE_VERSION = '0.7.0'
+
+/**
+ * The version of the away gate ("关机时不再弹卡问人").
+ *
+ * The one-time announcement is bound to this constant, exactly like the two
+ * above: a release never brings the card back, only a change of the feature
+ * itself does.
+ */
+const GATE_FEATURE_VERSION = '1.0.0'
 
 /** The cached version of this plugin (read once per process). */
 let pluginVersionCache = null
@@ -545,6 +561,9 @@ function featureAnnouncements() {
     { feature: 'sleep', version: SLEEP_FEATURE_VERSION },
     // The self-starting supervisor ("开机自启守护").
     { feature: 'supervisor', version: SUPERVISOR_FEATURE_VERSION },
+    // The away gate: while the graceful shutdown is armed the user has left
+    // the desk, so a question card would wait for a human who is not there.
+    { feature: 'gate', version: GATE_FEATURE_VERSION },
   ]
 }
 
@@ -855,6 +874,10 @@ function buildConfigSchema() {
       // switch the REAL host machine off (a WSL host shuts Windows down, not the distro)
       showSleepButton: schemastery.boolean().default(true)
         .description('是否在左侧栏最底部、设置按钮旁边显示「收工关机」按钮：关掉之后界面上不再有这个按钮，关机接口也不再被界面调用。'),
+      // THE AWAY GATE: while the graceful shutdown is armed the user has left
+      // the desk, so a question card would wait for a human who is not there.
+      gateOnSleep: schemastery.boolean().default(true)
+        .description('收工关机已启动时，拦住「向用户提问」这类工具：把要拍板的问题写进回复正文（标「待你拍板」），不要弹卡等他。关掉之后照常弹卡。'),
       // The countdown length is a DROPDOWN: a union of the offered choices
       // projects into an enum (the settings page renders a select, not a
       // number field). `loose()` keeps an old profile value from breaking
@@ -950,6 +973,9 @@ const DEFAULTS = {
   // the countdown before the machine is switched off and the optional custom
   // shutdown command (empty = the host is detected automatically).
   showSleepButton: true,
+  // The away gate: while the shutdown is armed the user is away, so a card
+  // would wait for a human who is not there.
+  gateOnSleep: true,
   sleepCountdownSeconds: DEFAULT_COUNTDOWN_SECONDS,
   sleepCommand: '',
 }
@@ -1060,6 +1086,9 @@ function normalizeConfig(raw) {
     : PLUGIN_FILES_MAX_BLOCK_MS
   if (typeof config.sleepCommand !== 'string') config.sleepCommand = ''
   if (typeof config.showSleepButton !== 'boolean') config.showSleepButton = true
+  // The away gate is ON unless it is explicitly switched off: a wrong value
+  // must never open the gate by accident.
+  if (typeof config.gateOnSleep !== 'boolean') config.gateOnSleep = true
   return config
 }
 
@@ -1692,7 +1721,7 @@ const INSTALL_CHOICE_FILE = 'install-choice.json'
  * Read the recorded install choice from the fallback file.
  *
  * @param {string} stateDir
- * @returns {{ includePlugins: boolean|null, backupOnRestart: boolean|null, showSleepButton: boolean|null, sleepCountdownSeconds: number|null, restartGraceMs: number|null }|null}
+ * @returns {{ includePlugins: boolean|null, backupOnRestart: boolean|null, showSleepButton: boolean|null, gateOnSleep: boolean|null, sleepCountdownSeconds: number|null, restartGraceMs: number|null }|null}
  */
 function readInstallChoice(stateDir) {
   try {
@@ -1703,6 +1732,7 @@ function readInstallChoice(stateDir) {
       includePlugins: typeof parsed.includePlugins === 'boolean' ? parsed.includePlugins : null,
       backupOnRestart: typeof parsed.backupOnRestart === 'boolean' ? parsed.backupOnRestart : null,
       showSleepButton: typeof parsed.showSleepButton === 'boolean' ? parsed.showSleepButton : null,
+      gateOnSleep: typeof parsed.gateOnSleep === 'boolean' ? parsed.gateOnSleep : null,
       sleepCountdownSeconds: typeof parsed.sleepCountdownSeconds === 'number'
         ? parsed.sleepCountdownSeconds
         : null,
@@ -1724,7 +1754,7 @@ function readInstallChoice(stateDir) {
  * erase the recorded backup scope (and the other way round).
  *
  * @param {string} stateDir
- * @param {{ includePlugins?: boolean, backupOnRestart?: boolean, showSleepButton?: boolean, sleepCountdownSeconds?: number, restartGraceMs?: number }} values
+ * @param {{ includePlugins?: boolean, backupOnRestart?: boolean, showSleepButton?: boolean, gateOnSleep?: boolean, sleepCountdownSeconds?: number, restartGraceMs?: number }} values
  * @returns {string} the file that was written
  */
 function writeInstallChoice(stateDir, values) {
@@ -1733,6 +1763,7 @@ function writeInstallChoice(stateDir, values) {
     includePlugins: null,
     backupOnRestart: null,
     showSleepButton: null,
+    gateOnSleep: null,
     sleepCountdownSeconds: null,
     restartGraceMs: null,
     restartWindow: null,
@@ -1742,6 +1773,7 @@ function writeInstallChoice(stateDir, values) {
     includePlugins: typeof values.includePlugins === 'boolean' ? values.includePlugins : current.includePlugins,
     backupOnRestart: typeof values.backupOnRestart === 'boolean' ? values.backupOnRestart : current.backupOnRestart,
     showSleepButton: typeof values.showSleepButton === 'boolean' ? values.showSleepButton : current.showSleepButton,
+    gateOnSleep: typeof values.gateOnSleep === 'boolean' ? values.gateOnSleep : current.gateOnSleep,
     sleepCountdownSeconds: typeof values.sleepCountdownSeconds === 'number'
       ? values.sleepCountdownSeconds
       : current.sleepCountdownSeconds,
@@ -1868,6 +1900,32 @@ export function resolveShowSleepButton(rawConfig, stateDir) {
     return { showSleepButton: fallback.showSleepButton, source: 'fallback-file' }
   }
   return { showSleepButton: DEFAULTS.showSleepButton, source: 'default' }
+}
+
+/**
+ * Resolve the effective `gateOnSleep` value and where it came from.
+ *
+ * The same rule as the sleep button: the profile row config wins, the degraded
+ * fallback file fills the gap, and the built-in default applies when neither
+ * says anything. Without the fallback leg a choice made while the
+ * `configEditor` service was unavailable would be recorded and then lost —
+ * the very bug the countdown resolver was written for.
+ *
+ * @param {object|null|undefined} rawConfig the loader row config, as received
+ * @param {string} stateDir
+ * @returns {{ gateOnSleep: boolean, source: 'config'|'fallback-file'|'default' }}
+ */
+export function resolveGateOnSleep(rawConfig, stateDir) {
+  if (rawConfig && typeof rawConfig === 'object'
+    && Object.prototype.hasOwnProperty.call(rawConfig, 'gateOnSleep')
+    && typeof rawConfig.gateOnSleep === 'boolean') {
+    return { gateOnSleep: rawConfig.gateOnSleep, source: 'config' }
+  }
+  const fallback = typeof stateDir === 'string' && stateDir !== '' ? readInstallChoice(stateDir) : null
+  if (fallback !== null && fallback.gateOnSleep !== null) {
+    return { gateOnSleep: fallback.gateOnSleep, source: 'fallback-file' }
+  }
+  return { gateOnSleep: DEFAULTS.gateOnSleep, source: 'default' }
 }
 
 /**
@@ -7957,6 +8015,15 @@ const titleOfSummary = (item) => {
       wanted.showSleepButton = changes.showSleepButton
       fallback.showSleepButton = changes.showSleepButton
     }
+    // THE AWAY GATE (2026-11-24). The settings page shows this switch and
+    // posts it to `/choice` — but this function had no branch for it: the
+    // choice was accepted by the route and then dropped on the floor here, so
+    // the switch could never be saved. The same bug the plugin-files watchdog
+    // had.
+    if (typeof changes.gateOnSleep === 'boolean') {
+      wanted.gateOnSleep = changes.gateOnSleep
+      fallback.gateOnSleep = changes.gateOnSleep
+    }
     if (typeof changes.sleepCountdownSeconds === 'number') {
       wanted.sleepCountdownSeconds = changes.sleepCountdownSeconds
       fallback.sleepCountdownSeconds = changes.sleepCountdownSeconds
@@ -8554,6 +8621,17 @@ const titleOfSummary = (item) => {
     },
     env,
     stateFile,
+    /**
+     * WAS THE CHECKPOINT ALREADY THERE WHEN THIS BOOT STARTED?
+     *
+     * This is the judgement "did the plugin run on this machine BEFORE?".
+     * A fresh installation has no checkpoint yet; every later boot - and
+     * every upgrade from an older build - finds one. The one-time migration
+     * of the watcher residue needs exactly this: a fresh installation never
+     * wrote a watcher, so it has nothing of its own to clean, while the
+     * machine that upgrades carries the files of the past.
+     */
+    checkpointExisted: loaded.existed === true,
     log,
     persist,
     /**
@@ -11411,6 +11489,113 @@ function registerManualRestartGuard(ctx, runtime, config) {
 }
 
 /**
+ * THE TOOLS THAT ASK THE USER SOMETHING — the one truth about them.
+ *
+ * While the user is away (the graceful shutdown is armed) a card would wait
+ * for a human who is not there, so these are the tools the away gate holds
+ * back. This list is the ONLY source: a second list somewhere else would let
+ * one of them slip through.
+ */
+export const ASK_USER_TOOLS = ['ask_user_question', 'intake_ask', 'intake_elicit']
+
+/**
+ * Returned to the model when the away gate holds a question back.
+ *
+ * It has to teach the model what to do instead, not just say "no": the user
+ * is away, and the work must not stop because of it.
+ */
+const AWAY_GATE_DENIAL = [
+  '用户已离开电脑（他点了「收工关机」去睡觉了），现在不能弹卡问他。',
+  '要问他什么，就写进这次回复的正文，用一段「待你拍板」列出来，他回来会看到。',
+  '现在先做他已经点头过的事；没别的活了，就带着这份清单收尾停下，别再调用这个工具。',
+].join('\n')
+
+/**
+ * Is the graceful shutdown armed right now? That is the user being away.
+ *
+ * @param {{ controller?: { status?: () => object } } | null | undefined} sleep
+ * @returns {boolean}
+ */
+function sleepArmed(sleep) {
+  try {
+    if (!sleep || !sleep.controller || typeof sleep.controller.status !== 'function') return false
+    const status = sleep.controller.status()
+    return Boolean(status && status.armed === true)
+  } catch {
+    // A state that cannot be read is NOT "the user is away": a broken reader
+    // must never block a question.
+    return false
+  }
+}
+
+/**
+ * Decide whether one pending tool call is a question that has to wait for the
+ * user to come back.
+ *
+ * @param {{ name?: string } | null | undefined} exec
+ * @param {{ armed?: boolean, enabled?: boolean }} [state]
+ * @returns {string | null} the refusal, or null when the call may run
+ */
+export function detectAwayQuestion(exec, { armed = false, enabled = true } = {}) {
+  if (!exec || typeof exec.name !== 'string') return null
+  if (!ASK_USER_TOOLS.includes(exec.name)) return null
+  if (enabled === false) return null
+  if (armed !== true) return null
+  return AWAY_GATE_DENIAL
+}
+
+/**
+ * Register the away gate: while the graceful shutdown is armed, the tools
+ * that ask the user a question are held back.
+ *
+ * It never touches anything else: not armed, or the switch off, means every
+ * tool call passes untouched. A guard that throws lets the call through as
+ * well — a broken gate must not freeze the whole session.
+ *
+ * @param {object} ctx the plugin context
+ * @param {object} runtime the runtime (for the counter and the log)
+ * @param {object} config the effective configuration
+ * @param {{ controller?: { status?: () => object } }} sleep the sleep service
+ */
+export function registerAskGate(ctx, runtime, config, sleep) {
+  runtime.askGateBlocks = 0
+  if (config.gateOnSleep === false) {
+    runtime.log.info('the away gate is disabled by config')
+    return
+  }
+  const tools = ctx.tools
+  if (!tools || typeof tools.guard !== 'function') {
+    runtime.log.warn('tools.guard is unavailable; a question cannot be held back while the user is away')
+    return
+  }
+  try {
+    // The disposer is owned by the fiber (like the manual-restart guard above),
+    // so a re-applied plugin never leaves a gate of an old instance behind.
+    ctx.effect(
+      () => tools.guard((exec) => {
+        try {
+          const refusal = detectAwayQuestion(exec, {
+            armed: sleepArmed(sleep),
+            enabled: config.gateOnSleep !== false,
+          })
+          if (refusal === null) return undefined
+          runtime.askGateBlocks += 1
+          runtime.log.warn(`held back a question ("${exec.name}") while the user is away (the shutdown is armed)`)
+          return refusal
+        } catch (error) {
+          // A broken gate must never freeze the session: let the call through.
+          runtime.log.warn('the away gate failed:', String(error))
+          return undefined
+        }
+      }),
+      'dsh-autorestart: away gate',
+    )
+  } catch (error) {
+    runtime.log.warn('could not register the away gate:', String(error))
+  }
+}
+
+/**
  * Is this request admitted by the host's connection service, i.e. is it an
  * authenticated browser request? A hosted `dsh web` deployment reaches the
  * health route from a remote browser, so a loopback-only check would refuse
@@ -12908,6 +13093,11 @@ function buildChoiceRoute(ctx, runtime, config) {
         const hasBackupInclude = Object.prototype.hasOwnProperty.call(body, 'backupIncludePlugins')
         const hasBackup = Object.prototype.hasOwnProperty.call(body, 'backupOnRestart')
         const hasShow = Object.prototype.hasOwnProperty.call(body, 'showSleepButton')
+        // THE AWAY GATE (2026-11-24): the settings page posts this switch to
+        // `/choice`, so the route has to know it — otherwise a body that
+        // carried ONLY it fell through to `no-choice` and the switch could
+        // never be saved.
+        const hasGate = Object.prototype.hasOwnProperty.call(body, 'gateOnSleep')
         const hasSeconds = Object.prototype.hasOwnProperty.call(body, 'sleepCountdownSeconds')
         const hasGrace = Object.prototype.hasOwnProperty.call(body, 'restartGraceMs')
         const hasWindow = Object.prototype.hasOwnProperty.call(body, 'restartWindow')
@@ -12920,7 +13110,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         const hasFilesStable = Object.prototype.hasOwnProperty.call(body, 'pluginFilesStableMs')
         const hasCompareLimit = Object.prototype.hasOwnProperty.call(body, 'maxCompareFiles')
         const hasFilesMaxBlock = Object.prototype.hasOwnProperty.call(body, 'pluginFilesMaxBlockMs')
-        if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasSeconds && !hasGrace && !hasWindow && !hasAskedVersion && !hasFilesWatch && !hasFilesStable && !hasFilesMaxBlock && !hasCompareLimit) {
+        if (!hasInclude && !hasBackupInclude && !hasBackup && !hasShow && !hasGate && !hasSeconds && !hasGrace && !hasWindow && !hasAskedVersion && !hasFilesWatch && !hasFilesStable && !hasFilesMaxBlock && !hasCompareLimit) {
           // No key was asked for: there is nothing to persist.
           res.statusCode = 400
           res.setHeader('content-type', 'application/json; charset=utf-8')
@@ -12928,7 +13118,7 @@ function buildChoiceRoute(ctx, runtime, config) {
           res.end(JSON.stringify({
             ok: false,
             error: 'no-choice',
-            instruction: 'Send { "includePlugins": true | false } and/or { "backupIncludePlugins": true | false } and/or { "backupOnRestart": true | false } and/or { "showSleepButton": true | false } and/or { "sleepCountdownSeconds": 0 | 10 | 20 | 30 | 60 } and/or { "restartGraceMs": 0 | 5000 | 10000 | 20000 | 30000 | 60000 } and/or { "restartWindow": "foreground" | "background" } and/or { "askedForPluginVersion": "1.2.3" } and/or { "pluginFilesWatch": true | false } and/or { "pluginFilesStableMs": <milliseconds >= 0> } and/or { "pluginFilesMaxBlockMs": <milliseconds >= 0> }.',
+            instruction: 'Send { "includePlugins": true | false } and/or { "backupIncludePlugins": true | false } and/or { "backupOnRestart": true | false } and/or { "showSleepButton": true | false } and/or { "gateOnSleep": true | false } and/or { "sleepCountdownSeconds": 0 | 10 | 20 | 30 | 60 } and/or { "restartGraceMs": 0 | 5000 | 10000 | 20000 | 30000 | 60000 } and/or { "restartWindow": "foreground" | "background" } and/or { "askedForPluginVersion": "1.2.3" } and/or { "pluginFilesWatch": true | false } and/or { "pluginFilesStableMs": <milliseconds >= 0> } and/or { "pluginFilesMaxBlockMs": <milliseconds >= 0> }.',
           }))
           return
         }
@@ -12975,6 +13165,20 @@ function buildChoiceRoute(ctx, runtime, config) {
             ok: false,
             error: 'showSleepButton-must-be-boolean',
             instruction: 'Send { "showSleepButton": true | false }.',
+          }))
+          return
+        }
+        // The away gate is a BOOLEAN and nothing else. A wrong value is
+        // refused in the same shape as the other keys — it is never coerced,
+        // because "false" and "no" are not the same answer.
+        if (hasGate && typeof body.gateOnSleep !== 'boolean') {
+          res.statusCode = 400
+          res.setHeader('content-type', 'application/json; charset=utf-8')
+          res.setHeader('cache-control', 'no-store')
+          res.end(JSON.stringify({
+            ok: false,
+            error: 'gateOnSleep-must-be-boolean',
+            instruction: 'Send { "gateOnSleep": true | false }.',
           }))
           return
         }
@@ -13084,6 +13288,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         if (hasBackupInclude) changes.backupIncludePlugins = body.backupIncludePlugins === true
         if (hasBackup) changes.backupOnRestart = body.backupOnRestart === true
         if (hasShow) changes.showSleepButton = body.showSleepButton === true
+        if (hasGate) changes.gateOnSleep = body.gateOnSleep === true
         if (hasSeconds) changes.sleepCountdownSeconds = body.sleepCountdownSeconds
         if (hasGrace) changes.restartGraceMs = body.restartGraceMs
         if (hasWindow) changes.restartWindow = body.restartWindow
@@ -13123,6 +13328,7 @@ function buildChoiceRoute(ctx, runtime, config) {
         if (hasBackupInclude) answer.backupIncludePlugins = body.backupIncludePlugins === true
         if (hasBackup) answer.backupOnRestart = body.backupOnRestart === true
         if (hasShow) answer.showSleepButton = body.showSleepButton === true
+        if (hasGate) answer.gateOnSleep = body.gateOnSleep === true
         if (hasSeconds) answer.sleepCountdownSeconds = body.sleepCountdownSeconds
         if (hasGrace) answer.restartGraceMs = body.restartGraceMs
         if (hasWindow) answer.restartWindow = body.restartWindow
@@ -13724,6 +13930,9 @@ function sleepStatusPayload(sleep, config, runtime) {
     phase: status.phase,
     armed: status.armed,
     showSleepButton: config.showSleepButton !== false,
+    // THE AWAY GATE (2026-11-24): the settings page reads its switch here,
+    // so it does not have to guess whether the gate is on.
+    gateOnSleep: config.gateOnSleep !== false,
     countdownSeconds: status.countdownSeconds,
     // The RESTART reserve is reported next to the countdown, so the settings
     // page can show it. The shutdown itself has NO invisible reserve: the
@@ -14082,6 +14291,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             pluginVersion: pluginVersionNow(),
             backupOnRestart: config.backupOnRestart !== false,
             backupIncludePlugins: config.backupIncludePlugins !== false,
+            // THE AWAY GATE (2026-11-24): the settings page reads its switch
+            // from the payload, so it never has to guess.
+            gateOnSleep: config.gateOnSleep !== false,
             // WHICH PROFILE THIS HOST BELONGS TO (2026-11-02). The backups and
             // the rollback are PER PROFILE, so the page has to be able to tell
             // three cases apart: a resolved profile, "several profiles, I cannot
@@ -14193,6 +14405,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
             pluginVersion: pluginVersionNow(),
             backupOnRestart: config.backupOnRestart !== false,
             backupIncludePlugins: config.backupIncludePlugins !== false,
+            // The away gate, like the two switches above: the degraded answer
+            // says the same thing as the healthy one.
+            gateOnSleep: config.gateOnSleep !== false,
             parkedGoals: [],
             recovery: [],
             pluginRecovery: null,
@@ -14221,6 +14436,9 @@ function registerHealthRoute(ctx, runtime, config, sleep) {
         pageHeartbeat: runtime.pageHeartbeat === true,
         systemPrompt: runtime.systemPrompt === true,
         manualRestartBlocks: runtime.manualRestartBlocks ?? 0,
+        // The away gate reports how often it held a question back, so a day
+        // can tell whether it is still needed.
+        askGateBlocks: runtime.askGateBlocks ?? 0,
         indexTaps: runtime.indexTaps ?? 0,
         configSchema: Config !== undefined,
         // THE LAST COOKIE CLEANUP, on the short route as well: a script (or the
@@ -14600,6 +14818,11 @@ export function apply(ctx, rawConfig, options = {}) {
   // wrote into `install-choice.json` was never read back, so a choice made
   // while the configEditor service was unavailable was silently lost.
   config.sleepCountdownSeconds = resolveCountdownSeconds(rawConfig, stateDir).countdownSeconds
+  // The same rule for the away gate (2026-11-24): the profile row decides,
+  // the degraded fallback file fills the gap, the built-in default applies
+  // otherwise. Without this line a `gateOnSleep` written while the
+  // configEditor service was unavailable was recorded and then lost.
+  config.gateOnSleep = resolveGateOnSleep(rawConfig, stateDir).gateOnSleep
   const runtime = createRuntime(ctx, config, {
     backupChoiceSource: choice.source,
   })
@@ -14754,6 +14977,54 @@ export function apply(ctx, rawConfig, options = {}) {
       log.warn('could not record the restart helper hygiene:', String(error))
     }
   }
+  // THE RESIDUE OF THE WATCHERS THAT NEVER DELETED THEMSELVES (2026-11-24).
+  //
+  // The rollback watcher used to exit on its SUCCESS path BEFORE its own
+  // self-delete, so every successful restart left a `restart-<n>-watch.ps1`
+  // behind - MEASURED: 431 of them on the real machine. The watcher is fixed
+  // now, so no NEW file is left behind, but the files of the past are still
+  // on disk. This ONE-TIME migration removes them.
+  //
+  // IT RUNS ON A MACHINE THAT HAD THE PLUGIN BEFORE, AND ON NOTHING ELSE.
+  // The judgement is made on the RECORD (`lastSeenVersion`) - never on "are
+  // there leftover files in the directory", because that would fire on a
+  // fresh installation too. A fresh installation never wrote a watcher, so
+  // there is nothing of its own to clean there.
+  //
+  // The whole block is wrapped: a cleanup that breaks the boot is worse than
+  // a leftover file, so a failure is only WARNED about.
+  try {
+    const residueDir = path.dirname(String(runtime.stateFile ?? ''))
+    const record = readMigrationRecord(residueDir)
+    // THE VERSION OF THE LAST BOOT. A machine that never recorded one is
+    // either fresh (nothing to clean) or an upgrade from a build that did
+    // not record it yet - and that second one is exactly the machine that
+    // carries the residue, so it counts as "older than 1.0.0".
+    const prevVersion = typeof record.lastSeenVersion === 'string' && record.lastSeenVersion.trim() !== ''
+      ? record.lastSeenVersion.trim()
+      : (runtime.checkpointExisted === true ? UNKNOWN_PREVIOUS_VERSION : null)
+    const migration = migrateWatchResidue(residueDir, {
+      prevVersion,
+      currentVersion: pluginVersion(),
+      migrations: record.migrations,
+    })
+    if (migration.ran) {
+      log.info('the watcher residue of the earlier builds was removed: ' + migration.removed + ' file(s)')
+    }
+    // The marker is written only when the migration really ran: a failed one
+    // is tried again at the next boot.
+    const migrations = { ...record.migrations }
+    if (migration.ran && !migration.error) migrations[WATCH_RESIDUE_MIGRATION_ID] = true
+    const written = writeMigrationRecord(residueDir, {
+      lastSeenVersion: pluginVersion(),
+      migrations,
+    })
+    if (!written.ok) {
+      log.warn('the migration record could not be written:', String(written.error))
+    }
+  } catch (error) {
+    log.warn('the watcher residue cleanup could not run:', String(error))
+  }
   // THE BACKUP DIRECTORIES THAT NEVER FINISHED (2026-11-02). The existing
   // sweeper only ran from the first-install path (new boot + snapshots on), so
   // an ordinary restart cleaned nothing and a directory left by a backup that
@@ -14876,6 +15147,9 @@ export function apply(ctx, rawConfig, options = {}) {
   registerTools(ctx, runtime, config)
   registerManualRestartGuard(ctx, runtime, config)
   registerSystemPrompt(ctx, runtime)
+  // THE AWAY GATE: while the graceful shutdown is armed the user is away, so a
+  // question card would wait for a human who is not there.
+  registerAskGate(ctx, runtime, config, sleep)
   registerHealthRoute(ctx, runtime, config, sleep)
 
   // THE REPORTED KIND OF PLUGIN FAILURE — LOOK ONLY (user decision, 2026-11-01).
@@ -14977,6 +15251,7 @@ export {
   PLUGIN_VERSION_FALLBACK,
   SLEEP_FEATURE_VERSION,
   SUPERVISOR_FEATURE_VERSION,
+  GATE_FEATURE_VERSION,
 }
 
 /**

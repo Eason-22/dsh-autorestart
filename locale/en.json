@@ -200,6 +200,10 @@
       "value": "{n} seconds",
       "hint": "Once every conversation is done, this countdown is shown on screen (pick \"Never mind, keep it on\" to cancel); the machine goes off when it reaches zero. Raise it when you want more time to write."
     },
+    "gate": {
+      "label": "Block the \"ask me\" card while shutting down",
+      "hint": "After you click \"Shut down\", it stops asking you with a card: it writes the questions that need your decision into the conversation and first does what you already agreed to; cancelling the shutdown puts everything back to normal."
+    },
     "restartGrace": {
       "label": "Restart countdown",
       "hint": "Set the restart countdown (0 seconds by default); if you use a memory or summary plugin that writes after the conversation ended, set it to 10 seconds or more.",
@@ -400,7 +404,14 @@
     "line3": "To change that, go to \"Settings → Auto-restart & shut down\".",
     "disabled": "The button is currently switched off; you can turn it on in the settings.",
     "button": "Got it",
-    "error": "Could not record it: {message}"
+    "error": "Could not record it: {message}",
+    "gate": {
+      "title": "New feature: no more interruptions after \"Shut down\"",
+      "line1": "After you click \"Shut down\" to go to bed, it stops asking you with a card.",
+      "line2": "The questions that need your decision are written into the conversation, waiting for you.",
+      "line3": "It is on by default; to turn it off, go to \"Settings → Auto-restart & shut down\".",
+      "button": "Got it"
+    }
   },
   "shellBackups": {
     "title": "Backup leftovers from an older build",

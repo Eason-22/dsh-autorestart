@@ -245,6 +245,25 @@ test('a value containing a replacement pattern is inserted literally', () => {
   assert.equal(t('any.key', { v: '$1$`' }), 'v=$1$`')
 })
 
+test('the gate of the shutdown has its copy in both languages', () => {
+  const zh = loadClient({ language: 'zh-CN' }).makeTranslate(null)
+  assert.equal(zh('settings.gate.label'), '关机时拦住「问我」的卡')
+  assert.match(zh('settings.gate.hint'), /收工关机/, 'the Chinese hint names the shutdown')
+  const en = loadClient({ language: 'en-US' }).makeTranslate(null)
+  assert.equal(en('settings.gate.label'), 'Block the "ask me" card while shutting down')
+  assert.match(en('settings.gate.hint'), /Shut down/, 'the English hint names the shutdown')
+})
+
+test('the card of the gate has its copy in both languages', () => {
+  const zh = loadClient({ language: 'zh-CN' }).makeTranslate(null)
+  assert.equal(zh('announcement.gate.title'), '新功能：收工关机后不再打扰你')
+  assert.equal(zh('announcement.gate.button'), '知道了')
+  assert.match(zh('announcement.gate.line2'), /对话正文/, 'the questions go into the conversation')
+  const en = loadClient({ language: 'en-US' }).makeTranslate(null)
+  assert.equal(en('announcement.gate.button'), 'Got it')
+  assert.match(en('announcement.gate.line2'), /conversation/, 'the questions go into the conversation')
+})
+
 test('the language follows the Host, and the browser is only the fallback', () => {
   const api = loadClient({ language: 'zh-CN' })
   assert.equal(api.currentLanguage(), 'zh', 'the browser language decides when the Host says nothing')

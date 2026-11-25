@@ -1,8 +1,8 @@
 {
   "name": "dsh-autorestart",
-  "version": "0.9.14",
+  "version": "1.0.0",
   "type": "module",
-  "description": "DSH plugin: restarts only when every session is idle, waits for plugin installs, then resumes the sessions it interrupted; adds a countdown shutdown, a pre-restart snapshot, and a windowless launcher.",
+  "description": "DSH plugin: restarts DeepSeek Harness only when every session is idle, holds questions while you are away, and resumes the interrupted work.",
   "license": "MIT",
   "keywords": [
     "dsh",
@@ -12,7 +12,11 @@
     "continuation",
     "session-resume",
     "graceful-restart",
-    "plugin-install"
+    "plugin-install",
+    "idle-restart",
+    "ask-gate",
+    "session-handoff",
+    "watchdog"
   ],
   "repository": {
     "type": "git",

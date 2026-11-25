@@ -344,6 +344,8 @@
     'settings.seconds.immediate': '不倒数（立即关机）',
     'settings.seconds.value': '{n} 秒',
     'settings.seconds.hint': '所有会话收工后，屏幕上会显示这段倒数（可点「不关了」取消），数完才关机；想要更多落盘时间就把倒数调大。',
+    'settings.gate.label': '关机时拦住「问我」的卡',
+    'settings.gate.hint': '你点了「收工关机」之后，它不再弹卡问你：把要你拍板的问题写进对话正文，先做你已经点头过的事；你点取消关机就恢复正常。',
     'settings.restartGrace.label': '重启倒数时间',
     'settings.restartGrace.hint': '设置重启倒数时间（默认 0 秒）；如果你装了“会话结束后才写”的记忆/总结类插件，建议调整到 10 秒或以上。',
     'settings.restartGrace.value': '{n} 秒',
@@ -616,6 +618,11 @@
     'announcement.disabled': '按钮目前关闭，可在设置里打开。',
     'announcement.button': '知道了',
     'announcement.error': '没能记下来：{message}',
+    'announcement.gate.title': '新功能：收工关机后不再打扰你',
+    'announcement.gate.line1': '你点「收工关机」去睡觉后，它不再弹卡问你。',
+    'announcement.gate.line2': '要你拍板的问题会写进对话正文，等你回来定。',
+    'announcement.gate.line3': '默认就开着；想关，去「设置 → 自动重启与关机」。',
+    'announcement.gate.button': '知道了',
     // THE LEFTOVERS OF AN OLDER BUILD (2026-11-06): asked ONCE, and gone for
     // good after the answer. There is deliberately no settings entry and no
     // permanent banner for this — the problem must disappear with the answer.
@@ -882,6 +889,8 @@
     'settings.seconds.immediate': 'No countdown (switch off right away)',
     'settings.seconds.value': '{n} seconds',
     'settings.seconds.hint': 'Once every conversation is done, this countdown is shown on screen (pick "Never mind, keep it on" to cancel); the machine goes off when it reaches zero. Raise it when you want more time to write.',
+    'settings.gate.label': 'Block the "ask me" card while shutting down',
+    'settings.gate.hint': 'After you click "Shut down", it stops asking you with a card: it writes the questions that need your decision into the conversation and first does what you already agreed to; cancelling the shutdown puts everything back to normal.',
     'settings.restartGrace.label': 'Restart countdown',
     'settings.restartGrace.hint': 'Set the restart countdown (0 seconds by default); if you use a memory or summary plugin that writes after the conversation ended, set it to 10 seconds or more.',
     'settings.restartGrace.value': '{n} seconds',
@@ -1128,6 +1137,11 @@
     'announcement.disabled': 'The button is currently switched off; you can turn it on in the settings.',
     'announcement.button': 'Got it',
     'announcement.error': 'Could not record it: {message}',
+    'announcement.gate.title': 'New feature: no more interruptions after "Shut down"',
+    'announcement.gate.line1': 'After you click "Shut down" to go to bed, it stops asking you with a card.',
+    'announcement.gate.line2': 'The questions that need your decision are written into the conversation, waiting for you.',
+    'announcement.gate.line3': 'It is on by default; to turn it off, go to "Settings → Auto-restart & shut down".',
+    'announcement.gate.button': 'Got it',
     // THE LEFTOVERS OF AN OLDER BUILD (2026-11-06): asked ONCE, and gone for
     // good after the answer. There is deliberately no settings entry and no
     // permanent banner for this - the problem must disappear with the answer.
@@ -6976,9 +6990,24 @@
         const pluginFilesStableMs = Number.isFinite(pluginFiles.stableMs)
           ? pluginFiles.stableMs
           : PLUGIN_FILES_DEFAULT_STABLE_MS
+        // What the user wrote here, when the Host does not report the key
+        // (an older Host): the switch must not flip back under the finger
+        // that just turned it.
+        const [gateOverride, setGateOverride] = useState(null)
         const pluginFilesMaxBlockMs = Number.isFinite(pluginFiles.maxBlockMs)
           ? pluginFiles.maxBlockMs
           : PLUGIN_FILES_DEFAULT_MAX_BLOCK_MS
+        // THE GATE (2026-11-24): whether the shutdown may still ASK the user
+        // something with a card. The Host reports the value that is really
+        // in effect; when it does not (a Host that does not know the gate yet),
+        // the documented default — the gate is ON — is what the page shows,
+        // and the value the user wrote here stands until the Host reports one.
+        const gateReported = status && typeof status === 'object' && typeof status.gateOnSleep === 'boolean'
+          ? status.gateOnSleep
+          : null
+        const gateOnSleep = gateReported === null
+          ? (gateOverride === null ? true : gateOverride)
+          : gateReported
 
         // THE SUPERVISOR: who starts this host, and can the restart work at all.
         // The Host reports it in the state payload.
@@ -7573,28 +7602,6 @@
               { className: 'dsh-autorestart-settings__group-title' },
               t('settings.groups.restart'),
             ),
-            // THE STATUS LINE: what the restart is doing right now, next to the
-            // settings that control it. It lives here (the pill only exists
-            // while a restart is pending), so a slow backup, "restarting" and
-            // "back — carrying on" are visible where the user went looking.
-            restartStageText(info && info.restartPhase) === ''
-              ? null
-              : h(
-                'div',
-                {
-                  className: 'dsh-autorestart-settings__status',
-                  'data-dsh-autorestart-stage': String(
-                    info && info.restartPhase && info.restartPhase.phase ? info.restartPhase.phase : '',
-                  ),
-                  style: {
-                    margin: '2px 0 8px',
-                    fontSize: 12,
-                    lineHeight: '16px',
-                    color: 'var(--dsw-alias-label-secondary, inherit)',
-                  },
-                },
-                restartStageText(info && info.restartPhase),
-              ),
             // THE ROWS (user decision, 2026-11-11): every setting of this group
             // is the same row — the title on the left, the control on the
             // right, the explanation folded behind ONE 「查看说明」 entry.
@@ -7632,6 +7639,37 @@
                   'span',
                   { className: 'dsh-autorestart-settings__hint' },
                   t('settings.restartGrace.hint'),
+                ),
+              }),
+              // ② HOW THE RESTART COMMAND IS STARTED. It is a setting of the
+              // RESTART, so it lives with the restart settings (user decision,
+              // 2026-11-24) — it used to hide in the 「更多设置」 fold.
+              settingsRow(t, {
+                rowKey: 'restartWindow',
+                title: t('settings.window.label'),
+                controlId: 'dsh-autorestart-setting-restartWindow',
+                control: h(
+                  'select',
+                  {
+                    className: 'dsh-autorestart-settings__select',
+                    id: 'dsh-autorestart-setting-restartWindow',
+                    value: restartWindow,
+                    disabled: busy,
+                    'data-dsh-autorestart-setting': 'restartWindow',
+                    onChange: (event) => {
+                      const value = event && event.target ? String(event.target.value) : ''
+                      if (value !== 'foreground' && value !== 'background') return
+                      if (value === restartWindow) return
+                      void save({ restartWindow: value })
+                    },
+                  },
+                  h('option', { key: 'foreground', value: 'foreground' }, t('settings.window.foreground')),
+                  h('option', { key: 'background', value: 'background' }, t('settings.window.background')),
+                ),
+                hint: h(
+                  'span',
+                  { className: 'dsh-autorestart-settings__hint' },
+                  t('settings.window.hint'),
                 ),
               }),
               // ② THE PRE-RESTART BACKUP.
@@ -7773,86 +7811,6 @@
                     t('settings.backup.limitHint'),
                   ),
                 }),
-                // THE COMPARISON BUDGET, AS A PICK (2026-11-23, user decision):
-                // a free number box invited values nobody wants and could not be
-                // saved at all — it posted to the BACKUP-COUNT route, whose body
-                // only carries maxBackups, so every attempt came back
-                // "the copy limit must be a number" and the box reset itself.
-                // A short list of four sane sizes is both easier to use and
-                // impossible to get wrong; it saves through the route that
-                // actually persists this key.
-                settingsRow(t, {
-                  rowKey: 'maxCompareFiles',
-                  title: t('settings.backup.compareLabel'),
-                  controlId: 'dsh-autorestart-setting-maxCompareFiles',
-                  control: h(
-                    'select',
-                    {
-                      className: 'dsh-autorestart-settings__select',
-                      id: 'dsh-autorestart-setting-maxCompareFiles',
-                      'data-dsh-autorestart-setting': 'maxCompareFiles',
-                      value: String(compareValue === null ? backupsInfo.maxCompareFiles : compareValue),
-                      disabled: compareBusy,
-                      onChange: (event) => {
-                        const wanted = Number(event.target.value)
-                        if (Number.isFinite(wanted) !== true || wanted <= 0) return
-                        void (async () => {
-                          const url = choiceUrlFor(info)
-                          if (url === '') {
-                            setCompareNote(t('settings.backup.compareFailed'))
-                            return
-                          }
-                          setCompareBusy(true)
-                          setCompareNote(null)
-                          try {
-                            const response = await fetch(url, {
-                              method: 'POST',
-                              headers: { 'content-type': 'application/json', accept: 'application/json' },
-                              body: JSON.stringify({ maxCompareFiles: wanted }),
-                            })
-                            const answer = await response.json().catch(() => null)
-                            if (response.ok !== true || answer === null || answer.ok !== true) {
-                              setCompareNote(answer && typeof answer.reason === 'string' && answer.reason !== ''
-                                ? answer.reason
-                                : t('settings.backup.compareFailed'))
-                              return
-                            }
-                            setCompareValue(wanted)
-                            void pollOnce()
-                            setCompareNote(fill(t('settings.backup.compareSaved'), { n: String(wanted) }))
-                          } catch {
-                            setCompareNote(t('settings.backup.compareFailed'))
-                          } finally {
-                            setCompareBusy(false)
-                          }
-                        })()
-                      },
-                    },
-                    COMPARE_FILE_LIMIT_CHOICES.map((n) =>
-                      h('option', { value: String(n), key: 'compare-limit-' + n }, String(n)),
-                    ),
-                  ),
-                  hint: h(
-                    'span',
-                    {
-                      className: 'dsh-autorestart-settings__hint',
-                      'data-dsh-autorestart-backup': 'compare-hint',
-                    },
-                    t('settings.backup.compareHint'),
-                  ),
-                }),
-              ),
-              compareNote === null
-                ? null
-                : h(
-                  'div',
-                  { className: 'dsh-autorestart-settings__backup-row', key: 'compare-note' },
-                  h(
-                    'span',
-                    { className: 'dsh-autorestart-settings__backup-label', 'data-dsh-autorestart-backup': 'compare-note' },
-                    compareNote,
-                  ),
-                ),
 
               // THE CONFIRMATION AND THE RESULT OF A SHRINK stay with the
               // dropdown they belong to — so they sit right under the block,
@@ -8203,60 +8161,6 @@
                 )
               })(),
           ),
-          // THE ONCE-AND-DONE SETTINGS MOVED OUT (user decision, 2026-11-11):
-          // the launcher mode and the plugin-folder watchdog are set once and
-          // then forgotten, so they live in the 「更多设置」 block of their own
-          // — after the shutdown settings and before 「遇到问题」 — and that
-          // block is closed by default. The 「上次重启」 row is gone from the
-          // page as well (2026-11-11): the launcher that really ran is still
-          // reported by the Host (the status payload and the diagnostics),
-          // it simply does not take up room on the settings page any more.
-          h(
-            'div',
-            {
-              className: 'dsh-autorestart-settings__group',
-              'data-dsh-autorestart-group': 'shutdown',
-            },
-            h(
-              'div',
-              { className: 'dsh-autorestart-settings__group-title' },
-              t('settings.groups.shutdown'),
-            ),
-            h(
-              'div',
-              { className: 'dsh-autorestart-settings__rows' },
-              settingsRow(t, {
-                rowKey: 'sleepCountdownSeconds',
-                title: t('settings.seconds.label'),
-                controlId: 'dsh-autorestart-setting-sleepCountdownSeconds',
-                control: h(
-                  'select',
-                  {
-                    className: 'dsh-autorestart-settings__select',
-                    id: 'dsh-autorestart-setting-sleepCountdownSeconds',
-                    value: String(seconds),
-                    disabled: busy,
-                    'data-dsh-autorestart-setting': 'sleepCountdownSeconds',
-                    onChange: (event) => {
-                      const value = Number(event && event.target ? event.target.value : NaN)
-                      if (!Number.isFinite(value) || value === seconds) return
-                      void save({ sleepCountdownSeconds: value })
-                    },
-                  },
-                  SLEEP_COUNTDOWN_CHOICES.map((choice) => h(
-                    'option',
-                    { key: String(choice), value: String(choice) },
-                    choice === 0 ? t('settings.seconds.immediate') : fill(t('settings.seconds.value'), { n: choice }),
-                  )),
-                ),
-                hint: h(
-                  'span',
-                  { className: 'dsh-autorestart-settings__hint' },
-                  t('settings.seconds.hint'),
-                ),
-              }),
-            ),
-          ),
           // THE 「更多设置」 BLOCK (user decision, 2026-11-11): a block of its
           // own, closed by default, placed after the shutdown settings and
           // before 「遇到问题」. Its four rows are the very same rows as
@@ -8272,35 +8176,6 @@
             h(
               'div',
               { className: 'dsh-autorestart-settings__rows' },
-              // ① HOW THE RESTART COMMAND IS STARTED.
-              settingsRow(t, {
-                rowKey: 'restartWindow',
-                title: t('settings.window.label'),
-                controlId: 'dsh-autorestart-setting-restartWindow',
-                control: h(
-                  'select',
-                  {
-                    className: 'dsh-autorestart-settings__select',
-                    id: 'dsh-autorestart-setting-restartWindow',
-                    value: restartWindow,
-                    disabled: busy,
-                    'data-dsh-autorestart-setting': 'restartWindow',
-                    onChange: (event) => {
-                      const value = event && event.target ? String(event.target.value) : ''
-                      if (value !== 'foreground' && value !== 'background') return
-                      if (value === restartWindow) return
-                      void save({ restartWindow: value })
-                    },
-                  },
-                  h('option', { key: 'foreground', value: 'foreground' }, t('settings.window.foreground')),
-                  h('option', { key: 'background', value: 'background' }, t('settings.window.background')),
-                ),
-                hint: h(
-                  'span',
-                  { className: 'dsh-autorestart-settings__hint' },
-                  t('settings.window.hint'),
-                ),
-              }),
               // ② THE PLUGIN-FOLDER WATCHDOG: an install that never goes
               // through the market (a manual `pnpm add`, the host plugin
               // manager) touches exactly these files, so a restart or a
@@ -8414,301 +8289,168 @@
                   ),
                 }),
               ),
+              // THE COMPARISON BUDGET, AS A PICK (2026-11-23, user decision):
+              // a free number box invited values nobody wants and could not be
+              // saved at all — it posted to the BACKUP-COUNT route, whose body
+              // only carries maxBackups, so every attempt came back
+              // "the copy limit must be a number" and the box reset itself.
+              // A short list of four sane sizes is both easier to use and
+              // impossible to get wrong; it saves through the route that
+              // actually persists this key.
+              settingsRow(t, {
+                rowKey: 'maxCompareFiles',
+                title: t('settings.backup.compareLabel'),
+                controlId: 'dsh-autorestart-setting-maxCompareFiles',
+                control: h(
+                  'select',
+                  {
+                    className: 'dsh-autorestart-settings__select',
+                    id: 'dsh-autorestart-setting-maxCompareFiles',
+                    'data-dsh-autorestart-setting': 'maxCompareFiles',
+                    value: String(compareValue === null ? backupsInfo.maxCompareFiles : compareValue),
+                    disabled: compareBusy,
+                    onChange: (event) => {
+                      const wanted = Number(event.target.value)
+                      if (Number.isFinite(wanted) !== true || wanted <= 0) return
+                      void (async () => {
+                        const url = choiceUrlFor(info)
+                        if (url === '') {
+                          setCompareNote(t('settings.backup.compareFailed'))
+                          return
+                        }
+                        setCompareBusy(true)
+                        setCompareNote(null)
+                        try {
+                          const response = await fetch(url, {
+                            method: 'POST',
+                            headers: { 'content-type': 'application/json', accept: 'application/json' },
+                            body: JSON.stringify({ maxCompareFiles: wanted }),
+                          })
+                          const answer = await response.json().catch(() => null)
+                          if (response.ok !== true || answer === null || answer.ok !== true) {
+                            setCompareNote(answer && typeof answer.reason === 'string' && answer.reason !== ''
+                              ? answer.reason
+                              : t('settings.backup.compareFailed'))
+                            return
+                          }
+                          setCompareValue(wanted)
+                          void pollOnce()
+                          setCompareNote(fill(t('settings.backup.compareSaved'), { n: String(wanted) }))
+                        } catch {
+                          setCompareNote(t('settings.backup.compareFailed'))
+                        } finally {
+                          setCompareBusy(false)
+                        }
+                      })()
+                    },
+                  },
+                  COMPARE_FILE_LIMIT_CHOICES.map((n) =>
+                    h('option', { value: String(n), key: 'compare-limit-' + n }, String(n)),
+                  ),
+                ),
+                hint: h(
+                  'span',
+                  {
+                    className: 'dsh-autorestart-settings__hint',
+                    'data-dsh-autorestart-backup': 'compare-hint',
+                  },
+                  t('settings.backup.compareHint'),
+                ),
+              }),
+            ),
+              compareNote === null
+                ? null
+                : h(
+                  'div',
+                  { className: 'dsh-autorestart-settings__backup-row', key: 'compare-note' },
+                  h(
+                    'span',
+                    { className: 'dsh-autorestart-settings__backup-label', 'data-dsh-autorestart-backup': 'compare-note' },
+                    compareNote,
+                  ),
+                ),
             ),
           ),
-          // The SUPERVISOR group: who starts this host, and whether the restart
-          // can work at all. HIDDEN ON THE DESKTOP APP (user decision, 2026-11-02):
-          // the desktop client relaunches itself, so there is no supervisor to
-          // install and nothing in this group can be acted on.
-          hostIsDesktop === true ? null : h(
+          // THE ONCE-AND-DONE SETTINGS MOVED OUT (user decision, 2026-11-11):
+          // the launcher mode and the plugin-folder watchdog are set once and
+          // then forgotten, so they live in the 「更多设置」 block of their own
+          // — after the shutdown settings and before 「遇到问题」 — and that
+          // block is closed by default. The 「上次重启」 row is gone from the
+          // page as well (2026-11-11): the launcher that really ran is still
+          // reported by the Host (the status payload and the diagnostics),
+          // it simply does not take up room on the settings page any more.
+          h(
             'div',
             {
               className: 'dsh-autorestart-settings__group',
-              'data-dsh-autorestart-group': 'supervisor',
+              'data-dsh-autorestart-group': 'shutdown',
             },
             h(
               'div',
               { className: 'dsh-autorestart-settings__group-title' },
-              t('settings.groups.supervisor'),
+              t('settings.groups.shutdown'),
             ),
-            // THE SAME ROWS AS EVERYWHERE ELSE (2026-11-11): the title on the
-            // left, the value on the right, the explanation folded behind
-            // 「查看说明」.
             h(
               'div',
               { className: 'dsh-autorestart-settings__rows' },
               settingsRow(t, {
-                rowKey: 'supervisor.status',
-                wide: true,
-                title: t('settings.supervisor.status'),
+                rowKey: 'sleepCountdownSeconds',
+                title: t('settings.seconds.label'),
+                controlId: 'dsh-autorestart-setting-sleepCountdownSeconds',
                 control: h(
-                  'span',
-                  { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'mode' },
-                  supervisorModeLabel(t, supervisorStatus),
+                  'select',
+                  {
+                    className: 'dsh-autorestart-settings__select',
+                    id: 'dsh-autorestart-setting-sleepCountdownSeconds',
+                    value: String(seconds),
+                    disabled: busy,
+                    'data-dsh-autorestart-setting': 'sleepCountdownSeconds',
+                    onChange: (event) => {
+                      const value = Number(event && event.target ? event.target.value : NaN)
+                      if (!Number.isFinite(value) || value === seconds) return
+                      void save({ sleepCountdownSeconds: value })
+                    },
+                  },
+                  SLEEP_COUNTDOWN_CHOICES.map((choice) => h(
+                    'option',
+                    { key: String(choice), value: String(choice) },
+                    choice === 0 ? t('settings.seconds.immediate') : fill(t('settings.seconds.value'), { n: choice }),
+                  )),
                 ),
                 hint: h(
                   'span',
                   { className: 'dsh-autorestart-settings__hint' },
-                  t('settings.supervisor.hint'),
+                  t('settings.seconds.hint'),
                 ),
               }),
+              // ② THE GATE OF THE SHUTDOWN (user decision, 2026-11-24): while the
+              // machine is going to sleep, the plugin must not pop a card and ask
+              // the user something — the questions go into the conversation text.
               settingsRow(t, {
-                rowKey: 'supervisor.capable',
-                wide: true,
-                title: t('settings.supervisor.capable'),
-                control: h(
+                rowKey: 'gateOnSleep',
+                title: t('settings.gate.label'),
+                controlId: 'dsh-autorestart-setting-gateOnSleep',
+                control: settingsSwitch({
+                  settingKey: 'gateOnSleep',
+                  id: 'dsh-autorestart-setting-gateOnSleep',
+                  checked: gateOnSleep,
+                  disabled: busy,
+                  onChange: (event) => {
+                    const value = Boolean(event && event.target ? event.target.checked : false)
+                    if (value === gateOnSleep) return
+                    // What the user wrote is remembered here, so the switch does
+                    // not flip back before the Host reports the key.
+                    setGateOverride(value)
+                    void save({ gateOnSleep: value })
+                  },
+                }),
+                hint: h(
                   'span',
-                  { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'capable' },
-                  supervisorStatus && supervisorStatus.restartCapable === true
-                    ? t('settings.supervisor.capableYes')
-                    : t('settings.supervisor.capableNo'),
+                  { className: 'dsh-autorestart-settings__hint' },
+                  t('settings.gate.hint'),
                 ),
               }),
-              supervisorStartup !== null
-                ? settingsRow(t, {
-                    rowKey: 'supervisor.startup',
-                    wide: true,
-                    title: t('settings.supervisor.startup'),
-                    control: h(
-                      'span',
-                      { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'startup' },
-                      startupModeLabel(t, supervisorStartup),
-                    ),
-                    hint: h(
-                      'span',
-                      { className: 'dsh-autorestart-settings__hint' },
-                      startupWhy(t, supervisorStartup),
-                    ),
-                  })
-                : null,
-              supervisorAutostart !== null
-                ? settingsRow(t, {
-                    rowKey: 'supervisor.autostart',
-                    wide: true,
-                    title: t('settings.supervisor.autostart'),
-                    control: h(
-                      'span',
-                      { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'autostart' },
-                      humanKind(t, supervisorAutostart.kind),
-                    ),
-                    hint: [
-                      h(
-                        'span',
-                        { key: 'reason', className: 'dsh-autorestart-settings__hint' },
-                        stripMarkdown(supervisorAutostart.reason),
-                      ),
-                      supervisorAutostart.commands.length > 0
-                        ? h(
-                            'span',
-                            {
-                              key: 'commands',
-                              className: 'dsh-autorestart-settings__hint',
-                              'data-dsh-autorestart-supervisor': 'autostart-commands',
-                            },
-                            supervisorAutostart.commands.join('   ;   '),
-                          )
-                        : null,
-                    ],
-                  })
-                : null,
-              accessUrl
-                ? settingsRow(t, {
-                    rowKey: 'supervisor.access',
-                    wide: true,
-                    title: t('settings.supervisor.access'),
-                    control: h(
-                      'code',
-                      { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-access': 'url' },
-                      accessUrl,
-                    ),
-                    hint: h(
-                      'span',
-                      { className: 'dsh-autorestart-settings__hint' },
-                      t('settings.supervisor.accessHint'),
-                    ),
-                  })
-                : null,
             ),
-            supervisorInstalled || supervisorCanInstall
-              ? h(
-                  'div',
-                  { className: 'dsh-autorestart-settings__field' },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-autorestart-settings__button',
-                      disabled: busy,
-                      'data-dsh-autorestart-supervisor': supervisorInstalled ? 'uninstall' : 'install',
-                      onClick: () => void driveSupervisor(supervisorInstalled ? 'uninstall' : 'install'),
-                    },
-                    supervisorInstalled ? t('settings.supervisor.uninstall') : t('settings.supervisor.install'),
-                  ),
-                  supervisorPending
-                    ? h(
-                        'span',
-                        { className: 'dsh-autorestart-settings__hint' },
-                        fill(t('settings.supervisor.pending'), { commands: supervisorPending }),
-                      )
-                    : null,
-                )
-              : h(
-                  'div',
-                  { className: 'dsh-autorestart-settings__field' },
-                  h(
-                    'span',
-                    { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-supervisor': 'no-install' },
-                    t(supervisorNoInstall),
-                  ),
-                ),
-            // E + B, in plain words: ONE line that says what this plugin
-            // remembers about the way the host was started, two small actions
-            // next to it, and the command itself folded away ("technical
-            // details"). The desktop client brings ITSELF back up, so the
-            // whole block stays away there — and so does an unknown host.
-            showStartupBlock
-              ? h(
-                  'div',
-                  { className: 'dsh-autorestart-settings__field' },
-                  h(
-                    'span',
-                    { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'startup-status' },
-                    t(startupStatus.key),
-                  ),
-                  startupStatus.canDerive
-                    ? h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'dsh-autorestart-settings__button',
-                          disabled: busy,
-                          'data-dsh-autorestart-supervisor': 'derive',
-                          onClick: () => void driveDryRun('dry-run'),
-                        },
-                        t('settings.supervisor.deriveHelp'),
-                      )
-                    : null,
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-autorestart-settings__button',
-                      disabled: busy,
-                      'data-dsh-autorestart-supervisor': 'redetect',
-                      onClick: () => void driveDryRun('dry-run'),
-                    },
-                    t('settings.supervisor.redetect'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-autorestart-settings__button',
-                      // Nothing to undo: the button says so instead of lying.
-                      disabled: busy || !restartInfo.canRevert,
-                      'data-dsh-autorestart-supervisor': 'revert',
-                      onClick: () => void driveDryRun('revert'),
-                    },
-                    t('settings.supervisor.revert'),
-                  ),
-                )
-              : null,
-            showStartupBlock
-              ? h(
-                  'details',
-                  {
-                    className: 'dsh-autorestart-settings__details',
-                    'data-dsh-autorestart-supervisor': 'details',
-                    onToggle: (event) => {
-                      setDetailsOpen(Boolean(event && event.target ? event.target.open : false))
-                    },
-                  },
-                  h(
-                    'summary',
-                    { className: 'dsh-autorestart-settings__summary' },
-                    t('settings.supervisor.technical'),
-                  ),
-                  // The content is only IN the page while the fold is open: a
-                  // closed fold shows the title only.
-                  detailsOpen
-                    ? h(
-                        'div',
-                        { className: 'dsh-autorestart-settings__dry-run' },
-                        h(
-                          'span',
-                          { className: 'dsh-autorestart-settings__hint' },
-                          t('settings.supervisor.technicalHint'),
-                        ),
-                        dryRun
-                          ? h(
-                              'div',
-                              { className: 'dsh-autorestart-settings__dry-run', 'data-dsh-autorestart-dry-run': 'true' },
-                              h(
-                                'span',
-                                { className: 'dsh-autorestart-settings__hint' },
-                                t('settings.supervisor.plan'),
-                              ),
-                              h(
-                                'code',
-                                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-dry-run': 'command' },
-                                dryRun.command || t('settings.supervisor.noCommand'),
-                              ),
-                              h(
-                                'span',
-                                { className: 'dsh-autorestart-settings__hint', 'data-dsh-autorestart-dry-run': 'reason' },
-                                t('settings.supervisor.reason.' + (dryRun.reason || 'ok')),
-                              ),
-                              dryRun.ok
-                                ? h(
-                                    'button',
-                                    {
-                                      type: 'button',
-                                      className: 'dsh-autorestart-settings__button',
-                                      disabled: busy,
-                                      'data-dsh-autorestart-supervisor': 'apply',
-                                      onClick: () => void driveDryRun('apply'),
-                                    },
-                                    t('settings.supervisor.apply'),
-                                  )
-                                : null,
-                            )
-                          : null,
-                        restartInfo.written
-                          ? h(
-                              'div',
-                              { className: 'dsh-autorestart-settings__dry-run' },
-                              h(
-                                'span',
-                                { className: 'dsh-autorestart-settings__hint' },
-                                t('settings.supervisor.command'),
-                              ),
-                              h(
-                                'code',
-                                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'written' },
-                                restartInfo.command,
-                              ),
-                            )
-                          : null,
-                        restartInfo.previous && restartInfo.previous.restartCommand
-                          ? h(
-                              'div',
-                              { className: 'dsh-autorestart-settings__dry-run' },
-                              h(
-                                'span',
-                                { className: 'dsh-autorestart-settings__hint' },
-                                t('settings.supervisor.previous'),
-                              ),
-                              h(
-                                'code',
-                                { className: 'dsh-autorestart-settings__value', 'data-dsh-autorestart-supervisor': 'previous' },
-                                restartInfo.previous.restartCommand,
-                              ),
-                            )
-                          : null,
-                      )
-                    : null,
-                )
-              : null,
           ),
           // "REPORT A PROBLEM": copy the diagnostics and open a pre-filled
           // issue page. The email is the way out when there is no GitHub
@@ -9496,9 +9238,37 @@
       // its prefix, so it is derived the very same way.
       const DEFAULT_ANNOUNCEMENTS_URL = ROUTE_PREFIX + '/announcements'
 
-      // The feature this client half can describe. The Host may know more
-      // features, but only this one has a card here.
+      // The features this client half can describe. The Host may know more
+      // features than the browser has a card for — a feature without a card is
+      // simply not shown (and it never breaks the page).
       const ANNOUNCED_FEATURE = 'sleep'
+      // THE GATE (2026-11-24): the feature key the Host announces the gate
+      // with. It is a CONTRACT with the Host, not a name of our own.
+      const ANNOUNCED_GATE = 'gate'
+      // THE CARDS, ONE PER FEATURE (2026-11-24).
+      //
+      // The Host reports the announcements the user has not seen yet; the
+      // browser owns ONE card per feature it has copy for. This mapping is that
+      // ownership: a feature that is not in it has no card, and the panel shows
+      // nothing for it instead of guessing words.
+      const ANNOUNCEMENT_CARDS = Object.freeze({
+        [ANNOUNCED_FEATURE]: Object.freeze({
+          title: 'announcement.title',
+          line1: 'announcement.line1',
+          line2: 'announcement.line2',
+          line2Generic: 'announcement.line2.generic',
+          line3: 'announcement.line3',
+          note: 'announcement.disabled',
+          button: 'announcement.button',
+        }),
+        [ANNOUNCED_GATE]: Object.freeze({
+          title: 'announcement.gate.title',
+          line1: 'announcement.gate.line1',
+          line2: 'announcement.gate.line2',
+          line3: 'announcement.gate.line3',
+          button: 'announcement.gate.button',
+        }),
+      })
 
       // A HOST THAT CANNOT RESTART (2026-11-02): its own one-time card, in the
       // same announcement ledger as the feature above — same route, same
@@ -9644,6 +9414,42 @@
       }
 
       /**
+       * THE COPY OF ONE ANNOUNCEMENT CARD.
+       *
+       * The Host may announce a feature this browser knows nothing about (a
+       * newer Host, an older browser): then there is NO card, and the panel
+       * shows nothing at all — a feature the browser does not know must never
+       * blank the page or print a key name.
+       *
+       * @param {string} feature the feature the Host announced
+       * @param {Function} t the translator of this plugin
+       * @param {object|null} status the sleep status (the countdown length)
+       * @returns {{ title: string, lines: string[], note: string, button: string }|null}
+       *   null when this browser has no card for that feature
+       */
+      function announcementCopy(feature, t, status) {
+        const card = typeof feature === 'string' ? ANNOUNCEMENT_CARDS[feature] : null
+        if (!card) return null
+        const seconds = status && typeof status.countdownSeconds === 'number'
+          ? status.countdownSeconds
+          : null
+        const hidden = Boolean(status && status.showSleepButton === false)
+        const lines = [t(card.line1)]
+        if (card.line2Generic) {
+          lines.push(seconds === null ? t(card.line2Generic) : fill(t(card.line2), { n: seconds }))
+        } else {
+          lines.push(t(card.line2))
+        }
+        lines.push(t(card.line3))
+        return {
+          title: t(card.title),
+          lines,
+          note: card.note && hidden ? t(card.note) : '',
+          button: t(card.button),
+        }
+      }
+
+      /**
        * The one-time card that announces a new feature.
        *
        * The install prompt only ever reaches a FRESH installation, so an
@@ -9694,13 +9500,13 @@
          * disappears. A refused request keeps the card (with the reason), so
          * the announcement is never lost.
          */
-        const acknowledge = () => {
+        const acknowledge = (feature) => {
           if (busy) return
           setBusy(true)
           setState((current) => ({ ...current, error: '' }))
           void (async () => {
             try {
-              const recorded = await acknowledgeAnnouncement(ANNOUNCED_FEATURE)
+              const recorded = await acknowledgeAnnouncement(feature)
               if (!recorded) throw new Error('the Host refused the announcement')
             } catch (failure) {
               setBusy(false)
@@ -9713,21 +9519,20 @@
             setBusy(false)
             setState((current) => ({
               ...current,
-              pending: current.pending.filter((entry) => entry.feature !== ANNOUNCED_FEATURE),
+              pending: current.pending.filter((entry) => entry.feature !== feature),
             }))
           })()
         }
 
         if (!state.loaded) return null
-        const entry = state.pending.find((item) => item && item.feature === ANNOUNCED_FEATURE)
+        // THE FIRST PENDING ANNOUNCEMENT THIS BROWSER HAS A CARD FOR: a feature
+        // the browser does not know is skipped — it is not an error, and it must
+        // never blank the page.
+        const entry = state.pending.find(
+          (item) => item && announcementCopy(item.feature, t, state.status) !== null,
+        )
         if (!entry) return null
-
-        // The countdown length is read from the Host, never written into the
-        // copy: the card always quotes what is really in effect.
-        const seconds = state.status && typeof state.status.countdownSeconds === 'number'
-          ? state.status.countdownSeconds
-          : null
-        const hidden = Boolean(state.status && state.status.showSleepButton === false)
+        const copy = announcementCopy(entry.feature, t, state.status)
         ensureAnnouncementStyle()
 
         return h(
@@ -9736,21 +9541,17 @@
             className: 'dsh-autorestart-announcement',
             role: 'status',
             'data-dsh-autorestart-announcement': 'true',
-            'data-dsh-autorestart-announcement-feature': ANNOUNCED_FEATURE,
+            'data-dsh-autorestart-announcement-feature': entry.feature,
           },
-          h('h3', { className: 'dsh-autorestart-announcement__title' }, t('announcement.title')),
-          h('p', { className: 'dsh-autorestart-announcement__line' }, t('announcement.line1')),
-          h(
+          h('h3', { className: 'dsh-autorestart-announcement__title' }, copy.title),
+          copy.lines.map((line, index) => h(
             'p',
-            { className: 'dsh-autorestart-announcement__line' },
-            seconds === null
-              ? t('announcement.line2.generic')
-              : fill(t('announcement.line2'), { n: seconds }),
-          ),
-          h('p', { className: 'dsh-autorestart-announcement__line' }, t('announcement.line3')),
-          hidden
-            ? h('p', { className: 'dsh-autorestart-announcement__note' }, t('announcement.disabled'))
-            : null,
+            { key: 'line-' + index, className: 'dsh-autorestart-announcement__line' },
+            line,
+          )),
+          copy.note === ''
+            ? null
+            : h('p', { className: 'dsh-autorestart-announcement__note' }, copy.note),
           state.error === ''
             ? null
             : h('p', { className: 'dsh-autorestart-announcement__error', role: 'alert' }, state.error),
@@ -9761,9 +9562,9 @@
               className: 'dsh-autorestart-announcement__cta',
               'data-dsh-autorestart-announcement-ack': 'true',
               disabled: busy,
-              onClick: acknowledge,
+              onClick: () => acknowledge(entry.feature),
             },
-            t('announcement.button'),
+            copy.button,
           ),
         )
       }

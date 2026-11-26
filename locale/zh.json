@@ -330,8 +330,6 @@
       "plan": "干跑预览",
       "redetect": "重新检测",
       "deriveHelp": "帮我看看怎么重启",
-      "technical": "技术细节",
-      "technicalHint": "以下是插件实际会执行的命令",
       "previous": "撤销后会还原成",
       "app": "桌面版自带重启",
       "startup": "启动方式",

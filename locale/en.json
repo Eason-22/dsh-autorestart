@@ -330,8 +330,6 @@
       "plan": "Dry run",
       "redetect": "Detect again",
       "deriveHelp": "Help me find out how to restart",
-      "technical": "Technical details",
-      "technicalHint": "What the plugin would actually run",
       "previous": "What the undo restores",
       "app": "the desktop app itself",
       "startup": "How it was started",

@@ -410,8 +410,6 @@
     'settings.supervisor.status.container': '这里没有"登录时自启"这回事：由编排器负责',
     'settings.supervisor.redetect': '重新检测',
     'settings.supervisor.deriveHelp': '帮我看看怎么重启',
-    'settings.supervisor.technical': '技术细节',
-    'settings.supervisor.technicalHint': '以下是插件实际会执行的命令',
     'settings.supervisor.previous': '撤销后会还原成',
     'settings.supervisor.app': '桌面版自带重启',
     'settings.supervisor.startup': '启动方式',
@@ -954,8 +952,6 @@
     'settings.supervisor.status.container': "There is no 'at login' here: the orchestrator is in charge",
     'settings.supervisor.redetect': 'Detect again',
     'settings.supervisor.deriveHelp': 'Help me find out how to restart',
-    'settings.supervisor.technical': 'Technical details',
-    'settings.supervisor.technicalHint': 'What the plugin would actually run',
     'settings.supervisor.previous': 'What the undo restores',
     'settings.supervisor.app': 'the desktop app itself',
     'settings.supervisor.startup': 'How it was started',
@@ -6839,14 +6835,6 @@
         const [reportFallback, setReportFallback] = useState('')
         // The note under the backup path: copied, or "copy it by hand".
         const [pathNote, setPathNote] = useState('')
-        // Whether the "technical details" fold is open. It is NOT persisted:
-        // a fresh page starts closed, so nobody leaves technical text open by
-        // accident.
-        const [detailsOpen, setDetailsOpen] = useState(false)
-        // The two folds of the BACKUP group (user decision, 2026-11-02): the long
-        // explanation and the per-copy technical rows are collapsed by default,
-        // while every switch stays visible.
-        const [backupListDetailsOpen, setBackupListDetailsOpen] = useState(false)
         // THE WHOLE BACKUP BLOCK IS ONE FOLD (user decision, 2026-11-02): the
         // four switches stay visible, everything that only EXPLAINS the backups
         // (the count, the rules, the copy cards, the path and the per-plugin

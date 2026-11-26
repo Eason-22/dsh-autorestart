@@ -24,6 +24,14 @@
 
 那句话里的数字以前把你自己停的也算进去了，读起来像插件替你保管着。现在只数插件自己停的目标。文案一个字没改。
 
+### 四、清掉两处从来没起作用的残留代码
+
+设置页里曾有两个「折叠开关」的变量——一个本该管「技术细节」折叠，一个本该管备份组的明细折叠。**从写进代码那天起，没有任何地方读过或写过它们**，所以它们从来没有控制过任何东西。
+
+现在页面上的折叠都是浏览器原生的：备份那块由「备份详情」这一个折叠负责，其余折叠点一下就能开。所以问题不是「折叠坏了」，而是旧做法的残留——该删的是那两个变量，而不是给它们接上点击。
+
+这一版把它们删掉，连同两条没人读到的文字（「技术细节」「以下是插件实际会执行的命令」）。**页面一个字都不会变**，区别只在于：以后不会有人（或自动扫描）再指着这两行说「这里有个打不开的折叠」。
+
 ## English
 
 ### 1. No restart while the plugin market is downloading or installing
@@ -47,6 +55,14 @@ The record now says why the goal was taken away, and only that field decides: **
 ### 3. The pill counter "N goals parked" now counts only the plugin's own
 
 That number used to include goals you stopped yourself, which read as if the plugin was holding them for you. It now counts only the goals the plugin parked. The wording is unchanged.
+
+### 4. Two leftovers that never controlled anything are gone
+
+The settings page carried two "fold switch" variables — one meant for a "technical details" fold, one for a per-copy list inside the backup group. **No code ever read or wrote them**, so they never controlled anything.
+
+Every fold on the page is native `<details>`: the backup block is driven by the single "Backup details" fold, and the rest open on their own. Nothing was broken, then — those two variables were leftovers of an older design, and the right fix was to delete them rather than wire a click into them.
+
+They are removed here, together with two labels nobody read ("Technical details" / "What the plugin would actually run"). **The page renders exactly the same**; the only difference is that nobody — person or scanner — will point at those lines again and call the fold broken.
 
 ## 1.0.0 — 2026-11-25
 
